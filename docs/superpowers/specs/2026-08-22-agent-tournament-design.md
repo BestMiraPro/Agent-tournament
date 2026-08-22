@@ -301,7 +301,37 @@ Roster configuration assigns counts per model:
 
 Model IDs above are illustrative. The roster picker is populated from `GET /api/models`, which proxies whatever the running opencode server reports as authenticated and available — no model list is hardcoded anywhere in the codebase.
 
-Counts must sum to `populationSize`; the run cannot start if they do not. Because `model_id` is heritable, the realized mix drifts from the seed mix as selection proceeds; the UI charts model share per round.
+Counts must sum to `populationSize`; the run cannot start if they do not.
+
+**Default roster (20 agents), using only gateways verified live in §20:**
+
+```jsonc
+"roster": [
+  { "modelId": "opencode/muse-spark-1.2-contributor-free", "count": 5, "temperature": 0.7 },
+  { "modelId": "opencode/big-pickle",                      "count": 5, "temperature": 0.8 },
+  { "modelId": "opencode/nemotron-3.5-lightning-free",     "count": 5, "temperature": 0.9 },
+  { "modelId": "wandb/deepseek-ai/DeepSeek-V4-Flash",      "count": 5, "temperature": 0.7 }
+]
+```
+
+Fifteen of twenty agents run on free inference. Because `model_id` is heritable, this mix
+is only a starting distribution — if one model consistently wins, its share grows by
+selection, which doubles as a live benchmark of the models against each other on the
+user's own goal.
+
+**Judge default: `wandb/moonshotai/Kimi-K3`.** The judge is the one component where model
+strength changes outcome quality, since a noisy judge yields noisy fitness and weakens
+selection. Alternatives on the same gateway: `zai-org/GLM-5.2`, `deepseek-ai/DeepSeek-V4-Pro`,
+`Qwen/Qwen3-Coder-480B-A35B-Instruct`.
+
+**Reflection default: `wandb/deepseek-ai/DeepSeek-V4-Flash`.** Reflection is a short
+structured-output task, but it is the mutation operator, so quality here directly shapes
+evolution. Cheaper than the judge, stronger than the free tier.
+
+These three model choices are **defaults to validate empirically in Phase 2**, not
+benchmarked recommendations — no comparative evaluation of these specific models on
+judging or reflection tasks was performed. Phase 2 should A/B at least the judge against
+one alternative before long runs are trusted. Because `model_id` is heritable, the realized mix drifts from the seed mix as selection proceeds; the UI charts model share per round.
 
 **Cost tracking.** Token usage is read from opencode message responses and multiplied by a per-model price table in run config. A model with no price entry records cost 0 and sets a `pricing_missing` flag, surfaced in the UI so totals are never silently wrong.
 
