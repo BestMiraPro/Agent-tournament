@@ -284,7 +284,7 @@ Host port is ephemeral; the actual port is read back via `docker port`.
 
 **Containers persist for the life of the run**, not per round. PREPARE resets `/work` rather than recreating the container, so startup cost is paid once.
 
-**Sharding.** Above `maxContainers` (default 30), agents share containers, each using a separate session and subdirectory. Trades per-agent isolation for memory headroom; this is the path to a 100-agent population on one machine.
+**Sharding.** Above `maxContainers` (default 12 on this host, see §20), agents share containers, each using a separate session and subdirectory. Trades per-agent isolation for memory headroom; this is the path to a 100-agent population on one machine.
 
 ## 12. Providers and cost
 
@@ -361,7 +361,9 @@ interface RunConfig {
   concurrency: number               // 8
   agentTimeoutMs: number            // 600_000
   sandbox: 'docker' | 'local' | 'mock'
-  maxContainers: number             // 30
+  maxContainers: number             // 12 on this host, see §20
+  containerMemory: string           // '512m'
+  containerCpus: number             // 1
   seedDir: string | null
   roster: { modelId: string; count: number; temperature: number }[]
   judge: {
@@ -408,3 +410,44 @@ interface RunConfig {
 | Docker volume performance on Windows | Keep workspaces small; document the WSL2 backend as the faster path. |
 | Container memory at large populations | Sharding above `maxContainers`. |
 | Goal changed mid-run makes cross-round fitness incomparable | Round records its own goal; the fitness chart segments at goal changes rather than drawing a continuous line. |
+
+## 20. Verified environment (2026-08-22)
+
+Facts below were confirmed empirically on the target host, not assumed.
+
+**Runtimes.** Node 24.15.0, npm 11.12.1, Python 3.14.0, uv 0.8.22. OpenCode CLI 1.18.21
+installed globally via npm (`opencode-ai@latest`); the OpenCode desktop app was already
+present but ships no CLI, so the CLI was a required addition. Docker 29.5.3, daemon running.
+
+**Authenticated gateways.** `opencode auth list` reports one credential: Weights & Biases.
+No OpenCode Zen key is configured, yet 7 `opencode/*` models are available anyway — the Zen
+free tier requires no credential. 36 models total are reachable right now:
+
+- `opencode/*` free tier (7): `big-pickle`, `hy3-free`, `mimo-v2.5-free`,
+  `muse-spark-1.2-contributor-free`, `nemotron-3-ultra-free`,
+  `nemotron-3.5-lightning-free`, `x-preview-f-free`
+- `wandb/*` (29), including `deepseek-ai/DeepSeek-V4-Flash`, `deepseek-ai/DeepSeek-V4-Pro`,
+  `moonshotai/Kimi-K3`, `zai-org/GLM-5.2`, `MiniMaxAI/MiniMax-M3`,
+  `Qwen/Qwen3-Coder-480B-A35B-Instruct`, `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B`
+
+**Model IDs are fully qualified.** W&B models carry a vendor path segment
+(`wandb/deepseek-ai/DeepSeek-V4-Flash`, not `wandb/DeepSeek-V4-Flash`). Any parser that
+assumes a two-segment `provider/model` shape will break on these; treat everything after
+the first `/` as an opaque model identifier.
+
+**Tool use verified.** Both `opencode/muse-spark-1.2-contributor-free` and
+`wandb/deepseek-ai/DeepSeek-V4-Flash` were given the submission contract from §8 via
+`opencode run --dir <tmp> -m <model>` and both correctly wrote `SUBMISSION.md` with exact
+contents. The core agent mechanism works on free inference.
+
+**Docker memory ceiling: 7.18 GB.** This invalidates the original `maxContainers: 30` and
+`-m 1g` defaults — 20 containers at a 1 GB cap would oversubscribe the host badly. Revised
+defaults: `containerMemory: 512m`, `maxContainers: 12`. A 20-agent population therefore
+shards across 12 containers by default on this machine rather than getting one container
+each. Raising the Docker Desktop memory allocation is the lever if full per-agent isolation
+at 20+ agents is wanted later.
+
+**Cost consequence.** A 20-agent population drawn entirely from the Zen free tier costs
+nothing to run, making long multi-round evolution experiments viable. The judge is the one
+component where model strength materially affects outcome quality, since a noisy judge
+produces noisy fitness and undermines selection; budget there first.
