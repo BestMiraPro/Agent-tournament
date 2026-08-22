@@ -1,0 +1,8 @@
+node_modules/
+dist/
+runs/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
