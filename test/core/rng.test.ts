@@ -38,4 +38,14 @@ describe('makeRng', () => {
     expect(s1).toEqual(s2)
     expect([...s1].sort((x, y) => x - y)).toEqual(items)
   })
+
+  test('int throws for non-positive maxExclusive', () => {
+    const r = makeRng(5)
+    expect(() => r.int(0)).toThrow()
+  })
+
+  test('int(1) returns 0', () => {
+    const r = makeRng(5)
+    expect(r.int(1)).toBe(0)
+  })
 })

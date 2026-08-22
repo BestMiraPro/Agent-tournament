@@ -15,7 +15,10 @@ export function makeRng(seed: number): Rng {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
-  const int = (maxExclusive: number): number => Math.floor(next() * maxExclusive)
+  const int = (maxExclusive: number): number => {
+    if (maxExclusive <= 0) throw new Error('int: maxExclusive must be positive')
+    return Math.floor(next() * maxExclusive)
+  }
   return {
     next,
     int,
