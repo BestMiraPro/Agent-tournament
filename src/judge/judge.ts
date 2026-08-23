@@ -216,15 +216,41 @@ export class Judge {
     return { anon, byRef }
   }
 
+  /**
+   * Maps the model's rankings back to real agent IDs. The model's output is untrusted:
+   * it may omit a ref it was shown, duplicate a ref, or return a ref it was never shown.
+   * This must never let an agent silently vanish or be scored twice, and must never
+   * fabricate an agent that was never in byRef.
+   */
   private deanonymize(
     rankings: { ref: string; rank: number; score: number; rationale: string }[],
     byRef: Map<string, string>,
   ): JudgedScore[] {
-    return rankings
-      .flatMap((r) => {
-        const agentId = byRef.get(r.ref)
-        return agentId ? [{ agentId, rank: r.rank, score: r.score, rationaleMd: r.rationale }] : []
-      })
+    const seenRefs = new Set<string>()
+    const scoredByAgentId = new Map<string, JudgedScore>()
+
+    for (const r of rankings) {
+      if (seenRefs.has(r.ref)) continue // duplicate ref: keep only the first occurrence
+      seenRefs.add(r.ref)
+      const agentId = byRef.get(r.ref)
+      if (!agentId) continue // ref never shown to the judge: ignore, don't fabricate an agent
+      scoredByAgentId.set(agentId, { agentId, rank: r.rank, score: r.score, rationaleMd: r.rationale })
+    }
+
+    // Any agent shown to the judge but never mentioned in its response still gets a
+    // result — appended last with score 0 — rather than silently disappearing.
+    for (const agentId of byRef.values()) {
+      if (!scoredByAgentId.has(agentId)) {
+        scoredByAgentId.set(agentId, {
+          agentId,
+          rank: Number.MAX_SAFE_INTEGER,
+          score: 0,
+          rationaleMd: 'The judge returned no ranking for this submission.',
+        })
+      }
+    }
+
+    return [...scoredByAgentId.values()]
       .sort((a, b) => a.rank - b.rank)
       .map((s, i) => ({ ...s, rank: i + 1 }))
   }

@@ -27,6 +27,16 @@ function truncate(text: string, cap: number): string {
   return `${text.slice(0, half)}\n...[truncated]...\n${text.slice(-half)}`
 }
 
+/**
+ * Neutralizes any agent-controlled `<submission>` / `</submission>` marker so a
+ * submission body can never forge or close a `<submission ref="...">` block boundary.
+ * Only that specific tag name is touched — ordinary `<`/`>` in code or XML/HTML
+ * snippets is left exactly as written so the judge sees the real content.
+ */
+function escapeSubmissionMarkers(text: string): string {
+  return text.replace(/<\/?\s*submission/gi, (m) => `&lt;${m.slice(1)}`)
+}
+
 export function buildScoringPrompt(
   goalMd: string,
   criteriaMd: string,
@@ -37,7 +47,8 @@ export function buildScoringPrompt(
     const manifest = s.files.length > 0
       ? `\nFiles produced: ${s.files.map((f) => `${f.path} (${f.bytes}b)`).join(', ')}`
       : ''
-    return `<submission ref="${s.ref}">\n${truncate(s.submissionMd, charCap)}${manifest}\n</submission>`
+    const body = truncate(escapeSubmissionMarkers(s.submissionMd), charCap)
+    return `<submission ref="${s.ref}">\n${body}${manifest}\n</submission>`
   })
 
   return [
