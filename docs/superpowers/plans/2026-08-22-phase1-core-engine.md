@@ -71,7 +71,7 @@ Two deliberate changes, made for reasons worth stating rather than hiding:
     "@types/node": "^24.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "zod": "^3.24.1"
