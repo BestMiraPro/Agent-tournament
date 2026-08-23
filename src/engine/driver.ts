@@ -1,3 +1,4 @@
+import { serializeGenome } from '../core/genome.js'
 import { planSelection } from '../core/selection.js'
 import type { Genome, RunConfig } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
@@ -83,6 +84,11 @@ export class TournamentEngine {
         await this.d.sandbox.reset(h, { seedDir: config.seedDir ?? undefined })
         await this.d.sandbox.writeFile(h, 'NOTES.md', p.genome.notesMd)
         await this.d.sandbox.writeFile(h, 'GOAL.md', input.goalMd)
+        await this.d.sandbox.writeFile(
+          h,
+          '.opencode/agents/competitor.md',
+          serializeGenome(p.genome, { label: p.agent.label }),
+        )
         handles.set(p.agent.id, h)
       }
 

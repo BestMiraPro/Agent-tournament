@@ -93,5 +93,5 @@ export function makeMockEngine(opts: {
         : `attempt the goal, variant ${i}, focus on ${GOOD_KEYWORDS[i % GOOD_KEYWORDS.length]}`,
   })
 
-  return { db, repos, engine, config }
+  return { db, repos, engine, config, sandbox }
 }

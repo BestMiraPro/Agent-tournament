@@ -37,6 +37,24 @@ function escapeSubmissionMarkers(text: string): string {
   return text.replace(/<\/?\s*submission/gi, (m) => `&lt;${m.slice(1)}`)
 }
 
+/**
+ * Caps the number of manifest entries so a submission with an unbounded number of
+ * files cannot blow the judge's context or cost (the manifest is appended after
+ * `truncate` runs on the submission body, so it is otherwise uncapped). Each file
+ * path is agent-controlled and untrusted, so it goes through the same
+ * `<submission>`-marker escaping as the submission body itself.
+ */
+const MAX_MANIFEST_FILES = 50
+
+function buildManifest(files: readonly FileEntry[]): string {
+  if (files.length === 0) return ''
+  const shown = files.slice(0, MAX_MANIFEST_FILES)
+  const entries = shown.map((f) => `${escapeSubmissionMarkers(f.path)} (${f.bytes}b)`)
+  const remaining = files.length - shown.length
+  const suffix = remaining > 0 ? `, …and ${remaining} more` : ''
+  return `\nFiles produced: ${entries.join(', ')}${suffix}`
+}
+
 export function buildScoringPrompt(
   goalMd: string,
   criteriaMd: string,
@@ -44,9 +62,7 @@ export function buildScoringPrompt(
   charCap: number,
 ): string {
   const blocks = subs.map((s) => {
-    const manifest = s.files.length > 0
-      ? `\nFiles produced: ${s.files.map((f) => `${f.path} (${f.bytes}b)`).join(', ')}`
-      : ''
+    const manifest = buildManifest(s.files)
     const body = truncate(escapeSubmissionMarkers(s.submissionMd), charCap)
     return `<submission ref="${s.ref}">\n${body}${manifest}\n</submission>`
   })

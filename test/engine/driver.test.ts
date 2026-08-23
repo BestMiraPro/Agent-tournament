@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { makeMockEngine } from '../helpers/mock-engine.js'
+import { parseGenome } from '../../src/core/genome.js'
 
 describe('TournamentEngine', () => {
   test('seeds the population from the roster', async () => {
@@ -36,6 +37,24 @@ describe('TournamentEngine', () => {
     const scores = repos.scores.forRound(round.roundId)
     expect(scores).toHaveLength(6)
     expect(scores.some((s) => s.score === 0)).toBe(true)
+  })
+
+  test('writes the genome into the agent workspace so it can be read by an agent runner', async () => {
+    const { engine, repos, sandbox } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('test', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const agent = repos.agents.listActive(run.id)[0]!
+    const storedGenome = repos.genomes.forRound(agent.id, round.roundIdx)!
+
+    const handle = { agentId: agent.id, workspacePath: '', baseUrl: '' }
+    const written = await sandbox.readFile(handle, '.opencode/agents/competitor.md')
+    expect(written).not.toBeNull()
+
+    const parsed = parseGenome(written!)
+    expect(parsed.strategyMd).toBe(storedGenome.strategyMd)
+    expect(parsed.modelId).toBe(storedGenome.modelId)
+    expect(parsed.temperature).toBe(storedGenome.temperature)
   })
 
   test('records the resolved criteria on the round', async () => {
