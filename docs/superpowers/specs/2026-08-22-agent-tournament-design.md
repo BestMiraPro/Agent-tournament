@@ -434,6 +434,7 @@ interface RunConfig {
 | Risk | Mitigation |
 |---|---|
 | Homogenization: top-K visibility collapses diversity by ~round 5 | Track pairwise strategy distance; optional `diversityFloor` protecting the most distinct low performer from culling. Phase 5. |
+| **Culling may be net-negative when improvement comes from imitation** | Measured during Phase 1 implementation, not theorized: on a fitness landscape where agents do not interact, disabling culling and elitism entirely produced a *higher* final mean (62.76) than normal selection (55.62). Culling removes a weak agent's distinctive strategy from the pool that reflection imitates, and that diversity loss can outweigh the benefit of freeing a slot. This is the homogenization risk above, arriving one round earlier than expected and through a different mechanism. Phase 2 should A/B `bottomPct: 0` against the default on a real goal before assuming culling helps. |
 | Judge position and label bias | Anonymized refs, reshuffled each round. |
 | Strategy bloat across generations | Hard character cap enforced at reflection. |
 | Free Zen models rate-limiting at high concurrency | Concurrency knob, backoff, per-model retry accounting. |
