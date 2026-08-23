@@ -12,6 +12,25 @@ export function trueFitness(strategy: string): number {
   return (hits / GOOD_KEYWORDS.length) * 100
 }
 
+/**
+ * FNV-1a over the whole prompt. Used to derive a per-call RNG seed.
+ *
+ * Keying the RNG on prompt *length* (as this once did) made the reflection coin
+ * flip effectively population-wide: every agent in a round produces a prompt of
+ * near-identical length, so they all drew the same value. Worse, an agent whose
+ * strategy did not change re-derived the identical seed next round and drew the
+ * same value forever — a permanent deadlock. Hashing the full content gives each
+ * agent an independent draw while staying fully deterministic.
+ */
+function hashPrompt(s: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
+
 export class MockProvider implements Provider {
   constructor(private seed: number) {}
 
@@ -56,9 +75,17 @@ export class MockProvider implements Provider {
 
   /** Imitates one keyword found in top strategies but absent from its own. */
   private reflect(prompt: string): string {
-    const rng = makeRng(this.seed + prompt.length)
+    const rng = makeRng((this.seed ^ hashPrompt(prompt)) >>> 0)
     const own = /YOUR STRATEGY: (.*)/.exec(prompt)?.[1] ?? ''
-    const topBlock = prompt.split('TOP STRATEGY:').slice(1).join(' ')
+
+    // Only the `TOP STRATEGY:` lines themselves may donate keywords. Splitting on
+    // the marker instead swallowed the entire prompt tail — including the judge's
+    // meta-digest ("...stayed concise") — which handed every agent a free keyword
+    // regardless of what the leaders actually wrote. That leak let fitness climb
+    // even with selection switched off entirely.
+    const topBlock = [...prompt.matchAll(/^TOP STRATEGY: (.*)$/gm)]
+      .map((m) => m[1] ?? '')
+      .join(' ')
 
     const missing = GOOD_KEYWORDS.filter(
       (k) => topBlock.toLowerCase().includes(k) && !own.toLowerCase().includes(k),

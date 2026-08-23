@@ -157,6 +157,11 @@ export class TournamentEngine {
           }] : []
         })
 
+      // NOTE: the Reflector receives its allowed-model list via its constructor, not
+      // from here, so this driver deliberately derives nothing from config.roster.
+      // Task 21's CLI must pass `config.roster.map((r) => r.modelId)` when it builds
+      // the Reflector — the mock helper hardcodes ['mock/model'], so a mistake there
+      // would not be caught by these tests.
       const reflected = await runPool(plan.survivors, config.concurrency, async (agentId) => {
         const g = repos.genomes.forRound(agentId, roundIdx)!
         const s = byAgent.get(agentId)!
