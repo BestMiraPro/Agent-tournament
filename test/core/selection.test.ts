@@ -75,4 +75,23 @@ describe('planSelection', () => {
     expect(() => planSelection(ranked(20), { ...cfg, eliteCount: 10, topPct: 0.1 }))
       .toThrow(/eliteCount/i)
   })
+
+  test('clone parents cycle when there are more culled than top-band parents', () => {
+    const p = planSelection(ranked(20), { ...cfg, topPct: 0.1, bottomPct: 0.8 })
+    expect(p.clones.map((c) => c.parentAgentId).slice(0, 4)).toEqual(['a1', 'a2', 'a1', 'a2'])
+    expect(p.clones.length).toBe(16)
+  })
+
+  test('returns an empty plan for an empty population', () => {
+    const p = planSelection([], cfg)
+    expect(p).toEqual({ elite: [], survivors: [], culled: [], clones: [] })
+  })
+
+  test('throws when eliteCount is negative', () => {
+    expect(() => planSelection(ranked(20), { ...cfg, eliteCount: -1 })).toThrow(/eliteCount/i)
+  })
+
+  test('throws when topPct is NaN', () => {
+    expect(() => planSelection(ranked(20), { ...cfg, topPct: NaN })).toThrow(/topPct|finite/i)
+  })
 })

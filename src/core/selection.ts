@@ -37,6 +37,13 @@ export function planSelection(
   const n = ranked.length
   if (n === 0) return { elite: [], survivors: [], culled: [], clones: [] }
 
+  if (!Number.isInteger(cfg.eliteCount) || cfg.eliteCount < 0) {
+    throw new Error(`eliteCount must be a non-negative integer, got ${cfg.eliteCount}`)
+  }
+  if (!Number.isFinite(cfg.topPct) || !Number.isFinite(cfg.bottomPct)) {
+    throw new Error('topPct and bottomPct must be finite numbers')
+  }
+
   const sorted = [...ranked].sort((a, b) => a.rank - b.rank)
   const eliteCount = Math.min(cfg.eliteCount, n)
   // Floor of 1 (not of eliteCount): the top band must stay non-empty for tiny

@@ -61,4 +61,21 @@ describe('genome serialization', () => {
     ].join('\n')
     expect(() => parseGenome(md)).toThrow(/temperature/i)
   })
+
+  test('empty temperature value falls back to the 0.7 default', () => {
+    const md = [
+      '---',
+      'description: bad',
+      'model: wandb/deepseek-ai/DeepSeek-V4-Flash',
+      'temperature:',
+      'permission:',
+      '  edit: allow',
+      '  bash: allow',
+      '  webfetch: deny',
+      '---',
+      'body',
+      '',
+    ].join('\n')
+    expect(parseGenome(md).temperature).toBe(0.7)
+  })
 })
