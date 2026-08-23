@@ -3693,6 +3693,10 @@ git commit -m "test: prove mean fitness climbs across rounds"
 - Create: `src/cli.ts`
 - Test: `test/cli.test.ts`
 
+> **Reference code corrected after implementation.** Three defects were found and
+> fixed: the winner was read off the wrong agent, the entrypoint guard never fired
+> on Windows, and the Reflector's allowed-model list was hardcoded. See Self-review.
+
 - [ ] **Step 1: Write the failing test**
 
 ```typescript
@@ -3727,12 +3731,13 @@ describe('runTournamentCli', () => {
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `npx vitest run test/cli.test.ts`
-Expected: FAIL — cannot resolve `../src/cli.js`.
+Expected: FAIL - cannot resolve `../src/cli.js`.
 
 - [ ] **Step 3: Implement**
 
 ```typescript
 import { parseArgs } from 'node:util'
+import { pathToFileURL } from 'node:url'
 import { DEFAULT_CONFIG, type RunConfig } from './core/types.js'
 import { openDb } from './db/open.js'
 import { makeRepos } from './db/repos.js'
@@ -3740,7 +3745,7 @@ import { TournamentEngine } from './engine/driver.js'
 import { Reflector } from './evolution/reflect.js'
 import { Judge } from './judge/judge.js'
 import { MockAgentRunner } from './runtime/agent-runner.js'
-import { MockProvider } from './runtime/mock-provider.js'
+import { GOOD_KEYWORDS, MockProvider } from './runtime/mock-provider.js'
 import { MockSandbox } from './runtime/mock-sandbox.js'
 
 export interface CliOptions {
@@ -3776,17 +3781,28 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
     sandbox,
     runner: new MockAgentRunner(sandbox, opts.seed),
     judge: new Judge(provider, config.judge, opts.seed),
-    reflector: new Reflector(provider, config.reflect, ['mock/model']),
-    seedStrategy: (i) => `attempt the goal, variant ${i}`,
+    // Derived from the roster, never hardcoded: Reflector silently falls back to the
+    // current model for any model_id outside this list, so a hardcoded array would
+    // reject every legitimate model the moment Phase 2 supplies a real roster — and
+    // would do so without raising anything.
+    reflector: new Reflector(provider, config.reflect, config.roster.map((r) => r.modelId)),
+    // Each agent starts from a different keyword so imitation has something real to
+    // transfer. Uniform seeds leave nothing to imitate and the curve stays flat.
+    seedStrategy: (i) =>
+      `attempt the goal, variant ${i}, focus on ${GOOD_KEYWORDS[i % GOOD_KEYWORDS.length]}`,
   })
 
   const run = engine.createRun('cli', opts.goal)
   const rounds: CliOutput['rounds'] = []
+  let finalRoundId: string | null = null
+  let finalRoundIdx = 0
 
   for (let i = 0; i < opts.rounds; i++) {
     const r = await engine.runRound(run.id, { goalMd: opts.goal, criteriaMd: opts.criteria })
     const scores = repos.scores.forRound(r.roundId)
     const values = scores.map((s) => s.score)
+    finalRoundId = r.roundId
+    finalRoundIdx = r.roundIdx
     rounds.push({
       idx: r.roundIdx,
       meanScore: values.reduce((a, b) => a + b, 0) / values.length,
@@ -3795,23 +3811,31 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
     })
   }
 
-  const lastRoundIdx = repos.rounds.lastIdx(run.id)
-  const finalAgents = repos.agents.listActive(run.id)
-  const best = finalAgents
-    .map((a) => ({ a, g: repos.genomes.forRound(a.id, lastRoundIdx) }))
-    .find((x) => x.g !== null)!
+  // The winner is the rank-1 agent of the final round. Scanning `listActive` for the
+  // first agent that happens to have a genome returns whoever sorts first by label,
+  // which is an arbitrary competitor rather than the one that won.
+  const champion = finalRoundId ? repos.scores.forRound(finalRoundId)[0] : undefined
+  const championAgent = champion
+    ? repos.agents.listActive(run.id).find((a) => a.id === champion.agentId)
+    : undefined
+  const championGenome = champion
+    ? repos.genomes.forRound(champion.agentId, finalRoundIdx)
+    : null
 
   return {
     rounds,
     winner: {
-      label: best.a.label,
-      strategyMd: best.g!.strategyMd,
-      score: rounds.at(-1)?.bestScore ?? 0,
+      label: championAgent?.label ?? '',
+      strategyMd: championGenome?.strategyMd ?? '',
+      score: champion?.score ?? 0,
     },
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// `file://${process.argv[1]}` never matches on Windows: argv[1] is a backslash path
+// and import.meta.url is a percent-encoded file URL, so the CLI would silently
+// print nothing. pathToFileURL normalizes both sides.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { values } = parseArgs({
     options: {
       goal: { type: 'string', default: 'Produce the best possible answer.' },
@@ -3847,7 +3871,23 @@ Expected: PASS, 2 tests.
 - [ ] **Step 5: Run the tournament for real**
 
 Run: `npm run tournament -- --rounds 6 --population 12`
-Expected: six lines of output with `mean` rising from round 1 to round 6, then the winning strategy.
+Expected: six lines of output with `mean` rising from round 1 to round 6, then the
+winning strategy. Measured:
+
+```
+Round 1: mean 14.57  best 14.73
+Round 2: mean 25.28  best 29.00
+Round 3: mean 35.99  best 43.19
+Round 4: mean 47.90  best 57.45
+Round 5: mean 59.80  best 71.65
+Round 6: mean 71.70  best 85.83
+
+Winning strategy (competitor-12):
+attempt the goal, variant 11, focus on structure example iterate test concise verify
+```
+
+The winning strategy accumulating six of the seven `GOOD_KEYWORDS` is the visible
+end of the whole phase: nothing told the agents which words mattered.
 
 - [ ] **Step 6: Full suite and typecheck**
 
@@ -3901,6 +3941,16 @@ Two further changes make the test discriminate rather than merely pass:
 Both new assertions were verified against a deliberately broken engine: forcing `topPerformers: []` fails "mean fitness increases" **and** the fitness-signal control, and inverting the ranks fed to `planSelection` (cull the winners) fails the fitness-signal control while all five original assertions still pass. That last case is precisely what the original suite could not catch.
 
 **Still true, and worth stating plainly:** "mean fitness increases" *still* passes with selection disabled, and that is a property of the mock's fitness landscape rather than a remaining bug. Fitness here is a per-agent count of distinct keywords with no interaction between agents, so culling a weak agent helps no one directly, while removing it destroys keyword diversity that imitation feeds on — the two effects roughly cancel. Improvement in this world is driven by imitation, and the scrambled-rank control is what pins improvement to the fitness signal. A selection-specific test should assert selection *mechanics* directly (the elite genome is carried forward byte-identical; the culled set equals the lowest-ranked set) rather than trying to read selection off the fitness curve.
+
+**Three defects in Task 21's reference code (corrected in place).**
+
+- **The winner was read off the wrong agent.** `listActive` is ordered by `label`, so scanning it for the first agent with a genome returns whoever sorts first alphabetically, not whoever won. Measured at `--rounds 6 --population 12`: it reported `competitor-01` — **rank 9 of 12**, score 71.65 — while pairing that strategy with `bestScore` 85.83, an internally inconsistent report in which the headline number belongs to a different agent than the strategy printed beneath it. The winner is now the rank-1 agent of the final round, with its own score.
+- **The entrypoint guard never fired on Windows.** ``import.meta.url === `file://${process.argv[1]}` `` compares a percent-encoded file URL against a backslash path: `file:///C:/Users/DINISM%7E1/...` versus `C:\Users\DINISM~1\...`. It is unconditionally `false`, so `npm run tournament` completed the whole tournament and printed nothing. Now compared via `pathToFileURL(process.argv[1]).href`, verified `true` on this platform.
+- **The Reflector's allowed-model list was hardcoded** to `['mock/model']`. `Reflector` silently falls back to the current model for any `model_id` outside that list, so the moment Phase 2 supplies a real roster, model mutation would be disabled with no error and no log line — the failure mode is a feature that quietly stops working. Now derived from `config.roster.map((r) => r.modelId)`.
+
+Task 21 also inherited the uniform, keyword-free `seedStrategy` that made Task 20 vacuous; it now seeds diverse keywords like the test helper, which is what lets the CLI demonstrate a genuinely rising curve rather than a flat one.
+
+**Selection is covered by its mechanics, not by the fitness curve.** Because mean fitness cannot discriminate culling in this mock (see above), `test/engine/selection-mechanics.test.ts` asserts the two properties directly through the driver: the elite genome is carried into the next round byte-identical (`origin === 'elite'`, same `strategyMd`/`notesMd`, parented to the previous genome), and the retired set is exactly the bottom `floor(n * bottomPct)` by rank with no overlap into the top band. Task 5 and Task 18 already unit-test `planSelection` and `breed` in isolation; the gap was that nothing checked the driver wires them together. Verified with a mutation that rotates the agent-to-rank association inside the driver, leaving both components individually correct: **only these two tests fail, with all 119 others passing.**
 
 ---
 
