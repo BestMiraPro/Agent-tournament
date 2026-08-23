@@ -44,4 +44,21 @@ describe('genome serialization', () => {
   test('capStrategy cuts on a word boundary when one is near the cap', () => {
     expect(capStrategy('hello world foo', 12)).toBe('hello world')
   })
+
+  test('parse throws on non-numeric temperature', () => {
+    const md = [
+      '---',
+      'description: bad',
+      'model: wandb/deepseek-ai/DeepSeek-V4-Flash',
+      'temperature: not-a-number',
+      'permission:',
+      '  edit: allow',
+      '  bash: allow',
+      '  webfetch: deny',
+      '---',
+      'body',
+      '',
+    ].join('\n')
+    expect(() => parseGenome(md)).toThrow(/temperature/i)
+  })
 })

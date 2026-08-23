@@ -40,6 +40,7 @@ export function parseGenome(md: string): Genome {
   const modelId = scalar('model')
   if (!modelId) throw new Error('parseGenome: missing model')
   const temperature = Number(scalar('temperature') ?? '0.7')
+  if (!Number.isFinite(temperature)) throw new Error('parseGenome: invalid temperature')
 
   return { strategyMd: body.trim(), notesMd: '', modelId, temperature }
 }
