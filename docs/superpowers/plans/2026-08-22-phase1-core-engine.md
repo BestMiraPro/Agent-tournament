@@ -1507,6 +1507,25 @@ export function trueFitness(strategy: string): number {
   return (hits / GOOD_KEYWORDS.length) * 100
 }
 
+/**
+ * FNV-1a over the whole prompt. Used to derive a per-call RNG seed.
+ *
+ * Keying the RNG on prompt *length* (as this once did) made the reflection coin
+ * flip effectively population-wide: every agent in a round produces a prompt of
+ * near-identical length, so they all drew the same value. Worse, an agent whose
+ * strategy did not change re-derived the identical seed next round and drew the
+ * same value forever — a permanent deadlock. Hashing the full content gives each
+ * agent an independent draw while staying fully deterministic.
+ */
+function hashPrompt(s: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
+
 export class MockProvider implements Provider {
   constructor(private seed: number) {}
 
@@ -1551,9 +1570,16 @@ export class MockProvider implements Provider {
 
   /** Imitates one keyword found in top strategies but absent from its own. */
   private reflect(prompt: string): string {
-    const rng = makeRng(this.seed + prompt.length)
+    const rng = makeRng((this.seed ^ hashPrompt(prompt)) >>> 0)
     const own = /YOUR STRATEGY: (.*)/.exec(prompt)?.[1] ?? ''
-    const topBlock = prompt.split('TOP STRATEGY:').slice(1).join(' ')
+
+    // Only the `TOP STRATEGY:` lines themselves may donate keywords. Splitting on
+    // the marker instead swallowed the entire prompt tail — including the judge's
+    // meta-digest ("...stayed concise") — which handed every agent a free keyword
+    // regardless of what the leaders actually wrote. See Self-review.
+    const topBlock = [...prompt.matchAll(/^TOP STRATEGY: (.*)$/gm)]
+      .map((m) => m[1] ?? '')
+      .join(' ')
 
     const missing = GOOD_KEYWORDS.filter(
       (k) => topBlock.toLowerCase().includes(k) && !own.toLowerCase().includes(k),
@@ -3197,18 +3223,65 @@ describe('TournamentEngine', () => {
 ```typescript
 import { openDb } from '../../src/db/open.js'
 import { makeRepos } from '../../src/db/repos.js'
+import { makeRng } from '../../src/core/rng.js'
 import { DEFAULT_CONFIG, type RunConfig } from '../../src/core/types.js'
 import { TournamentEngine } from '../../src/engine/driver.js'
-import { Judge } from '../../src/judge/judge.js'
+import { Judge, type JudgeInput, type JudgeOutput } from '../../src/judge/judge.js'
 import { Reflector } from '../../src/evolution/reflect.js'
-import { MockProvider } from '../../src/runtime/mock-provider.js'
+import { GOOD_KEYWORDS, MockProvider } from '../../src/runtime/mock-provider.js'
 import { MockSandbox } from '../../src/runtime/mock-sandbox.js'
 import { MockAgentRunner } from '../../src/runtime/agent-runner.js'
+
+/**
+ * Judges normally, then randomly reassigns which agent occupies which rank/score
+ * slot. The score values still reflect the real submissions, but they are attached
+ * to the wrong agents, so selection and reflection act on noise instead of fitness.
+ *
+ * This exists so the evolution test can prove improvement comes from the fitness
+ * signal rather than from the loop merely running. Subclassing (rather than a plain
+ * wrapper object) is required because `Judge` has private fields and is therefore
+ * nominally typed.
+ */
+class ScrambledJudge extends Judge {
+  private scrambleSeed: number
+
+  constructor(
+    provider: MockProvider,
+    cfg: RunConfig['judge'],
+    seed: number,
+    scrambleSeed: number,
+  ) {
+    super(provider, cfg, seed)
+    this.scrambleSeed = scrambleSeed
+  }
+
+  override async score(
+    goalMd: string,
+    criteriaMd: string,
+    inputs: readonly JudgeInput[],
+  ): Promise<JudgeOutput> {
+    const out = await super.score(goalMd, criteriaMd, inputs)
+    const rng = makeRng(this.scrambleSeed + inputs.length)
+    // `out.scores` is already rank-ordered; keep the slots, shuffle the occupants.
+    const agentIds = rng.shuffle(out.scores.map((s) => s.agentId))
+    return {
+      ...out,
+      scores: out.scores.map((slot, i) => ({
+        agentId: agentIds[i]!,
+        rank: slot.rank,
+        score: slot.score,
+        rationaleMd: slot.rationaleMd,
+      })),
+    }
+  }
+}
 
 export function makeMockEngine(opts: {
   seed: number
   populationSize: number
   failFirst?: boolean
+  /** Destroy the fitness signal by permuting ranks after judging. */
+  scrambleRanks?: boolean
 }) {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
@@ -3223,15 +3296,24 @@ export function makeMockEngine(opts: {
 
   const provider = new MockProvider(opts.seed)
   const sandbox = new MockSandbox()
+  const judge = opts.scrambleRanks
+    ? new ScrambledJudge(provider, config.judge, opts.seed, opts.seed + 1000)
+    : new Judge(provider, config.judge, opts.seed)
+
   const engine = new TournamentEngine({
     repos,
     config,
     sandbox,
     runner: new MockAgentRunner(sandbox, opts.seed),
-    judge: new Judge(provider, config.judge, opts.seed),
+    judge,
     reflector: new Reflector(provider, config.reflect, ['mock/model']),
+    // Each agent starts with a DIFFERENT keyword so imitation has something real
+    // to transfer between agents. Uniform keyword-free seeds left nothing to
+    // imitate, which made the evolution test pass for the wrong reason.
     seedStrategy: (i) =>
-      opts.failFirst && i === 0 ? '__FAIL__' : `attempt the goal, variant ${i}`,
+      opts.failFirst && i === 0
+        ? '__FAIL__'
+        : `attempt the goal, variant ${i}, focus on ${GOOD_KEYWORDS[i % GOOD_KEYWORDS.length]}`,
   })
 
   return { db, repos, engine, config }
@@ -3405,7 +3487,11 @@ export class TournamentEngine {
           }] : []
         })
 
-      const allowedModels = config.roster.map((r) => r.modelId)
+      // NOTE: the Reflector receives its allowed-model list via its constructor, not
+      // from here, so this driver deliberately derives nothing from config.roster.
+      // Task 21's CLI must pass `config.roster.map((r) => r.modelId)` when it builds
+      // the Reflector — the mock helper hardcodes ['mock/model'], so a mistake there
+      // would not be caught by these tests.
       const reflected = await runPool(plan.survivors, config.concurrency, async (agentId) => {
         const g = repos.genomes.forRound(agentId, roundIdx)!
         const s = byAgent.get(agentId)!
@@ -3455,10 +3541,17 @@ git commit -m "feat: add round lifecycle state machine"
 
 ## Task 20: The evolution integration test
 
-This is the test the whole phase exists to make possible. If it passes, selection works. If it fails, the engine is broken in a way no unit test would reveal.
+This is the test the whole phase exists to make possible. If it passes, improvement is
+genuinely driven by the fitness signal. If it fails, the engine is broken in a way no
+unit test would reveal.
+
+> **This section was rewritten after implementation.** As originally written it was
+> vacuous: every assertion in it passed with selection switched off entirely. See
+> `## Self-review` for the two mock defects that caused it and the evidence.
 
 **Files:**
 - Test: `test/engine/evolution.integration.test.ts`
+- Depends on: the `scrambleRanks` option in `test/helpers/mock-engine.ts` (Task 19, Step 2)
 
 - [ ] **Step 1: Write the test**
 
@@ -3468,15 +3561,26 @@ import { makeMockEngine } from '../helpers/mock-engine.js'
 
 const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length
 
-async function runTournament(seed: number, rounds: number, population: number) {
-  const { engine, repos } = makeMockEngine({ seed, populationSize: population })
+async function runTournament(
+  seed: number,
+  rounds: number,
+  population: number,
+  opts: { scrambleRanks?: boolean } = {},
+) {
+  const { engine, repos } = makeMockEngine({
+    seed,
+    populationSize: population,
+    scrambleRanks: opts.scrambleRanks,
+  })
   const run = engine.createRun('evolution', 'produce the best answer')
   const perRound: number[][] = []
+  const roundIds: string[] = []
   for (let i = 0; i < rounds; i++) {
     const r = await engine.runRound(run.id, { goalMd: 'produce the best answer', criteriaMd: null })
     perRound.push(repos.scores.forRound(r.roundId).map((s) => s.score))
+    roundIds.push(r.roundId)
   }
-  return { perRound, repos, run }
+  return { perRound, repos, run, roundIds }
 }
 
 describe('evolution', () => {
@@ -3505,6 +3609,40 @@ describe('evolution', () => {
     for (const round of perRound) expect(round).toHaveLength(8)
   })
 
+  test('improvement depends on the fitness signal, not the loop running', async () => {
+    // Identical seeds, population and rounds in both arms. The only difference is
+    // that the scrambled arm reassigns ranks at random after judging, so selection
+    // and reflection act on noise instead of fitness. If the loop were improving
+    // for reasons unrelated to fitness, the two arms would end up level.
+    //
+    // Averaged over a few seeds rather than run on one: a single seed at
+    // population 8 is knife-edge (measured: 9 of 60 seeds show no separation, and
+    // one shows an exact tie), which would make this a coin flip dressed up as an
+    // assertion. Three seeds at population 12 separate on 30 of 30 batches tested,
+    // with a worst-case margin of 1.59.
+    const seeds = [42, 7, 1]
+    const arm = async (scrambleRanks: boolean) => {
+      const finals: number[] = []
+      for (const seed of seeds) {
+        const { perRound } = await runTournament(seed, 5, 12, { scrambleRanks })
+        finals.push(mean(perRound.at(-1)!))
+      }
+      return mean(finals)
+    }
+    expect(await arm(false)).toBeGreaterThan(await arm(true))
+  })
+
+  test('round 1 population contains multiple distinct strategies', async () => {
+    // Imitation can only transfer what some agent already has. If the seed
+    // strategies ever collapse back to identical text, the evolution tests above
+    // stop meaning anything, so pin the precondition here.
+    const { repos, run, roundIds } = await runTournament(42, 1, 8)
+    const strategies = repos.scores
+      .forRound(roundIds[0]!)
+      .map((s) => repos.genomes.forRound(s.agentId, 1)?.strategyMd ?? '')
+    expect(new Set(strategies).size).toBeGreaterThan(1)
+  })
+
   test('lineage is intact — every non-seed agent has a parent that existed', async () => {
     const { repos, run } = await runTournament(42, 4, 8)
     const active = repos.agents.listActive(run.id)
@@ -3518,9 +3656,22 @@ describe('evolution', () => {
 - [ ] **Step 2: Run the test**
 
 Run: `npx vitest run test/engine/evolution.integration.test.ts`
-Expected: PASS, 5 tests.
+Expected: PASS, 7 tests.
 
-If "mean fitness increases" fails, the bug is in one of three places, in order of likelihood: `planSelection` bands (check the elite is not being culled), `breed` (check clones inherit the *parent's* genome and not their own), or the reflection wiring (check `topPerformers` is actually populated — if it is empty, agents have nothing to imitate and fitness will be flat).
+If "mean fitness increases" fails, the bug is in one of three places, in order of
+likelihood: `planSelection` bands (check the elite is not being culled), `breed` (check
+clones inherit the *parent's* genome and not their own), or the reflection wiring (check
+`topPerformers` is actually populated — if it is empty, agents have nothing to imitate and
+fitness will be flat).
+
+If "improvement depends on the fitness signal" fails, ranking is not reaching selection or
+reflection: the true-ranking arm is doing no better than the arm whose ranks were
+scrambled. Check that `judged.scores` is rank-ordered where the driver slices `topPerformers`
+off the front of it, and that `planSelection` receives real ranks.
+
+**Do not fix either failure by adjusting the assertion.** Both were verified to fail
+against a deliberately broken engine (see Self-review), which is the only reason they are
+worth keeping.
 
 - [ ] **Step 3: Run the whole suite**
 
@@ -3732,6 +3883,25 @@ Deliberately **out of scope** for Phase 1, each landing in a later phase: real O
 - `Judge.deanonymize` (Task 15) originally trusted the model's `rankings` array to define the output set: an omitted ref silently dropped that agent from the population (`in=N, out=N-1`), and a duplicated ref scored one agent twice. It now dedupes by ref (first occurrence wins), ignores any ref the model returns that was never shown, and appends every agent the model never mentioned at the bottom with `score: 0` and an explicit rationale — so the postcondition "output agentIds == byRef agentIds, ranks 1..N each exactly once" always holds. `scoreBatched` already iterated `[...inputs]` directly and needed no change.
 - `buildScoringPrompt` (Task 14) originally interpolated `submissionMd` raw into `<submission ref="...">…</submission>` blocks. A submission containing a literal `</submission>` closed its own block early and could open a forged one — a real prompt-injection path against the exact component that determines evolutionary fitness, and one that selection pressure would plausibly discover on its own. Submission bodies are now scanned for `<submission` / `</submission` markers (case-insensitive, optional whitespace) and only those are neutralized to `&lt;submission` / `&lt;/submission`; ordinary `<`/`>` in code or XML/HTML snippets — legitimate submission content — passes through untouched.
 
+**The evolution test was vacuous as originally written (Task 10/19/20 reference code updated to match).**
+
+Task 20 claimed "if it passes, selection works." It did not test that. Measured after
+implementing Task 19: every assertion in Task 20 passed with elitism and culling switched
+off entirely (`eliteCount: 0, bottomPct: 0` — nothing culled, nothing cloned). Two mock
+defects caused it, both now fixed:
+
+- **`MockProvider.reflect` leaked keywords from the prompt tail.** `topBlock = prompt.split('TOP STRATEGY:').slice(1).join(' ')` swallowed everything after the first marker, including the judge's constant meta-digest `"Winners verified their work and stayed concise."`. Every reflecting agent therefore harvested `concise` regardless of what the leaders actually wrote — a per-agent freebie independent of ranking. Proven directly: with leaders holding zero keywords the agent still gained `concise` (fitness 0 → 14.29); neutralize only the meta-digest text and the gain vanishes. That freebie *was* the entire round-1→round-5 rise, and it explains the hard plateau at exactly one keyword (14.29) that the original setup showed from round 3 onward. Now parsed line-anchored via `/^TOP STRATEGY: (.*)$/gm`, so only leader strategies can donate keywords.
+- **The reflection RNG was keyed on `seed + prompt.length`.** All agents in a round produce near-identical prompt lengths, so the 80% imitation branch was a population-wide coin flip rather than N independent draws; and an agent whose strategy did not change re-derived the same seed next round and drew the same value forever. Seeds 22 and 134 deadlocked permanently flat (mean 0.23 and 0.25, unchanged across all 5 rounds) — 2 failures in a 200-seed sweep. Appending a single `!` to the goal string swung round-2 mean from 2.05 to 10.98, because trajectory depended on character count. Now keyed on an FNV-1a hash of the whole prompt: **0 failures in the same 200-seed sweep.**
+
+Two further changes make the test discriminate rather than merely pass:
+
+- **Seed strategies are now diverse** (each agent starts with a different `GOOD_KEYWORDS` entry). Uniform keyword-free seeds left nothing for imitation to transfer, so the only available improvement was the leak.
+- **A scrambled-rank control arm was added.** `makeMockEngine({ scrambleRanks: true })` wraps the judge and randomly reassigns which agent occupies which rank/score slot after judging, destroying the fitness signal while leaving the loop intact. The test asserts the true-ranking arm ends strictly higher. It averages three seeds at population 12 because a single seed at population 8 is knife-edge — measured 9 outright failures and 1 exact tie across 60 seeds, versus 30 of 30 batches separating with a worst-case margin of 1.59 when aggregated.
+
+Both new assertions were verified against a deliberately broken engine: forcing `topPerformers: []` fails "mean fitness increases" **and** the fitness-signal control, and inverting the ranks fed to `planSelection` (cull the winners) fails the fitness-signal control while all five original assertions still pass. That last case is precisely what the original suite could not catch.
+
+**Still true, and worth stating plainly:** "mean fitness increases" *still* passes with selection disabled, and that is a property of the mock's fitness landscape rather than a remaining bug. Fitness here is a per-agent count of distinct keywords with no interaction between agents, so culling a weak agent helps no one directly, while removing it destroys keyword diversity that imitation feeds on — the two effects roughly cancel. Improvement in this world is driven by imitation, and the scrambled-rank control is what pins improvement to the fitness signal. A selection-specific test should assert selection *mechanics* directly (the elite genome is carried forward byte-identical; the culled set equals the lowest-ranked set) rather than trying to read selection off the fitness curve.
+
 ---
 
 ## Definition of done
@@ -3741,3 +3911,4 @@ Deliberately **out of scope** for Phase 1, each landing in a later phase: real O
 - [ ] `npm run tournament -- --rounds 6 --population 12` shows mean fitness rising
 - [ ] `test/core/purity.test.ts` passes, proving `core/` has no I/O dependency
 - [ ] The evolution integration test passes deterministically on repeated runs
+- [ ] The evolution test still **fails** when ranks are scrambled — a test that passes with the thing it tests disabled is worse than no test
