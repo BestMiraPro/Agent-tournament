@@ -28,12 +28,19 @@ export function extractJson(text: string): unknown {
 /**
  * Parses model output against a schema, allowing exactly one repair attempt
  * that re-prompts with the parse error. More retries mean unbounded cost.
+ *
+ * Generic over the schema rather than over a bare value type: `z.ZodType<T>`
+ * desugars to `ZodType<T, ZodTypeDef, T>`, which forces T to the schema's
+ * INPUT type whenever input and output differ (`.default()`, `.transform()`,
+ * `.catch()`, `z.coerce.*`). safeParse returns the OUTPUT type, so binding to
+ * the input type mistypes every defaulted field as possibly-undefined.
  */
-export async function parseWithRepair<T>(
+export async function parseWithRepair<S extends z.ZodTypeAny>(
   raw: string,
-  schema: z.ZodType<T>,
+  schema: S,
   repair: (errorMessage: string) => Promise<string>,
-): Promise<T> {
+): Promise<z.output<S>> {
+  type T = z.output<S>
   const attempt = (text: string): { ok: true; value: T } | { ok: false; error: string } => {
     const json = extractJson(text)
     if (json === null) return { ok: false, error: 'no JSON object found in output' }
