@@ -685,7 +685,9 @@ export function planSelection(
 
   const sorted = [...ranked].sort((a, b) => a.rank - b.rank)
   const eliteCount = Math.min(cfg.eliteCount, n)
-  const topCount = Math.max(eliteCount, Math.floor(n * cfg.topPct))
+  // Floor at 1, NOT at eliteCount: using eliteCount here would make the guard
+  // below mathematically unreachable, since topCount would always be >= eliteCount.
+  const topCount = Math.max(1, Math.floor(n * cfg.topPct))
 
   if (cfg.eliteCount > topCount) {
     throw new Error(
