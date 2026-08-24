@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
+import { migrate } from './migrate.js'
 import { SCHEMA } from './schema.js'
 
 export type Db = DatabaseSync
@@ -7,5 +8,6 @@ export type Db = DatabaseSync
 export function openDb(path: string): Db {
   const db = new DatabaseSync(path)
   db.exec(SCHEMA)
+  migrate(db)
   return db
 }
