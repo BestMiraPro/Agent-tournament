@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Db } from './open.js'
 import type {
-  AgentRow, GenomeOrigin, GenomeRow, RoundStatus, RunConfig, ScoreRow,
+  AgentRow, GenomeOrigin, GenomeRow, JudgeMode, RoundStatus, RunConfig, ScoreRow, SubmissionStatus,
 } from '../core/types.js'
 
 const now = () => Date.now()
@@ -26,6 +26,9 @@ export interface RoundRow {
   judgeMode: string
   status: RoundStatus
   metaDigest: string | null
+  startedAt: number | null
+  endedAt: number | null
+  costUsd: number
 }
 
 export function makeRepos(db: Db) {
@@ -57,6 +60,7 @@ export function makeRepos(db: Db) {
           id: id(), runId: input.runId, idx: input.idx, goalMd: input.goalMd,
           criteriaMd: null, criteriaSource: 'generated', judgeMode: 'single_call',
           status: 'pending', metaDigest: null,
+          startedAt: null, endedAt: null, costUsd: 0,
         }
         db.prepare(
           'INSERT INTO rounds (id, run_id, idx, goal_md, criteria_source, judge_mode, status) VALUES (?,?,?,?,?,?,?)',
@@ -70,6 +74,7 @@ export function makeRepos(db: Db) {
           id: r.id, runId: r.run_id, idx: r.idx, goalMd: r.goal_md,
           criteriaMd: r.criteria_md, criteriaSource: r.criteria_source,
           judgeMode: r.judge_mode, status: r.status, metaDigest: r.meta_digest,
+          startedAt: r.started_at, endedAt: r.ended_at, costUsd: r.cost_usd,
         }
       },
       setStatus(roundId: string, status: RoundStatus): void {
@@ -85,6 +90,16 @@ export function makeRepos(db: Db) {
       lastIdx(runId: string): number {
         const r = db.prepare('SELECT MAX(idx) AS m FROM rounds WHERE run_id = ?').get(runId) as any
         return r?.m ?? 0
+      },
+      markStarted(roundId: string): void {
+        db.prepare('UPDATE rounds SET started_at = ? WHERE id = ?').run(now(), roundId)
+      },
+      markEnded(roundId: string, costUsd: number): void {
+        db.prepare('UPDATE rounds SET ended_at = ?, cost_usd = ? WHERE id = ?')
+          .run(now(), costUsd, roundId)
+      },
+      setJudgeMode(roundId: string, mode: JudgeMode): void {
+        db.prepare('UPDATE rounds SET judge_mode = ? WHERE id = ?').run(mode, roundId)
       },
     },
 
@@ -165,6 +180,60 @@ export function makeRepos(db: Db) {
         return rows.map((r) => ({
           roundId: r.round_id, agentId: r.agent_id, rank: r.rank,
           score: r.score, rationaleMd: r.rationale_md, band: r.band,
+        }))
+      },
+    },
+
+    submissions: {
+      create(input: {
+        roundId: string; agentId: string; genomeId: string
+        submissionMd: string | null; fileManifest: { path: string; bytes: number }[]
+        workspacePath: string; status: SubmissionStatus; errorText: string | null
+        tokensIn: number; tokensOut: number; tokensCacheRead: number; tokensCacheWrite: number
+        costUsd: number; durationMs: number
+      }): void {
+        db.prepare(
+          'INSERT INTO submissions (id, round_id, agent_id, genome_id, submission_md, file_manifest_json, workspace_path, status, error_text, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        ).run(
+          id(), input.roundId, input.agentId, input.genomeId, input.submissionMd,
+          JSON.stringify(input.fileManifest), input.workspacePath, input.status, input.errorText,
+          input.tokensIn, input.tokensOut, input.tokensCacheRead, input.tokensCacheWrite,
+          input.costUsd, input.durationMs,
+        )
+      },
+      forRound(roundId: string) {
+        const rows = db.prepare('SELECT * FROM submissions WHERE round_id = ?').all(roundId) as any[]
+        return rows.map((r) => ({
+          id: r.id, roundId: r.round_id, agentId: r.agent_id, genomeId: r.genome_id,
+          submissionMd: r.submission_md,
+          fileManifest: r.file_manifest_json ? JSON.parse(r.file_manifest_json) : [],
+          workspacePath: r.workspace_path, status: r.status, errorText: r.error_text,
+          tokensIn: r.tokens_in, tokensOut: r.tokens_out,
+          tokensCacheRead: r.tokens_cache_read, tokensCacheWrite: r.tokens_cache_write,
+          costUsd: r.cost_usd, durationMs: r.duration_ms,
+        }))
+      },
+      totalCost(roundId: string): number {
+        const r = db.prepare('SELECT SUM(cost_usd) AS c FROM submissions WHERE round_id = ?')
+          .get(roundId) as any
+        return r?.c ?? 0
+      },
+    },
+
+    events: {
+      append(input: {
+        runId: string; roundId: string | null; agentId: string | null
+        type: string; payload: unknown
+      }): void {
+        db.prepare(
+          'INSERT INTO events (run_id, round_id, agent_id, ts, type, payload_json) VALUES (?,?,?,?,?,?)',
+        ).run(input.runId, input.roundId, input.agentId, now(), input.type, JSON.stringify(input.payload))
+      },
+      forRun(runId: string) {
+        const rows = db.prepare('SELECT * FROM events WHERE run_id = ? ORDER BY id').all(runId) as any[]
+        return rows.map((r) => ({
+          id: r.id, runId: r.run_id, roundId: r.round_id, agentId: r.agent_id,
+          ts: r.ts, type: r.type, payload: JSON.parse(r.payload_json),
         }))
       },
     },

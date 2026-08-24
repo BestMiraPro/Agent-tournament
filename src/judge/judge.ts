@@ -4,6 +4,7 @@ import type { CriteriaSource, FileEntry, JudgeMode, RunConfig } from '../core/ty
 import type { Provider } from '../runtime/provider.js'
 import { parseWithRepair } from './parse.js'
 import { buildCriteriaPrompt, buildScoringPrompt } from './prompts.js'
+import { CRITERIA_JSON_SCHEMA, RANKING_JSON_SCHEMA } from './schemas.js'
 
 const RankingSchema = z.object({
   rankings: z.array(z.object({
@@ -43,11 +44,26 @@ export interface JudgeOutput {
   mode: JudgeMode
 }
 
+/**
+ * Goal-agnostic default criteria used only when live criteria generation fails
+ * after retries. Same `- **name** (weight N): description` shape resolveCriteria
+ * otherwise produces from a model's response, so downstream prompt-building code
+ * cannot tell the difference. Judging on this instead of goal-specific criteria is
+ * a real quality loss — see the `onWarning` callback below.
+ */
+export const FALLBACK_CRITERIA_MD = [
+  '- **correctness** (weight 0.4): The work is accurate and free of errors relative to the stated goal.',
+  '- **completeness** (weight 0.2): The work fully addresses the goal, leaving no required part undone.',
+  '- **clarity** (weight 0.2): The work is clearly organized and easy to understand.',
+  '- **goal adherence** (weight 0.2): The work stays faithful and directly responsive to the stated goal, without drifting into unrelated scope.',
+].join('\n')
+
 export class Judge {
   constructor(
     private provider: Provider,
     private cfg: RunConfig['judge'],
     private seed: number,
+    private onWarning?: (message: string) => void,
   ) {}
 
   async resolveCriteria(
@@ -57,28 +73,49 @@ export class Judge {
     if (userCriteria && userCriteria.trim().length > 0) {
       return { criteriaMd: userCriteria, source: 'user' }
     }
+    try {
+      const parsed = await this.withRetry(() => this.generateCriteria(goalMd))
+      const criteriaMd = parsed.criteria
+        .map((c) => `- **${c.name}** (weight ${c.weight})${c.description ? `: ${c.description}` : ''}`)
+        .join('\n')
+      return { criteriaMd, source: 'generated' }
+    } catch (e) {
+      // Mirrors Judge.score's single-call-to-batched fallback (spec §9): one bad
+      // reply from the criteria model must not kill the round, and resolveCriteria
+      // runs before scoring, so it would kill the round even earlier than that.
+      // Falling back silently would be worse than throwing, though — judging on
+      // generic criteria instead of goal-specific ones is a real quality loss, so
+      // it must be visible via onWarning rather than pass unnoticed.
+      const detail = e instanceof Error ? e.message : String(e)
+      this.onWarning?.(
+        `Judge.resolveCriteria: criteria generation failed after retries (${detail}); falling back to default criteria.`,
+      )
+      return { criteriaMd: FALLBACK_CRITERIA_MD, source: 'generated' }
+    }
+  }
+
+  private async generateCriteria(goalMd: string): Promise<z.output<typeof CriteriaSchema>> {
     const raw = await this.provider.complete({
       purpose: 'criteria',
       prompt: buildCriteriaPrompt(goalMd),
       modelId: this.cfg.modelId,
+      schema: CRITERIA_JSON_SCHEMA,
     })
-    const parsed = await parseWithRepair(raw, CriteriaSchema, (err) =>
+    return parseWithRepair(raw, CriteriaSchema, (err) =>
       this.provider.complete({
         purpose: 'criteria',
         prompt: `${buildCriteriaPrompt(goalMd)}\n\nYour previous reply failed to parse: ${err}. Reply with JSON only.`,
         modelId: this.cfg.modelId,
+        schema: CRITERIA_JSON_SCHEMA,
       }),
     )
-    const criteriaMd = parsed.criteria
-      .map((c) => `- **${c.name}** (weight ${c.weight})${c.description ? `: ${c.description}` : ''}`)
-      .join('\n')
-    return { criteriaMd, source: 'generated' }
   }
 
   async score(
     goalMd: string,
     criteriaMd: string,
     inputs: readonly JudgeInput[],
+    roundIdx = 0,
   ): Promise<JudgeOutput> {
     const judgeable = inputs.filter((i) => i.status === 'ok' && i.submissionMd.length > 0)
     const failed = inputs.filter((i) => !judgeable.includes(i))
@@ -94,14 +131,26 @@ export class Judge {
       }
     }
 
-    const mode: JudgeMode =
+    const chosen: JudgeMode =
       this.cfg.mode === 'auto'
         ? (judgeable.length <= this.cfg.singleCallMaxPopulation ? 'single_call' : 'batched_finals')
         : this.cfg.mode
 
-    const result = mode === 'single_call'
-      ? await this.scoreSingleCall(goalMd, criteriaMd, judgeable)
-      : await this.scoreBatched(goalMd, criteriaMd, judgeable)
+    let mode = chosen
+    let result: { scores: JudgedScore[]; metaDigest: string }
+
+    if (chosen === 'single_call') {
+      try {
+        result = await this.withRetry(() => this.scoreSingleCall(goalMd, criteriaMd, judgeable, roundIdx))
+      } catch {
+        // Spec §9: fall back to batched mode on single-call failure. One malformed reply
+        // from a real judge must not kill a multi-hour run.
+        mode = 'batched_finals'
+        result = await this.withRetry(() => this.scoreBatched(goalMd, criteriaMd, judgeable, roundIdx))
+      }
+    } else {
+      result = await this.withRetry(() => this.scoreBatched(goalMd, criteriaMd, judgeable, roundIdx))
+    }
 
     // Failed submissions never enter the judge's context; they are appended last.
     const scores = [
@@ -119,19 +168,38 @@ export class Judge {
 
   private async callJudge(prompt: string) {
     const raw = await this.provider.complete({
-      purpose: 'judge', prompt, modelId: this.cfg.modelId,
+      purpose: 'judge', prompt, modelId: this.cfg.modelId, schema: RANKING_JSON_SCHEMA,
     })
     return parseWithRepair(raw, RankingSchema, (err) =>
       this.provider.complete({
         purpose: 'judge',
         prompt: `${prompt}\n\nYour previous reply failed to parse: ${err}. Reply with JSON only.`,
         modelId: this.cfg.modelId,
+        schema: RANKING_JSON_SCHEMA,
       }),
     )
   }
 
-  private async scoreSingleCall(goalMd: string, criteriaMd: string, inputs: readonly JudgeInput[]) {
-    const { anon, byRef } = this.anonymize(inputs)
+  /** Spec §15: two retries before giving up on a judging strategy. */
+  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+    let lastError: unknown
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await fn()
+      } catch (e) {
+        lastError = e
+      }
+    }
+    throw lastError
+  }
+
+  private async scoreSingleCall(
+    goalMd: string,
+    criteriaMd: string,
+    inputs: readonly JudgeInput[],
+    roundIdx: number,
+  ) {
+    const { anon, byRef } = this.anonymize(inputs, roundIdx)
     const parsed = await this.callJudge(
       buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
     )
@@ -142,7 +210,12 @@ export class Judge {
   }
 
   /** Rank within batches, then rank the batch winners; non-finalists interpolate. */
-  private async scoreBatched(goalMd: string, criteriaMd: string, inputs: readonly JudgeInput[]) {
+  private async scoreBatched(
+    goalMd: string,
+    criteriaMd: string,
+    inputs: readonly JudgeInput[],
+    roundIdx: number,
+  ) {
     const rng = makeRng(this.seed)
     const shuffled = rng.shuffle(inputs)
     const batches: JudgeInput[][] = []
@@ -155,7 +228,7 @@ export class Judge {
     let digest = ''
 
     for (const batch of batches) {
-      const { anon, byRef } = this.anonymize(batch)
+      const { anon, byRef } = this.anonymize(batch, roundIdx)
       const parsed = await this.callJudge(
         buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
       )
@@ -172,7 +245,7 @@ export class Judge {
 
     const finalsOrder = new Map<string, number>()
     if (winners.length > 1) {
-      const { anon, byRef } = this.anonymize(winners)
+      const { anon, byRef } = this.anonymize(winners, roundIdx)
       const parsed = await this.callJudge(
         buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
       )
@@ -204,8 +277,11 @@ export class Judge {
     }
   }
 
-  private anonymize(inputs: readonly JudgeInput[]) {
-    const rng = makeRng(this.seed + inputs.length)
+  private anonymize(inputs: readonly JudgeInput[], roundIdx: number) {
+    // Round index must participate: population size is invariant, so seeding on it alone
+    // produced the same permutation every round and turned judge position bias into a
+    // persistent per-agent fitness bonus.
+    const rng = makeRng(this.seed + roundIdx * 7919 + inputs.length)
     const order = this.cfg.anonymize ? rng.shuffle(inputs) : [...inputs]
     const byRef = new Map<string, string>()
     const anon = order.map((inp, i) => {

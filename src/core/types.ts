@@ -119,7 +119,7 @@ export const DEFAULT_CONFIG: RunConfig = {
     { modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash', count: 5, temperature: 0.7 },
   ],
   judge: {
-    modelId: 'wandb/moonshotai/Kimi-K3',
+    modelId: 'wandb/zai-org/GLM-5.2',
     mode: 'auto',
     singleCallMaxPopulation: 25,
     batchSize: 5,

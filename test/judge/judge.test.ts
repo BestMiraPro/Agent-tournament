@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { Judge } from '../../src/judge/judge.js'
+import { FALLBACK_CRITERIA_MD, Judge } from '../../src/judge/judge.js'
 import { MockProvider } from '../../src/runtime/mock-provider.js'
 import { DEFAULT_CONFIG } from '../../src/core/types.js'
 import type { Provider } from '../../src/runtime/provider.js'
@@ -31,6 +31,56 @@ describe('Judge.resolveCriteria', () => {
     const r = await judge().resolveCriteria('goal', null)
     expect(r.source).toBe('generated')
     expect(r.criteriaMd).toContain('correctness')
+  })
+
+  test('user criteria short-circuits before the provider is ever called', async () => {
+    const provider: Provider = {
+      async complete() {
+        throw new Error('provider must not be called when user criteria are supplied')
+      },
+    }
+    const r = await new Judge(provider, cfg, 42).resolveCriteria('goal', 'my criteria')
+    expect(r).toEqual({ criteriaMd: 'my criteria', source: 'user' })
+  })
+
+  test('falls back to default criteria when generation fails after retries, and warns', async () => {
+    let calls = 0
+    const provider: Provider = {
+      async complete() {
+        calls++
+        throw new Error('StructuredOutputError Model did not produce structured output')
+      },
+    }
+    const warnings: string[] = []
+    const j = new Judge(provider, cfg, 42, (message) => warnings.push(message))
+    const r = await j.resolveCriteria('goal', null)
+
+    expect(r.source).toBe('generated')
+    expect(r.criteriaMd).toBe(FALLBACK_CRITERIA_MD)
+    expect(warnings.length).toBe(1)
+    // withRetry attempts 3 times; each attempt's parseWithRepair may add a repair
+    // call on a parse failure, but here the provider always throws before parsing,
+    // so exactly 3 calls are made in total.
+    expect(calls).toBe(3)
+  })
+
+  test('recovers on a later attempt without falling back or warning', async () => {
+    let calls = 0
+    const provider: Provider = {
+      async complete(req) {
+        calls++
+        if (calls < 3) throw new Error('transient')
+        return new MockProvider(1).complete(req)
+      },
+    }
+    const warnings: string[] = []
+    const j = new Judge(provider, cfg, 42, (message) => warnings.push(message))
+    const r = await j.resolveCriteria('goal', null)
+
+    expect(r.source).toBe('generated')
+    expect(r.criteriaMd).toContain('correctness')
+    expect(r.criteriaMd).not.toBe(FALLBACK_CRITERIA_MD)
+    expect(warnings).toEqual([])
   })
 })
 
@@ -152,5 +202,104 @@ describe('Judge.score — hardening against malformed judge rankings', () => {
 
     const ranks = res.scores.map((s) => s.rank).sort((x, y) => x - y)
     expect(ranks).toEqual(Array.from({ length: inputs.length }, (_, i) => i + 1))
+  })
+})
+
+describe('Judge resilience', () => {
+  const subs = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      agentId: `a${i}`, submissionMd: `work FITNESS=${i * 5}`, files: [], status: 'ok' as const,
+    }))
+
+  test('falls back to batched mode when the single call throws', async () => {
+    let calls = 0
+    const provider = {
+      complete: async (req: { prompt: string }) => {
+        calls++
+        // The single-call prompt contains every submission; batches contain few.
+        const count = (req.prompt.match(/<submission ref=/g) ?? []).length
+        if (count > 5) throw new Error('context overflow')
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    const j = new Judge(provider as never, { ...cfg, mode: 'auto' }, 42)
+    const res = await j.score('goal', 'criteria', subs(10))
+    expect(res.mode).toBe('batched_finals')
+    expect(res.scores).toHaveLength(10)
+    expect(calls).toBeGreaterThan(1)
+  })
+
+  test('retries the single call before falling back', async () => {
+    let attempts = 0
+    const provider = {
+      complete: async (req: { prompt: string }) => {
+        attempts++
+        if (attempts === 1) throw new Error('transient')
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    const j = new Judge(provider as never, cfg, 42)
+    const res = await j.score('goal', 'criteria', subs(3))
+    expect(res.mode).toBe('single_call')
+    expect(attempts).toBeGreaterThanOrEqual(2)
+  })
+
+  test('different rounds produce different anonymization orders', async () => {
+    const prompts: string[] = []
+    const provider = {
+      complete: async (req: { prompt: string }) => {
+        prompts.push(req.prompt)
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    const j = new Judge(provider as never, cfg, 42)
+    await j.score('goal', 'criteria', subs(5), 1)
+    await j.score('goal', 'criteria', subs(5), 2)
+    expect(prompts[0]).not.toBe(prompts[1])
+  })
+
+  test('the same round index reproduces the same order', async () => {
+    const prompts: string[] = []
+    const provider = {
+      complete: async (req: { prompt: string }) => {
+        prompts.push(req.prompt)
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    const j = new Judge(provider as never, cfg, 42)
+    await j.score('goal', 'criteria', subs(5), 3)
+    const j2 = new Judge(provider as never, cfg, 42)
+    await j2.score('goal', 'criteria', subs(5), 3)
+    expect(prompts[0]).toBe(prompts[1])
+  })
+})
+
+describe('Judge schema usage', () => {
+  test('passes the ranking schema to the provider', async () => {
+    let seenSchema: unknown = null
+    const provider = {
+      complete: async (req: { prompt: string; schema?: unknown }) => {
+        seenSchema = req.schema
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    await new Judge(provider as never, cfg, 42).score('goal', 'criteria', [
+      { agentId: 'a', submissionMd: 'work FITNESS=10', files: [], status: 'ok' },
+      { agentId: 'b', submissionMd: 'work FITNESS=90', files: [], status: 'ok' },
+    ])
+    expect(seenSchema).toBeTruthy()
+    expect((seenSchema as { required: string[] }).required).toContain('rankings')
+  })
+
+  test('passes the criteria schema when generating criteria', async () => {
+    let seenSchema: unknown = null
+    const provider = {
+      complete: async (req: { prompt: string; schema?: unknown }) => {
+        seenSchema = req.schema
+        return new MockProvider(1).complete({ purpose: 'criteria', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    await new Judge(provider as never, cfg, 42).resolveCriteria('goal', null)
+    expect((seenSchema as { required: string[] }).required).toContain('criteria')
   })
 })

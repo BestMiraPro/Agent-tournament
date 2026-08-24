@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS submissions (
   error_text TEXT,
   tokens_in INTEGER DEFAULT 0,
   tokens_out INTEGER DEFAULT 0,
+  tokens_cache_read INTEGER DEFAULT 0,
+  tokens_cache_write INTEGER DEFAULT 0,
   cost_usd REAL DEFAULT 0,
   duration_ms INTEGER,
   UNIQUE(round_id, agent_id)

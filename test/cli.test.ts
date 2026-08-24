@@ -24,3 +24,23 @@ describe('runTournamentCli', () => {
     expect(out.winner.strategyMd.length).toBeGreaterThan(0)
   })
 })
+
+describe('CLI mode selection', () => {
+  test('mock mode still runs and improves', async () => {
+    const out = await runTournamentCli({
+      goal: 'write a good answer', rounds: 3, population: 6, seed: 42,
+      dbPath: ':memory:', criteria: null, mode: 'mock',
+    })
+    expect(out.rounds).toHaveLength(3)
+    expect(out.rounds.at(-1)!.meanScore).toBeGreaterThan(out.rounds[0]!.meanScore)
+  })
+
+  test('real mode requires a workspace root', async () => {
+    await expect(
+      runTournamentCli({
+        goal: 'g', rounds: 1, population: 2, seed: 1,
+        dbPath: ':memory:', criteria: null, mode: 'real',
+      }),
+    ).rejects.toThrow(/workspaceRoot/i)
+  })
+})

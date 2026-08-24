@@ -319,10 +319,17 @@ is only a starting distribution — if one model consistently wins, its share gr
 selection, which doubles as a live benchmark of the models against each other on the
 user's own goal.
 
-**Judge default: `wandb/moonshotai/Kimi-K3`.** The judge is the one component where model
+**Judge default: `wandb/zai-org/GLM-5.2`.** The judge is the one component where model
 strength changes outcome quality, since a noisy judge yields noisy fitness and weakens
-selection. Alternatives on the same gateway: `zai-org/GLM-5.2`, `deepseek-ai/DeepSeek-V4-Pro`,
+selection. Alternatives on the same gateway: `deepseek-ai/DeepSeek-V4-Pro`,
 `Qwen/Qwen3-Coder-480B-A35B-Instruct`.
+
+`wandb/moonshotai/Kimi-K3` was the original default here, but a live-server spike found
+it listed as available and yet returning a 404 on every call — listed-but-not-callable,
+not merely weak. `zai-org/GLM-5.2` was verified callable with structured output and
+correctly ranked a real 3-way comparison, so it replaced Kimi-K3 as the default. This is
+exactly the failure mode `validateRosterModels`'s pre-flight check now catches before a
+run starts, rather than after agents have already run.
 
 **Reflection default: `wandb/deepseek-ai/DeepSeek-V4-Flash`.** Reflection is a short
 structured-output task, but it is the mutation operator, so quality here directly shapes

@@ -47,3 +47,14 @@ describe('MockAgentRunner', () => {
     expect(await sb.readFile(h, 'SUBMISSION.md')).toBeNull()
   })
 })
+
+describe('AgentRunResult shape', () => {
+  test('MockAgentRunner reports zeroed cost and cache fields', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    const res = await new MockAgentRunner(sb, 1).run(h, ctx('verify'))
+    expect(res.costUsd).toBe(0)
+    expect(res.tokensCacheRead).toBe(0)
+    expect(res.tokensCacheWrite).toBe(0)
+  })
+})
