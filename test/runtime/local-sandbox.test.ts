@@ -105,4 +105,10 @@ describe('LocalSandbox', () => {
     const h = await sb.provision('a1', {})
     await expect(sb.writeFile(h, '../escape.md', 'x')).rejects.toThrow(/escape|outside/i)
   })
+
+  test('endpoint returns an empty base url, since one server serves every agent', async () => {
+    const sb = new LocalSandbox(await tmp())
+    const h = await sb.provision('a1', {})
+    expect(sb.endpoint(h)).toEqual({ baseUrl: '' })
+  })
 })

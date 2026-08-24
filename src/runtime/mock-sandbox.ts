@@ -48,6 +48,10 @@ export class MockSandbox implements Sandbox {
     }))
   }
 
+  endpoint(handle: AgentHandle): { baseUrl: string } {
+    return { baseUrl: handle.baseUrl }
+  }
+
   async teardown(handle: AgentHandle): Promise<void> {
     this.spaces.delete(handle.agentId)
   }

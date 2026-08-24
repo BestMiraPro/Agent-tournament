@@ -47,4 +47,10 @@ describe('MockSandbox', () => {
     await sb.teardown(h)
     await expect(sb.readFile(h, 'X.md')).rejects.toThrow(/torn down/i)
   })
+
+  test('endpoint returns the handle base url', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    expect(sb.endpoint(h)).toEqual({ baseUrl: h.baseUrl })
+  })
 })
