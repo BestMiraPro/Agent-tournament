@@ -4,6 +4,7 @@ import type { Genome, RunConfig } from '../core/types.js'
 import { parseWithRepair } from '../judge/parse.js'
 import type { Provider } from '../runtime/provider.js'
 import { buildReflectPrompt, type ReflectInput } from './prompts.js'
+import { REFLECT_JSON_SCHEMA } from './schemas.js'
 
 const ReflectSchema = z.object({
   strategy_md: z.string(),
@@ -17,11 +18,14 @@ export type ReflectRequest = Omit<ReflectInput, 'strategyCharCap'> & {
   currentTemperature: number
 }
 
+export type ModelRejectionListener = (e: { agentModel: string; requested: string }) => void
+
 export class Reflector {
   constructor(
     private provider: Provider,
     private cfg: RunConfig['reflect'],
     private allowedModels: readonly string[],
+    private onModelRejected?: ModelRejectionListener,
   ) {}
 
   async reflect(req: ReflectRequest): Promise<Genome> {
@@ -37,13 +41,14 @@ export class Reflector {
     let parsed
     try {
       const raw = await this.provider.complete({
-        purpose: 'reflect', prompt, modelId: this.cfg.modelId,
+        purpose: 'reflect', prompt, modelId: this.cfg.modelId, schema: REFLECT_JSON_SCHEMA,
       })
       parsed = await parseWithRepair(raw, ReflectSchema, (err) =>
         this.provider.complete({
           purpose: 'reflect',
           prompt: `${prompt}\n\nYour previous reply failed to parse: ${err}. Reply with JSON only.`,
           modelId: this.cfg.modelId,
+          schema: REFLECT_JSON_SCHEMA,
         }),
       )
     } catch {
@@ -51,12 +56,15 @@ export class Reflector {
       return fallback
     }
 
-    const modelId =
-      this.cfg.allowModelMutation &&
-      parsed.model_id &&
-      this.allowedModels.includes(parsed.model_id)
-        ? parsed.model_id
-        : req.currentModelId
+    let modelId = req.currentModelId
+    if (this.cfg.allowModelMutation && parsed.model_id) {
+      if (this.allowedModels.includes(parsed.model_id)) {
+        modelId = parsed.model_id
+      } else {
+        // Silent rejection would disable model mutation invisibly.
+        this.onModelRejected?.({ agentModel: req.currentModelId, requested: parsed.model_id })
+      }
+    }
 
     const temperature =
       parsed.temperature === undefined

@@ -60,3 +60,23 @@ describe('Reflector', () => {
     expect(out.modelId).toBe('m')
   })
 })
+
+describe('Reflector observability', () => {
+  test('reports a rejected model instead of dropping it silently', async () => {
+    const rejected: { agentModel: string; requested: string }[] = []
+    const rogue = { complete: async () => JSON.stringify({ strategy_md: 'ok', notes_md: '', model_id: 'evil/model' }) }
+    const r = new Reflector(rogue as never, cfg, ['m'], (e) => rejected.push(e))
+    const out = await r.reflect({ ...base, currentModelId: 'm', currentTemperature: 0.7 })
+    expect(out.modelId).toBe('m')
+    expect(rejected).toEqual([{ agentModel: 'm', requested: 'evil/model' }])
+  })
+
+  test('does not report when the requested model is allowed', async () => {
+    const rejected: unknown[] = []
+    const ok = { complete: async () => JSON.stringify({ strategy_md: 'ok', notes_md: '', model_id: 'm2' }) }
+    const r = new Reflector(ok as never, cfg, ['m', 'm2'], () => rejected.push(1))
+    const out = await r.reflect({ ...base, currentModelId: 'm', currentTemperature: 0.7 })
+    expect(out.modelId).toBe('m2')
+    expect(rejected).toHaveLength(0)
+  })
+})
