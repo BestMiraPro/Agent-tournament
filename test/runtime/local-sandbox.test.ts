@@ -72,6 +72,22 @@ describe('LocalSandbox', () => {
     ])
   })
 
+  test('listFiles excludes .opencode plumbing but keeps real dotfiles and the genome readable', async () => {
+    const sb = new LocalSandbox(await tmp())
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'work product')
+    await sb.writeFile(h, 'src/main.ts', 'console.log(1)')
+    await sb.writeFile(h, '.gitignore', 'node_modules/')
+    await sb.writeFile(h, '.opencode/agents/competitor.md', 'genome')
+    await sb.writeFile(h, '.opencode/node_modules/x/y.js', 'module.exports = {}')
+
+    const paths = (await sb.listFiles(h)).map((f) => f.path).sort()
+    expect(paths).toEqual(['.gitignore', 'SUBMISSION.md', 'src/main.ts'])
+
+    // writeFile/readFile must still reach inside .opencode — only listFiles changes.
+    expect(await sb.readFile(h, '.opencode/agents/competitor.md')).toBe('genome')
+  })
+
   test('teardown marks the handle unusable but preserves files on disk', async () => {
     const root = await tmp()
     const sb = new LocalSandbox(root)

@@ -82,6 +82,13 @@ export class LocalSandbox implements Sandbox {
         return
       }
       for (const e of entries) {
+        // `.opencode` is runtime plumbing we ourselves write into the agent's workspace
+        // (the genome, and OpenCode's own installed node_modules). It must stay writable
+        // and readable — writeFile/readFile are untouched — but listFiles feeds the
+        // judge's file manifest, and hundreds of node_modules paths would crowd out the
+        // agent's actual output there. Only this literal directory name is skipped;
+        // other dotfiles (.gitignore, .env.example, ...) are real agent output and stay.
+        if (e.isDirectory() && e.name === '.opencode') continue
         const full = join(dir, e.name)
         if (e.isDirectory()) {
           await walk(full)
