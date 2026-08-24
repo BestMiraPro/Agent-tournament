@@ -123,14 +123,34 @@ Failures:
 | `opencode/muse-spark-1.2-contributor-free` | 400 on structured output — **but works fine as a plain agent** |
 | `opencode/nemotron-3-ultra-free` | "Model did not produce structured output" |
 | `wandb/OpenPipe/Qwen3-14B-Instruct` | ContextOverflowError — opencode's ~8k system prompt exceeds its limit |
-| `wandb/JetBrains/Mellum2-12B-A2.5B-Instruct` | fetch failed |
-| `wandb/deepseek-ai/DeepSeek-V3.1` | fetch failed |
-| `wandb/Qwen/Qwen3.6-35B-A3B` | fetch failed |
-| `wandb/meta-llama/Llama-3.1-8B-Instruct` | fetch failed |
-| `wandb/ibm-granite/granite-4.1-8b` | fetch failed |
+| `wandb/JetBrains/Mellum2-12B-A2.5B-Instruct` | fetch failed on first probe |
+| `wandb/deepseek-ai/DeepSeek-V3.1` | fetch failed on first probe |
+| `wandb/Qwen/Qwen3.6-35B-A3B` | fetch failed on first probe |
+| `wandb/meta-llama/Llama-3.1-8B-Instruct` | fetch failed on first probe |
+| `wandb/ibm-granite/granite-4.1-8b` | fetch failed on first probe |
 
 **`wandb/moonshotai/Kimi-K3` was the design spec's default judge model.** It 404s. Phase 2 would have
 failed on its first real run with an opaque error.
+
+**The five `fetch failed` models are not all actually dead.** Re-probing them found the failure was
+transient for four of the five:
+
+| model | first probe | retry |
+|---|---|---|
+| `wandb/deepseek-ai/DeepSeek-V3.1` | fetch failed | OK (plain) / OK (structured) |
+| `wandb/Qwen/Qwen3.6-35B-A3B` | fetch failed | OK (plain) / OK (structured) |
+| `wandb/ibm-granite/granite-4.1-8b` | fetch failed | OK (plain) / OK (structured) |
+| `wandb/JetBrains/Mellum2-12B-A2.5B-Instruct` | fetch failed | OK (plain) / fails (structured) |
+| `wandb/meta-llama/Llama-3.1-8B-Instruct` | fetch failed | THREW / THREW — genuinely dead |
+
+Only `wandb/meta-llama/Llama-3.1-8B-Instruct` is consistently unreachable. The other four are usable,
+and `wandb/JetBrains/Mellum2-12B-A2.5B-Instruct` joins the worker-only capability class alongside
+`opencode/muse-spark-1.2-contributor-free` and `opencode/nemotron-3-ultra-free` (plain text works,
+structured output does not).
+
+Transient transport failures like these are common enough — four of five `fetch failed` results turned
+out to be spurious — that model validation must retry a transport-level failure before concluding a
+model is unusable.
 
 **Two distinct capability classes:**
 
