@@ -11,8 +11,11 @@ import { GOOD_KEYWORDS, MockProvider } from './runtime/mock-provider.js'
 import { MockSandbox } from './runtime/mock-sandbox.js'
 import { LocalSandbox } from './runtime/local-sandbox.js'
 import type { Provider } from './runtime/provider.js'
+import { runPool } from './runtime/pool.js'
 import type { Sandbox } from './runtime/sandbox.js'
 import { OpenCodeAgentRunner } from './runtime/opencode/agent-runner.js'
+import { validateModel, summarizeValidation, type ModelRole } from './runtime/opencode/capability.js'
+import type { OpenCodeClient } from './runtime/opencode/client.js'
 import { OpenCodeProvider } from './runtime/opencode/provider.js'
 import { attachServer, startServer, type ServerHandle } from './runtime/opencode/server.js'
 
@@ -29,6 +32,74 @@ export interface CliOptions {
   judgeModel?: string
   reflectModel?: string
   workerModels?: string[]
+  /**
+   * Pre-flight capability validation of every distinct (model, role) pair before a real
+   * run starts. Defaults to true in real mode. Mock mode never consults this flag at all —
+   * mock models are not real, so there is nothing to probe. Set to `false` to skip probing
+   * (e.g. when the caller has already validated the roster out of band).
+   */
+  validateModels?: boolean
+}
+
+export interface ValidateRosterOptions {
+  /** `false` skips validation entirely — no client calls are made. Defaults to true. */
+  validateModels?: boolean
+  /** Bounded concurrency for the probe pool. Defaults to 4. */
+  concurrency?: number
+}
+
+/**
+ * Pre-flight checks every distinct (model, role) pair a run will actually use, so an
+ * unusable model fails loudly before any agent runs or money is spent, instead of dying
+ * mid-round with an opaque provider error.
+ *
+ * Distinct by (modelId, role): the same model listed under several roster entries is
+ * probed once for the 'worker' role, but a model that is both a roster worker and the
+ * judge is probed once per role, because capability differs by role (a model can answer
+ * as a worker yet fail to produce structured output as a judge or reflector).
+ */
+export async function validateRosterModels(
+  client: OpenCodeClient,
+  directory: string,
+  config: RunConfig,
+  opts: ValidateRosterOptions = {},
+): Promise<void> {
+  if (opts.validateModels === false) return
+
+  const seen = new Set<string>()
+  const probes: { modelId: string; role: ModelRole }[] = []
+  const addProbe = (modelId: string, role: ModelRole) => {
+    const key = `${modelId} ${role}`
+    if (seen.has(key)) return
+    seen.add(key)
+    probes.push({ modelId, role })
+  }
+  for (const entry of config.roster) addProbe(entry.modelId, 'worker')
+  addProbe(config.judge.modelId, 'judge')
+  addProbe(config.reflect.modelId, 'reflect')
+
+  const results = await runPool(probes, opts.concurrency ?? 4, (p) =>
+    validateModel(client, directory, p.modelId, p.role),
+  )
+
+  const validations = results.map((r, i) =>
+    r.ok
+      ? r.value
+      : {
+          modelId: probes[i]!.modelId,
+          role: probes[i]!.role,
+          ok: false as const,
+          reason: r.error.message,
+        },
+  )
+
+  const { unusable } = summarizeValidation(validations)
+  if (unusable.length > 0) {
+    const lines = unusable.map((u) => `  - ${u.modelId} as ${u.role}: ${u.reason}`).join('\n')
+    throw new Error(
+      `Model validation failed before the run started — ${unusable.length} model/role pair(s) unusable:\n${lines}`,
+    )
+  }
 }
 
 export interface CliOutput {
@@ -91,44 +162,53 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
   const repos = makeRepos(db)
   const mode = opts.mode ?? 'mock'
 
-  let config: RunConfig
-  let sandbox: Sandbox
-  let provider: Provider
-  let runner: AgentRunner
   // Stops whatever server buildRealDeps started/attached to. Undefined in mock mode,
-  // where there is no process to stop.
+  // where there is no process to stop. Declared outside the try so the finally below
+  // can still reach it if validation (or anything else after buildRealDeps) throws.
   let stopServer: (() => Promise<void>) | undefined
 
-  if (mode === 'real') {
-    const workerModels =
-      opts.workerModels && opts.workerModels.length > 0 ? opts.workerModels : [DEFAULT_REAL_WORKER_MODEL]
-    config = {
-      ...DEFAULT_CONFIG,
-      populationSize: opts.population,
-      sandbox: 'local',
-      roster: buildRoster(workerModels, opts.population, 0.7),
-      judge: { ...DEFAULT_CONFIG.judge, modelId: opts.judgeModel ?? DEFAULT_REAL_JUDGE_MODEL },
-      reflect: { ...DEFAULT_CONFIG.reflect, modelId: opts.reflectModel ?? DEFAULT_REAL_REFLECT_MODEL },
-    }
-
-    const built = await buildRealDeps(opts, config)
-    sandbox = built.sandbox
-    provider = built.provider
-    runner = built.runner
-    stopServer = built.server.stop
-  } else {
-    config = {
-      ...DEFAULT_CONFIG,
-      populationSize: opts.population,
-      sandbox: 'mock',
-      roster: [{ modelId: 'mock/model', count: opts.population, temperature: 0.7 }],
-    }
-    provider = new MockProvider(opts.seed)
-    sandbox = new MockSandbox()
-    runner = new MockAgentRunner(sandbox, opts.seed)
-  }
-
   try {
+    let config: RunConfig
+    let sandbox: Sandbox
+    let provider: Provider
+    let runner: AgentRunner
+
+    if (mode === 'real') {
+      const workerModels =
+        opts.workerModels && opts.workerModels.length > 0 ? opts.workerModels : [DEFAULT_REAL_WORKER_MODEL]
+      config = {
+        ...DEFAULT_CONFIG,
+        populationSize: opts.population,
+        sandbox: 'local',
+        roster: buildRoster(workerModels, opts.population, 0.7),
+        judge: { ...DEFAULT_CONFIG.judge, modelId: opts.judgeModel ?? DEFAULT_REAL_JUDGE_MODEL },
+        reflect: { ...DEFAULT_CONFIG.reflect, modelId: opts.reflectModel ?? DEFAULT_REAL_REFLECT_MODEL },
+      }
+
+      const built = await buildRealDeps(opts, config)
+      sandbox = built.sandbox
+      provider = built.provider
+      runner = built.runner
+      stopServer = built.server.stop
+
+      // Pre-flight: fail fast and legibly before any agent runs or money is spent,
+      // rather than mid-round with an opaque provider error. Mock mode never reaches
+      // this branch at all, so it never probes anything.
+      await validateRosterModels(built.server.client, opts.workspaceRoot!, config, {
+        validateModels: opts.validateModels,
+      })
+    } else {
+      config = {
+        ...DEFAULT_CONFIG,
+        populationSize: opts.population,
+        sandbox: 'mock',
+        roster: [{ modelId: 'mock/model', count: opts.population, temperature: 0.7 }],
+      }
+      provider = new MockProvider(opts.seed)
+      sandbox = new MockSandbox()
+      runner = new MockAgentRunner(sandbox, opts.seed)
+    }
+
     const engine = new TournamentEngine({
       repos,
       config,
@@ -208,6 +288,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       'judge-model': { type: 'string' },
       'reflect-model': { type: 'string' },
       'worker-models': { type: 'string' },
+      'no-validate-models': { type: 'boolean', default: false },
     },
   })
 
@@ -226,6 +307,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     workerModels: values['worker-models']
       ? values['worker-models'].split(',').map((s) => s.trim()).filter((s) => s.length > 0)
       : undefined,
+    validateModels: values['no-validate-models'] ? false : undefined,
   })
 
   console.log(`\nGoal: ${values.goal}\n`)
