@@ -1,6 +1,37 @@
 import { describe, expect, test } from 'vitest'
-import { classifyProbe, summarizeValidation, validateModel } from '../../../src/runtime/opencode/capability.js'
+import {
+  classifyProbe,
+  PROBE_SCHEMA,
+  summarizeValidation,
+  validateModel,
+} from '../../../src/runtime/opencode/capability.js'
 import type { OpenCodeClient } from '../../../src/runtime/opencode/client.js'
+
+describe('PROBE_SCHEMA', () => {
+  test('is structurally representative of the real schemas: a nested array of objects', () => {
+    // The real capability failure this guards against: wandb/zai-org/GLM-5.2 passed a
+    // probe using a flat {ok: string} schema, then failed on the real CRITERIA_JSON_SCHEMA,
+    // which nests an array of objects with mixed (string + number) property types. A probe
+    // schema simpler than production tells you nothing about production, so this asserts
+    // the probe actually exercises nesting and arrays — not just a flat string.
+    const properties = (PROBE_SCHEMA as { properties: Record<string, unknown> }).properties
+    const arrayProp = Object.values(properties).find(
+      (p): p is { type: string; items: { type: string; properties: Record<string, { type: string }> } } =>
+        typeof p === 'object' && p !== null && (p as { type?: string }).type === 'array',
+    )
+
+    expect(arrayProp).toBeTruthy()
+    expect(arrayProp!.items.type).toBe('object')
+
+    const itemPropTypes = Object.values(arrayProp!.items.properties).map((p) => p.type)
+    expect(itemPropTypes).toContain('string')
+    expect(itemPropTypes).toContain('number')
+
+    // Also has a top-level string property alongside the array, per the fix's shape.
+    const topLevelTypes = Object.values(properties).map((p) => (p as { type?: string }).type)
+    expect(topLevelTypes).toContain('string')
+  })
+})
 
 describe('classifyProbe', () => {
   test('reports ok when structured output came back', () => {

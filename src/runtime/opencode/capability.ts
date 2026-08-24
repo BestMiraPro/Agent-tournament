@@ -18,10 +18,33 @@ export interface ValidationResult {
   reason: string | null
 }
 
-const PROBE_SCHEMA = {
+/**
+ * Structurally representative of the real schemas (RANKING_JSON_SCHEMA /
+ * CRITERIA_JSON_SCHEMA): a top-level string alongside a nested array of objects
+ * with mixed string/number properties. A probe schema simpler than what production
+ * actually asks for proves nothing about production — wandb/zai-org/GLM-5.2 once
+ * passed a flat `{ok: string}` probe and then failed on the real, nested schema.
+ * Kept small (one array item requested) to stay cheap while still exercising
+ * nesting and arrays.
+ */
+export const PROBE_SCHEMA = {
   type: 'object',
-  properties: { ok: { type: 'string' } },
-  required: ['ok'],
+  properties: {
+    summary: { type: 'string' },
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          label: { type: 'string' },
+          value: { type: 'number' },
+        },
+        required: ['label', 'value'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['summary', 'items'],
   additionalProperties: false,
 }
 
@@ -79,7 +102,15 @@ export async function validateModel(
         directory,
         {
           model: splitModelId(modelId),
-          parts: [{ type: 'text', text: 'Reply with the single word: ok' }],
+          parts: [
+            {
+              type: 'text',
+              text:
+                kind === 'structured'
+                  ? 'Reply with a one-sentence summary and exactly one item with label "ok" and value 1.'
+                  : 'Reply with the single word: ok',
+            },
+          ],
           ...(kind === 'structured'
             ? { format: { type: 'json_schema' as const, schema: PROBE_SCHEMA, retryCount: 0 } }
             : {}),
