@@ -154,3 +154,72 @@ describe('Judge.score — hardening against malformed judge rankings', () => {
     expect(ranks).toEqual(Array.from({ length: inputs.length }, (_, i) => i + 1))
   })
 })
+
+describe('Judge resilience', () => {
+  const subs = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      agentId: `a${i}`, submissionMd: `work FITNESS=${i * 5}`, files: [], status: 'ok' as const,
+    }))
+
+  test('falls back to batched mode when the single call throws', async () => {
+    let calls = 0
+    const provider = {
+      complete: async (req: { prompt: string }) => {
+        calls++
+        // The single-call prompt contains every submission; batches contain few.
+        const count = (req.prompt.match(/<submission ref=/g) ?? []).length
+        if (count > 5) throw new Error('context overflow')
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    const j = new Judge(provider as never, { ...cfg, mode: 'auto' }, 42)
+    const res = await j.score('goal', 'criteria', subs(10))
+    expect(res.mode).toBe('batched_finals')
+    expect(res.scores).toHaveLength(10)
+    expect(calls).toBeGreaterThan(1)
+  })
+
+  test('retries the single call before falling back', async () => {
+    let attempts = 0
+    const provider = {
+      complete: async (req: { prompt: string }) => {
+        attempts++
+        if (attempts === 1) throw new Error('transient')
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    const j = new Judge(provider as never, cfg, 42)
+    const res = await j.score('goal', 'criteria', subs(3))
+    expect(res.mode).toBe('single_call')
+    expect(attempts).toBeGreaterThanOrEqual(2)
+  })
+
+  test('different rounds produce different anonymization orders', async () => {
+    const prompts: string[] = []
+    const provider = {
+      complete: async (req: { prompt: string }) => {
+        prompts.push(req.prompt)
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    const j = new Judge(provider as never, cfg, 42)
+    await j.score('goal', 'criteria', subs(5), 1)
+    await j.score('goal', 'criteria', subs(5), 2)
+    expect(prompts[0]).not.toBe(prompts[1])
+  })
+
+  test('the same round index reproduces the same order', async () => {
+    const prompts: string[] = []
+    const provider = {
+      complete: async (req: { prompt: string }) => {
+        prompts.push(req.prompt)
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    const j = new Judge(provider as never, cfg, 42)
+    await j.score('goal', 'criteria', subs(5), 3)
+    const j2 = new Judge(provider as never, cfg, 42)
+    await j2.score('goal', 'criteria', subs(5), 3)
+    expect(prompts[0]).toBe(prompts[1])
+  })
+})

@@ -79,6 +79,7 @@ export class Judge {
     goalMd: string,
     criteriaMd: string,
     inputs: readonly JudgeInput[],
+    roundIdx = 0,
   ): Promise<JudgeOutput> {
     const judgeable = inputs.filter((i) => i.status === 'ok' && i.submissionMd.length > 0)
     const failed = inputs.filter((i) => !judgeable.includes(i))
@@ -94,14 +95,26 @@ export class Judge {
       }
     }
 
-    const mode: JudgeMode =
+    const chosen: JudgeMode =
       this.cfg.mode === 'auto'
         ? (judgeable.length <= this.cfg.singleCallMaxPopulation ? 'single_call' : 'batched_finals')
         : this.cfg.mode
 
-    const result = mode === 'single_call'
-      ? await this.scoreSingleCall(goalMd, criteriaMd, judgeable)
-      : await this.scoreBatched(goalMd, criteriaMd, judgeable)
+    let mode = chosen
+    let result: { scores: JudgedScore[]; metaDigest: string }
+
+    if (chosen === 'single_call') {
+      try {
+        result = await this.withRetry(() => this.scoreSingleCall(goalMd, criteriaMd, judgeable, roundIdx))
+      } catch {
+        // Spec §9: fall back to batched mode on single-call failure. One malformed reply
+        // from a real judge must not kill a multi-hour run.
+        mode = 'batched_finals'
+        result = await this.withRetry(() => this.scoreBatched(goalMd, criteriaMd, judgeable, roundIdx))
+      }
+    } else {
+      result = await this.withRetry(() => this.scoreBatched(goalMd, criteriaMd, judgeable, roundIdx))
+    }
 
     // Failed submissions never enter the judge's context; they are appended last.
     const scores = [
@@ -130,8 +143,26 @@ export class Judge {
     )
   }
 
-  private async scoreSingleCall(goalMd: string, criteriaMd: string, inputs: readonly JudgeInput[]) {
-    const { anon, byRef } = this.anonymize(inputs)
+  /** Spec §15: two retries before giving up on a judging strategy. */
+  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+    let lastError: unknown
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await fn()
+      } catch (e) {
+        lastError = e
+      }
+    }
+    throw lastError
+  }
+
+  private async scoreSingleCall(
+    goalMd: string,
+    criteriaMd: string,
+    inputs: readonly JudgeInput[],
+    roundIdx: number,
+  ) {
+    const { anon, byRef } = this.anonymize(inputs, roundIdx)
     const parsed = await this.callJudge(
       buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
     )
@@ -142,7 +173,12 @@ export class Judge {
   }
 
   /** Rank within batches, then rank the batch winners; non-finalists interpolate. */
-  private async scoreBatched(goalMd: string, criteriaMd: string, inputs: readonly JudgeInput[]) {
+  private async scoreBatched(
+    goalMd: string,
+    criteriaMd: string,
+    inputs: readonly JudgeInput[],
+    roundIdx: number,
+  ) {
     const rng = makeRng(this.seed)
     const shuffled = rng.shuffle(inputs)
     const batches: JudgeInput[][] = []
@@ -155,7 +191,7 @@ export class Judge {
     let digest = ''
 
     for (const batch of batches) {
-      const { anon, byRef } = this.anonymize(batch)
+      const { anon, byRef } = this.anonymize(batch, roundIdx)
       const parsed = await this.callJudge(
         buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
       )
@@ -172,7 +208,7 @@ export class Judge {
 
     const finalsOrder = new Map<string, number>()
     if (winners.length > 1) {
-      const { anon, byRef } = this.anonymize(winners)
+      const { anon, byRef } = this.anonymize(winners, roundIdx)
       const parsed = await this.callJudge(
         buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
       )
@@ -204,8 +240,11 @@ export class Judge {
     }
   }
 
-  private anonymize(inputs: readonly JudgeInput[]) {
-    const rng = makeRng(this.seed + inputs.length)
+  private anonymize(inputs: readonly JudgeInput[], roundIdx: number) {
+    // Round index must participate: population size is invariant, so seeding on it alone
+    // produced the same permutation every round and turned judge position bias into a
+    // persistent per-agent fitness bonus.
+    const rng = makeRng(this.seed + roundIdx * 7919 + inputs.length)
     const order = this.cfg.anonymize ? rng.shuffle(inputs) : [...inputs]
     const byRef = new Map<string, string>()
     const anon = order.map((inp, i) => {
