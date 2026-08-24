@@ -223,3 +223,33 @@ describe('Judge resilience', () => {
     expect(prompts[0]).toBe(prompts[1])
   })
 })
+
+describe('Judge schema usage', () => {
+  test('passes the ranking schema to the provider', async () => {
+    let seenSchema: unknown = null
+    const provider = {
+      complete: async (req: { prompt: string; schema?: unknown }) => {
+        seenSchema = req.schema
+        return new MockProvider(1).complete({ purpose: 'judge', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    await new Judge(provider as never, cfg, 42).score('goal', 'criteria', [
+      { agentId: 'a', submissionMd: 'work FITNESS=10', files: [], status: 'ok' },
+      { agentId: 'b', submissionMd: 'work FITNESS=90', files: [], status: 'ok' },
+    ])
+    expect(seenSchema).toBeTruthy()
+    expect((seenSchema as { required: string[] }).required).toContain('rankings')
+  })
+
+  test('passes the criteria schema when generating criteria', async () => {
+    let seenSchema: unknown = null
+    const provider = {
+      complete: async (req: { prompt: string; schema?: unknown }) => {
+        seenSchema = req.schema
+        return new MockProvider(1).complete({ purpose: 'criteria', prompt: req.prompt, modelId: 'm' })
+      },
+    }
+    await new Judge(provider as never, cfg, 42).resolveCriteria('goal', null)
+    expect((seenSchema as { required: string[] }).required).toContain('criteria')
+  })
+})

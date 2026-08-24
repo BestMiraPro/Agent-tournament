@@ -4,6 +4,7 @@ import type { CriteriaSource, FileEntry, JudgeMode, RunConfig } from '../core/ty
 import type { Provider } from '../runtime/provider.js'
 import { parseWithRepair } from './parse.js'
 import { buildCriteriaPrompt, buildScoringPrompt } from './prompts.js'
+import { CRITERIA_JSON_SCHEMA, RANKING_JSON_SCHEMA } from './schemas.js'
 
 const RankingSchema = z.object({
   rankings: z.array(z.object({
@@ -61,12 +62,14 @@ export class Judge {
       purpose: 'criteria',
       prompt: buildCriteriaPrompt(goalMd),
       modelId: this.cfg.modelId,
+      schema: CRITERIA_JSON_SCHEMA,
     })
     const parsed = await parseWithRepair(raw, CriteriaSchema, (err) =>
       this.provider.complete({
         purpose: 'criteria',
         prompt: `${buildCriteriaPrompt(goalMd)}\n\nYour previous reply failed to parse: ${err}. Reply with JSON only.`,
         modelId: this.cfg.modelId,
+        schema: CRITERIA_JSON_SCHEMA,
       }),
     )
     const criteriaMd = parsed.criteria
@@ -132,13 +135,14 @@ export class Judge {
 
   private async callJudge(prompt: string) {
     const raw = await this.provider.complete({
-      purpose: 'judge', prompt, modelId: this.cfg.modelId,
+      purpose: 'judge', prompt, modelId: this.cfg.modelId, schema: RANKING_JSON_SCHEMA,
     })
     return parseWithRepair(raw, RankingSchema, (err) =>
       this.provider.complete({
         purpose: 'judge',
         prompt: `${prompt}\n\nYour previous reply failed to parse: ${err}. Reply with JSON only.`,
         modelId: this.cfg.modelId,
+        schema: RANKING_JSON_SCHEMA,
       }),
     )
   }
