@@ -111,10 +111,12 @@ export interface CliOutput {
 // docs/superpowers/specs/2026-08-24-opencode-api-spike.md. These are the real-mode
 // fallbacks used when the caller does not pass --worker-models/--judge-model/--reflect-model.
 //
-// They are deliberately NOT `config.judge.modelId` / `config.reflect.modelId` from
-// DEFAULT_CONFIG: DEFAULT_CONFIG.judge.modelId is `wandb/moonshotai/Kimi-K3`, which the
-// spike confirmed 404s. Falling through to it here would make real mode broken by
-// default. See the "If the plan is wrong" note in the phase-2 task list.
+// DEFAULT_CONFIG.judge.modelId and DEFAULT_CONFIG.reflect.modelId now agree with these
+// (DEFAULT_CONFIG.judge.modelId used to be `wandb/moonshotai/Kimi-K3`, which the spike
+// confirmed 404s — see the "Judge default" fix in the design doc). They are kept as
+// separate, explicit constants anyway so real mode's fallback never silently drifts if
+// DEFAULT_CONFIG changes later for reasons unrelated to model validity — pre-flight
+// validation in `validateRosterModels` below is the real backstop either way.
 const DEFAULT_REAL_WORKER_MODEL = 'opencode/big-pickle'
 const DEFAULT_REAL_JUDGE_MODEL = 'wandb/zai-org/GLM-5.2'
 const DEFAULT_REAL_REFLECT_MODEL = 'wandb/deepseek-ai/DeepSeek-V4-Flash'
