@@ -98,13 +98,15 @@ export function makeMockEngine(opts: {
     ? new ScrambledJudge(provider, config.judge, opts.seed, opts.seed + 1000)
     : new Judge(provider, config.judge, opts.seed)
 
+  const reflector = new Reflector(provider, config.reflect, ['mock/model'])
+
   const engine = new TournamentEngine({
     repos,
     config,
     sandbox,
     runner: opts.hangingRunner ? new HangingRunner() : new MockAgentRunner(sandbox, opts.seed),
     judge,
-    reflector: new Reflector(provider, config.reflect, ['mock/model']),
+    reflector,
     // Each agent starts with a DIFFERENT keyword so imitation has something real
     // to transfer between agents. Uniform keyword-free seeds left nothing to
     // imitate, which made the evolution test pass for the wrong reason.
@@ -114,5 +116,8 @@ export function makeMockEngine(opts: {
         : `attempt the goal, variant ${i}, focus on ${GOOD_KEYWORDS[i % GOOD_KEYWORDS.length]}`,
   })
 
-  return { db, repos, engine, config, sandbox }
+  // Exposed (not just wired into the engine) so a test can spy on `reflect` and
+  // inspect exactly what each call was given — e.g. to assert self-exclusion from
+  // topPerformers, which the engine's public API does not otherwise reveal.
+  return { db, repos, engine, config, sandbox, reflector }
 }

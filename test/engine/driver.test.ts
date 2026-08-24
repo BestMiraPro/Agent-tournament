@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { makeMockEngine } from '../helpers/mock-engine.js'
 import { parseGenome } from '../../src/core/genome.js'
 
@@ -107,12 +107,29 @@ describe('driver hardening', () => {
   })
 
   test('an agent is excluded from its own top performers list', async () => {
-    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 6 })
+    const { engine, reflector } = makeMockEngine({ seed: 1, populationSize: 6 })
     const run = engine.createRun('t', 'goal')
+
+    // Spy on the actual calls the driver makes to Reflector.reflect, so the
+    // assertion is about what reflection was actually shown rather than a
+    // downstream side effect that could hold for unrelated reasons.
+    const reflectSpy = vi.spyOn(reflector, 'reflect')
     await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
-    // Rank 1 is elite: its strategy must be carried forward verbatim, which can only hold
-    // if reflection never fed it its own strategy back as a leader to imitate.
-    const agents = repos.agents.listActive(run.id)
-    expect(agents.length).toBe(6)
+
+    // Sanity check the spy actually observed calls — otherwise the assertion
+    // below would vacuously pass with zero iterations.
+    expect(reflectSpy).toHaveBeenCalled()
+
+    for (const [req] of reflectSpy.mock.calls) {
+      // TopPerformer carries rank/strategy/excerpt/rationale but no agent id.
+      // Ranks are unique within a round, so a call whose own rank shows up
+      // inside its own topPerformers list was handed itself as a leader to
+      // imitate. Key on rank, not strategy text: clone agents legitimately
+      // share identical strategy text, so a text comparison would produce
+      // false positives (or mask a real self-inclusion bug).
+      const selfRank = req.ownRank
+      const sawSelf = req.topPerformers.some((tp) => tp.rank === selfRank)
+      expect(sawSelf).toBe(false)
+    }
   })
 })
