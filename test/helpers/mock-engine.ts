@@ -7,7 +7,18 @@ import { Judge, type JudgeInput, type JudgeOutput } from '../../src/judge/judge.
 import { Reflector } from '../../src/evolution/reflect.js'
 import { GOOD_KEYWORDS, MockProvider } from '../../src/runtime/mock-provider.js'
 import { MockSandbox } from '../../src/runtime/mock-sandbox.js'
-import { MockAgentRunner } from '../../src/runtime/agent-runner.js'
+import { MockAgentRunner, type AgentRunner } from '../../src/runtime/agent-runner.js'
+
+/**
+ * A runner that never settles. Stands in for a real `AgentRunner` that ignores or
+ * mishandles its own `timeoutMs`, so the driver's timeout guarantee is exercised
+ * rather than the runner's.
+ */
+class HangingRunner implements AgentRunner {
+  async run(): Promise<never> {
+    return new Promise(() => {})
+  }
+}
 
 /**
  * Judges normally, then randomly reassigns which agent occupies which rank/score
@@ -59,6 +70,10 @@ export function makeMockEngine(opts: {
   failFirst?: boolean
   /** Destroy the fitness signal by permuting ranks after judging. */
   scrambleRanks?: boolean
+  /** Install a runner that never returns, so only the driver can end the round. */
+  hangingRunner?: boolean
+  /** Build a roster whose counts do not sum to `populationSize`. */
+  rosterMismatch?: boolean
 }) {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
@@ -68,7 +83,13 @@ export function makeMockEngine(opts: {
     populationSize: opts.populationSize,
     sandbox: 'mock',
     concurrency: 4,
-    roster: [{ modelId: 'mock/model', count: opts.populationSize, temperature: 0.7 }],
+    // Keep the round short when nothing will ever come back from the runner.
+    agentTimeoutMs: opts.hangingRunner ? 50 : DEFAULT_CONFIG.agentTimeoutMs,
+    roster: [{
+      modelId: 'mock/model',
+      count: opts.rosterMismatch ? opts.populationSize + 1 : opts.populationSize,
+      temperature: 0.7,
+    }],
   }
 
   const provider = new MockProvider(opts.seed)
@@ -81,7 +102,7 @@ export function makeMockEngine(opts: {
     repos,
     config,
     sandbox,
-    runner: new MockAgentRunner(sandbox, opts.seed),
+    runner: opts.hangingRunner ? new HangingRunner() : new MockAgentRunner(sandbox, opts.seed),
     judge,
     reflector: new Reflector(provider, config.reflect, ['mock/model']),
     // Each agent starts with a DIFFERENT keyword so imitation has something real

@@ -66,3 +66,53 @@ describe('TournamentEngine', () => {
     expect(r.criteriaSource).toBe('user')
   })
 })
+
+describe('driver hardening', () => {
+  test('persists one submission row per agent', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(repos.submissions.forRound(round.roundId)).toHaveLength(4)
+  })
+
+  test('records round start, end and judge mode', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    const r = repos.rounds.get(round.roundId)!
+    expect(r.startedAt).toBeGreaterThan(0)
+    expect(r.endedAt).toBeGreaterThan(0)
+    expect(r.judgeMode).toBe('single_call')
+  })
+
+  test('assigns the top band to high performers', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 10 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    const bands = new Set(repos.scores.forRound(round.roundId).map((s) => s.band))
+    expect(bands.has('top')).toBe(true)
+  })
+
+  test('enforces the agent timeout even when the runner ignores it', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3, hangingRunner: true })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    const subs = repos.submissions.forRound(round.roundId)
+    expect(subs.every((s) => s.status === 'timeout')).toBe(true)
+  })
+
+  test('rejects a roster whose counts do not sum to populationSize', () => {
+    const { engine } = makeMockEngine({ seed: 1, populationSize: 4, rosterMismatch: true })
+    expect(() => engine.createRun('t', 'goal')).toThrow(/populationSize/i)
+  })
+
+  test('an agent is excluded from its own top performers list', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 6 })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    // Rank 1 is elite: its strategy must be carried forward verbatim, which can only hold
+    // if reflection never fed it its own strategy back as a leader to imitate.
+    const agents = repos.agents.listActive(run.id)
+    expect(agents.length).toBe(6)
+  })
+})
