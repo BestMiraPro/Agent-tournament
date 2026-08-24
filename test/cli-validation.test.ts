@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { validateRosterModels } from '../src/cli.js'
 import { DEFAULT_CONFIG, type RunConfig } from '../src/core/types.js'
 import type { OpenCodeClient, PromptBody, PromptResponse } from '../src/runtime/opencode/client.js'
@@ -11,6 +11,34 @@ function fakeClient(
     createSession: async () => ({ id: 'ses_1' }),
     prompt,
   } as unknown as OpenCodeClient
+}
+
+/**
+ * A fake client that 404s for any model id in `badModelIds` and otherwise succeeds —
+ * structured probes (judge/reflect) get a valid structured reply, text probes (worker)
+ * get plain text. Lets a test name exactly which models should fail without caring
+ * which role probes them.
+ */
+function fakeClientWithBadModels(badModelIds: Iterable<string>): OpenCodeClient {
+  const bad = new Set(badModelIds)
+  return fakeClient(async (_sessionId, _directory, body) => {
+    const modelId = `${body.model.providerID}/${body.model.modelID}`
+    if (bad.has(modelId)) {
+      return { info: { error: { name: 'APIError', data: { statusCode: 404, message: 'Not Found' } } }, parts: [] }
+    }
+    return body.format
+      ? {
+          info: {},
+          parts: [
+            {
+              type: 'tool',
+              tool: 'StructuredOutput',
+              state: { input: { ok: 'ok' }, metadata: { valid: true } },
+            },
+          ],
+        }
+      : { info: {}, parts: [{ type: 'text', text: 'ok' }] }
+  })
 }
 
 describe('validateRosterModels', () => {
@@ -96,5 +124,90 @@ describe('validateRosterModels', () => {
 
     await validateRosterModels(client, '/workspace', DEFAULT_CONFIG, { validateModels: false })
     expect(calls).toBe(0)
+  })
+
+  test('judge model unusable throws, naming the judge model and reason', async () => {
+    const client = fakeClientWithBadModels(['wandb/bad-judge'])
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      roster: [{ modelId: 'opencode/big-pickle', count: 5, temperature: 0.7 }],
+      judge: { ...DEFAULT_CONFIG.judge, modelId: 'wandb/bad-judge' },
+      reflect: { ...DEFAULT_CONFIG.reflect, modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash' },
+    }
+
+    await expect(validateRosterModels(client, '/workspace', config)).rejects.toThrow(
+      /wandb\/bad-judge as judge.*404/s,
+    )
+  })
+
+  test('reflect model unusable throws, naming the reflect model and reason', async () => {
+    const client = fakeClientWithBadModels(['wandb/bad-reflect'])
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      roster: [{ modelId: 'opencode/big-pickle', count: 5, temperature: 0.7 }],
+      judge: { ...DEFAULT_CONFIG.judge, modelId: 'wandb/zai-org/GLM-5.2' },
+      reflect: { ...DEFAULT_CONFIG.reflect, modelId: 'wandb/bad-reflect' },
+    }
+
+    await expect(validateRosterModels(client, '/workspace', config)).rejects.toThrow(
+      /wandb\/bad-reflect as reflect.*404/s,
+    )
+  })
+
+  test('one of two worker models unusable does not throw, and reports it via onWarning', async () => {
+    const client = fakeClientWithBadModels(['opencode/bad-worker'])
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      roster: [
+        { modelId: 'opencode/big-pickle', count: 5, temperature: 0.7 },
+        { modelId: 'opencode/bad-worker', count: 5, temperature: 0.7 },
+      ],
+      judge: { ...DEFAULT_CONFIG.judge, modelId: 'wandb/zai-org/GLM-5.2' },
+      reflect: { ...DEFAULT_CONFIG.reflect, modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash' },
+    }
+
+    const warnings: string[] = []
+    await expect(
+      validateRosterModels(client, '/workspace', config, { onWarning: (m) => warnings.push(m) }),
+    ).resolves.toBeUndefined()
+
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/opencode\/bad-worker/)
+    expect(warnings[0]).toMatch(/404/)
+    expect(warnings[0]).toMatch(/fail.*cull/is)
+  })
+
+  test('all worker models unusable throws, making clear no usable worker remains', async () => {
+    const client = fakeClientWithBadModels(['opencode/bad-worker-1', 'opencode/bad-worker-2'])
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      roster: [
+        { modelId: 'opencode/bad-worker-1', count: 5, temperature: 0.7 },
+        { modelId: 'opencode/bad-worker-2', count: 5, temperature: 0.7 },
+      ],
+      judge: { ...DEFAULT_CONFIG.judge, modelId: 'wandb/zai-org/GLM-5.2' },
+      reflect: { ...DEFAULT_CONFIG.reflect, modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash' },
+    }
+
+    await expect(validateRosterModels(client, '/workspace', config)).rejects.toThrow(
+      /no usable worker/i,
+    )
+  })
+
+  test('everything usable does not throw and never calls onWarning', async () => {
+    const client = fakeClientWithBadModels([])
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      roster: [
+        { modelId: 'opencode/big-pickle', count: 5, temperature: 0.7 },
+        { modelId: 'opencode/muse-spark-1.2-contributor-free', count: 5, temperature: 0.7 },
+      ],
+      judge: { ...DEFAULT_CONFIG.judge, modelId: 'wandb/zai-org/GLM-5.2' },
+      reflect: { ...DEFAULT_CONFIG.reflect, modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash' },
+    }
+
+    const onWarning = vi.fn()
+    await expect(validateRosterModels(client, '/workspace', config, { onWarning })).resolves.toBeUndefined()
+    expect(onWarning).not.toHaveBeenCalled()
   })
 })

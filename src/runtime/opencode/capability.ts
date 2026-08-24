@@ -66,7 +66,7 @@ export async function validateModel(
   directory: string,
   modelId: string,
   role: ModelRole,
-  timeoutMs = 60_000,
+  timeoutMs = 120_000,
   attempts = 3,
 ): Promise<ValidationResult> {
   const kind: ProbeKind = role === 'worker' ? 'text' : 'structured'

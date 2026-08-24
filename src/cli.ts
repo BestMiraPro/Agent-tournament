@@ -46,6 +46,16 @@ export interface ValidateRosterOptions {
   validateModels?: boolean
   /** Bounded concurrency for the probe pool. Defaults to 4. */
   concurrency?: number
+  /**
+   * Called with a human-readable message when some (but not all) worker models turn out
+   * unusable. That is not fatal on its own — `runPool` already isolates per-agent
+   * failures, so agents on a bad worker model just score 0, get culled in round 1, and
+   * are replaced by clones of winners, since `modelId` is heritable. The population
+   * self-heals as long as at least one worker model still works. Never called on a
+   * fatal outcome (judge/reflect unusable, or every worker unusable), since those throw
+   * instead.
+   */
+  onWarning?: (message: string) => void
 }
 
 /**
@@ -57,6 +67,19 @@ export interface ValidateRosterOptions {
  * probed once for the 'worker' role, but a model that is both a roster worker and the
  * judge is probed once per role, because capability differs by role (a model can answer
  * as a worker yet fail to produce structured output as a judge or reflector).
+ *
+ * Severity depends on role, because the failure modes are not equivalent:
+ *  - judge unusable is fatal — the round cannot be scored at all.
+ *  - reflect unusable is fatal — reflection is the mutation operator; if it silently
+ *    fails, genomes carry forward unchanged and evolution stops while the run keeps
+ *    looking like it's working.
+ *  - a worker unusable is NOT fatal by itself, as long as at least one worker model is
+ *    usable: agents assigned to the bad model fail and get culled, and the heritable
+ *    `modelId` means the population self-heals onto working models. Aborting the whole
+ *    run over one transient/bad worker model would be wrong; instead these are reported
+ *    through `onWarning`.
+ *  - every worker model unusable IS fatal — no agent could produce anything, so the
+ *    round would be meaningless.
  */
 export async function validateRosterModels(
   client: OpenCodeClient,
@@ -94,10 +117,34 @@ export async function validateRosterModels(
   )
 
   const { unusable } = summarizeValidation(validations)
-  if (unusable.length > 0) {
-    const lines = unusable.map((u) => `  - ${u.modelId} as ${u.role}: ${u.reason}`).join('\n')
+  const unusableWorkers = unusable.filter((u) => u.role === 'worker')
+  const unusableJudge = unusable.filter((u) => u.role === 'judge')
+  const unusableReflect = unusable.filter((u) => u.role === 'reflect')
+
+  const totalWorkers = probes.filter((p) => p.role === 'worker').length
+  const allWorkersUnusable = totalWorkers > 0 && unusableWorkers.length === totalWorkers
+
+  // Fatal: judge unusable, reflect unusable, or every worker unusable. When it's the
+  // worker roster that made this fatal, the worker lines belong in the thrown message
+  // too — that's the whole reason it's fatal.
+  const fatal = [...unusableJudge, ...unusableReflect, ...(allWorkersUnusable ? unusableWorkers : [])]
+  if (fatal.length > 0) {
+    const lines = fatal.map((u) => `  - ${u.modelId} as ${u.role}: ${u.reason}`).join('\n')
+    const explain = allWorkersUnusable
+      ? '\nEvery worker model is unusable — no usable worker remains, so no agent could produce anything this round.'
+      : ''
     throw new Error(
-      `Model validation failed before the run started — ${unusable.length} model/role pair(s) unusable:\n${lines}`,
+      `Model validation failed before the run started — ${fatal.length} model/role pair(s) unusable:\n${lines}${explain}`,
+    )
+  }
+
+  // Non-fatal: some (but not all) worker models are unusable. Surface it instead of
+  // aborting — agents on these models will fail and be culled, and the population
+  // self-heals onto the working worker models.
+  if (unusableWorkers.length > 0 && opts.onWarning) {
+    const lines = unusableWorkers.map((u) => `  - ${u.modelId} as worker: ${u.reason}`).join('\n')
+    opts.onWarning(
+      `${unusableWorkers.length} worker model(s) unusable — agents assigned to them will fail and be culled:\n${lines}`,
     )
   }
 }
@@ -195,9 +242,12 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
 
       // Pre-flight: fail fast and legibly before any agent runs or money is spent,
       // rather than mid-round with an opaque provider error. Mock mode never reaches
-      // this branch at all, so it never probes anything.
+      // this branch at all, so it never probes anything. Non-fatal worker warnings
+      // (some, but not all, worker models unusable) are printed to stderr rather than
+      // aborting — see validateRosterModels for why that's the right call.
       await validateRosterModels(built.server.client, opts.workspaceRoot!, config, {
         validateModels: opts.validateModels,
+        onWarning: (message) => console.warn(message),
       })
     } else {
       config = {
