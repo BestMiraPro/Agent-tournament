@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { Judge } from '../../src/judge/judge.js'
+import { FALLBACK_CRITERIA_MD, Judge } from '../../src/judge/judge.js'
 import { MockProvider } from '../../src/runtime/mock-provider.js'
 import { DEFAULT_CONFIG } from '../../src/core/types.js'
 import type { Provider } from '../../src/runtime/provider.js'
@@ -31,6 +31,56 @@ describe('Judge.resolveCriteria', () => {
     const r = await judge().resolveCriteria('goal', null)
     expect(r.source).toBe('generated')
     expect(r.criteriaMd).toContain('correctness')
+  })
+
+  test('user criteria short-circuits before the provider is ever called', async () => {
+    const provider: Provider = {
+      async complete() {
+        throw new Error('provider must not be called when user criteria are supplied')
+      },
+    }
+    const r = await new Judge(provider, cfg, 42).resolveCriteria('goal', 'my criteria')
+    expect(r).toEqual({ criteriaMd: 'my criteria', source: 'user' })
+  })
+
+  test('falls back to default criteria when generation fails after retries, and warns', async () => {
+    let calls = 0
+    const provider: Provider = {
+      async complete() {
+        calls++
+        throw new Error('StructuredOutputError Model did not produce structured output')
+      },
+    }
+    const warnings: string[] = []
+    const j = new Judge(provider, cfg, 42, (message) => warnings.push(message))
+    const r = await j.resolveCriteria('goal', null)
+
+    expect(r.source).toBe('generated')
+    expect(r.criteriaMd).toBe(FALLBACK_CRITERIA_MD)
+    expect(warnings.length).toBe(1)
+    // withRetry attempts 3 times; each attempt's parseWithRepair may add a repair
+    // call on a parse failure, but here the provider always throws before parsing,
+    // so exactly 3 calls are made in total.
+    expect(calls).toBe(3)
+  })
+
+  test('recovers on a later attempt without falling back or warning', async () => {
+    let calls = 0
+    const provider: Provider = {
+      async complete(req) {
+        calls++
+        if (calls < 3) throw new Error('transient')
+        return new MockProvider(1).complete(req)
+      },
+    }
+    const warnings: string[] = []
+    const j = new Judge(provider, cfg, 42, (message) => warnings.push(message))
+    const r = await j.resolveCriteria('goal', null)
+
+    expect(r.source).toBe('generated')
+    expect(r.criteriaMd).toContain('correctness')
+    expect(r.criteriaMd).not.toBe(FALLBACK_CRITERIA_MD)
+    expect(warnings).toEqual([])
   })
 })
 

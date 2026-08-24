@@ -266,7 +266,7 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
       config,
       sandbox,
       runner,
-      judge: new Judge(provider, config.judge, opts.seed),
+      judge: new Judge(provider, config.judge, opts.seed, (message) => console.warn(message)),
       // Derived from the roster, never hardcoded, in BOTH modes: Reflector silently
       // falls back to the current model for any model_id outside this list, so a
       // hardcoded array would reject every legitimate model the moment a real roster

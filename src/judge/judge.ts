@@ -44,11 +44,26 @@ export interface JudgeOutput {
   mode: JudgeMode
 }
 
+/**
+ * Goal-agnostic default criteria used only when live criteria generation fails
+ * after retries. Same `- **name** (weight N): description` shape resolveCriteria
+ * otherwise produces from a model's response, so downstream prompt-building code
+ * cannot tell the difference. Judging on this instead of goal-specific criteria is
+ * a real quality loss — see the `onWarning` callback below.
+ */
+export const FALLBACK_CRITERIA_MD = [
+  '- **correctness** (weight 0.4): The work is accurate and free of errors relative to the stated goal.',
+  '- **completeness** (weight 0.2): The work fully addresses the goal, leaving no required part undone.',
+  '- **clarity** (weight 0.2): The work is clearly organized and easy to understand.',
+  '- **goal adherence** (weight 0.2): The work stays faithful and directly responsive to the stated goal, without drifting into unrelated scope.',
+].join('\n')
+
 export class Judge {
   constructor(
     private provider: Provider,
     private cfg: RunConfig['judge'],
     private seed: number,
+    private onWarning?: (message: string) => void,
   ) {}
 
   async resolveCriteria(
@@ -58,13 +73,35 @@ export class Judge {
     if (userCriteria && userCriteria.trim().length > 0) {
       return { criteriaMd: userCriteria, source: 'user' }
     }
+    try {
+      const parsed = await this.withRetry(() => this.generateCriteria(goalMd))
+      const criteriaMd = parsed.criteria
+        .map((c) => `- **${c.name}** (weight ${c.weight})${c.description ? `: ${c.description}` : ''}`)
+        .join('\n')
+      return { criteriaMd, source: 'generated' }
+    } catch (e) {
+      // Mirrors Judge.score's single-call-to-batched fallback (spec §9): one bad
+      // reply from the criteria model must not kill the round, and resolveCriteria
+      // runs before scoring, so it would kill the round even earlier than that.
+      // Falling back silently would be worse than throwing, though — judging on
+      // generic criteria instead of goal-specific ones is a real quality loss, so
+      // it must be visible via onWarning rather than pass unnoticed.
+      const detail = e instanceof Error ? e.message : String(e)
+      this.onWarning?.(
+        `Judge.resolveCriteria: criteria generation failed after retries (${detail}); falling back to default criteria.`,
+      )
+      return { criteriaMd: FALLBACK_CRITERIA_MD, source: 'generated' }
+    }
+  }
+
+  private async generateCriteria(goalMd: string): Promise<z.output<typeof CriteriaSchema>> {
     const raw = await this.provider.complete({
       purpose: 'criteria',
       prompt: buildCriteriaPrompt(goalMd),
       modelId: this.cfg.modelId,
       schema: CRITERIA_JSON_SCHEMA,
     })
-    const parsed = await parseWithRepair(raw, CriteriaSchema, (err) =>
+    return parseWithRepair(raw, CriteriaSchema, (err) =>
       this.provider.complete({
         purpose: 'criteria',
         prompt: `${buildCriteriaPrompt(goalMd)}\n\nYour previous reply failed to parse: ${err}. Reply with JSON only.`,
@@ -72,10 +109,6 @@ export class Judge {
         schema: CRITERIA_JSON_SCHEMA,
       }),
     )
-    const criteriaMd = parsed.criteria
-      .map((c) => `- **${c.name}** (weight ${c.weight})${c.description ? `: ${c.description}` : ''}`)
-      .join('\n')
-    return { criteriaMd, source: 'generated' }
   }
 
   async score(
