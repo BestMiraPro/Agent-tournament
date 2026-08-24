@@ -3,7 +3,10 @@ import { OpenCodeClient } from './client.js'
 
 /** The server prints `opencode server listening on http://127.0.0.1:<port>` on startup. */
 export function parseServerPort(line: string): number | null {
-  const m = /listening on https?:\/\/[^:]+:(\d+)/.exec(line)
+  // The host alternation must handle a bracketed IPv6 literal (`http://[::1]:4599`)
+  // before the plain-host case: `[^:]+` cannot match a host containing colons, so an
+  // IPv6 bind would yield null and startServer would hang until its startup timeout.
+  const m = /listening on https?:\/\/(?:\[[^\]]+\]|[^:/]+):(\d+)/.exec(line)
   return m ? Number(m[1]) : null
 }
 
