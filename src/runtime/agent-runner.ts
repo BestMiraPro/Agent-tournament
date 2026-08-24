@@ -14,6 +14,9 @@ export interface AgentRunResult {
   errorText: string | null
   tokensIn: number
   tokensOut: number
+  tokensCacheRead: number
+  tokensCacheWrite: number
+  costUsd: number
   durationMs: number
 }
 
@@ -38,6 +41,9 @@ export class MockAgentRunner implements AgentRunner {
         errorText: 'simulated agent failure',
         tokensIn: 100,
         tokensOut: 0,
+        tokensCacheRead: 0,
+        tokensCacheWrite: 0,
+        costUsd: 0,
         durationMs: Date.now() - started,
       }
     }
@@ -60,6 +66,9 @@ export class MockAgentRunner implements AgentRunner {
       errorText: null,
       tokensIn: 500 + ctx.genome.strategyMd.length,
       tokensOut: body.length,
+      tokensCacheRead: 0,
+      tokensCacheWrite: 0,
+      costUsd: 0,
       durationMs: Date.now() - started,
     }
   }
