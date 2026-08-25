@@ -1604,7 +1604,7 @@ thrashes. Refuse to start rather than degrade the user's computer.
 - Create: `src/runtime/docker/capacity.ts`
 - Test: `test/runtime/docker/capacity.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 import { describe, expect, test } from 'vitest'
@@ -1656,12 +1656,12 @@ describe('planCapacity', () => {
 })
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run test/runtime/docker/capacity.test.ts`
 Expected: FAIL — cannot resolve `capacity.js`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```typescript
 import { docker } from './cli.js'
@@ -1750,12 +1750,12 @@ export async function readHostCapacity(): Promise<HostCapacity> {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/runtime/docker/capacity.test.ts`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/runtime/docker/capacity.ts test/runtime/docker/capacity.test.ts
