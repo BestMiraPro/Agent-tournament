@@ -65,22 +65,41 @@ export async function startShardContainer(
     }
   }
 
-  const portOut = await run(['port', name, '4096/tcp'], 20_000)
-  const port = parsePortMapping(portOut.stdout)
-  if (port === null) {
-    throw new Error(`Could not discover a published port for ${name}`)
-  }
-  const baseUrl = `http://127.0.0.1:${port}`
-
-  if (healthProbe) {
-    const healthy = await waitForHealth(
-      () => healthProbe(baseUrl),
-      spec.healthTimeoutMs ?? 60_000,
-    )
-    if (!healthy) {
-      throw new Error(`Container ${name} started but never became healthy at ${baseUrl}`)
+  // Past this point a container with this name exists and is running — we either just
+  // created it or adopted one. Every remaining step can fail, and a throw here would
+  // strand it: the caller never receives a ShardContainer, so DockerSandbox never records
+  // the name and neither teardown() nor disposeAll() can ever reach it. The container
+  // would then outlive the process entirely, holding memory and a published port until
+  // someone runs `docker rm -f` by hand. So: own the container from here on, and remove
+  // it on any failure path.
+  try {
+    const portOut = await run(['port', name, '4096/tcp'], 20_000)
+    const port = parsePortMapping(portOut.stdout)
+    if (port === null) {
+      throw new Error(`Could not discover a published port for ${name}`)
     }
-  }
+    const baseUrl = `http://127.0.0.1:${port}`
 
-  return { name, baseUrl, shardIndex: spec.shardIndex }
+    if (healthProbe) {
+      const healthy = await waitForHealth(
+        () => healthProbe(baseUrl),
+        spec.healthTimeoutMs ?? 60_000,
+      )
+      if (!healthy) {
+        throw new Error(`Container ${name} started but never became healthy at ${baseUrl}`)
+      }
+    }
+
+    return { name, baseUrl, shardIndex: spec.shardIndex }
+  } catch (e) {
+    // An adopted container is removed too: one wearing our name that cannot serve is
+    // useless to us and would only be adopted again by the next attempt.
+    // Cleanup is best-effort — it must never replace the error that explains the failure.
+    try {
+      await run(['rm', '-f', name], 30_000)
+    } catch {
+      // ignore
+    }
+    throw e
+  }
 }

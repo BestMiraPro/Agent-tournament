@@ -66,6 +66,59 @@ describe('startShardContainer', () => {
     ).rejects.toThrow(/health/i)
   })
 
+  // A container that `docker run` created is a real, running container even when the
+  // post-start checks fail. If startShardContainer throws without removing it, nothing
+  // ever learns its name again and it survives the run.
+  test('force-removes the container it started when the health probe never succeeds', async () => {
+    const calls: string[][] = []
+    let running = false
+    const fake = vi.fn(async (args: string[]) => {
+      calls.push(args)
+      if (args[0] === 'inspect') return { stdout: running ? 'true' : 'false', stderr: '', code: 0 }
+      if (args[0] === 'run') { running = true; return { stdout: 'cid', stderr: '', code: 0 } }
+      if (args[0] === 'port') return { stdout: '4096/tcp -> 127.0.0.1:41000', stderr: '', code: 0 }
+      if (args[0] === 'rm') { running = false; return { stdout: '', stderr: '', code: 0 } }
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    await expect(
+      startShardContainer({ ...spec, healthTimeoutMs: 50 }, fake, async () => false),
+    ).rejects.toThrow(/health/i)
+
+    const verbs = calls.map((c) => c[0])
+    expect(verbs.lastIndexOf('rm')).toBeGreaterThan(verbs.indexOf('run'))
+    expect(calls.at(-1)).toEqual(['rm', '-f', 'arena-run1-0'])
+  })
+
+  test('force-removes the container it started when no port could be discovered', async () => {
+    const calls: string[][] = []
+    let running = false
+    const fake = vi.fn(async (args: string[]) => {
+      calls.push(args)
+      if (args[0] === 'inspect') return { stdout: running ? 'true' : 'false', stderr: '', code: 0 }
+      if (args[0] === 'run') { running = true; return { stdout: 'cid', stderr: '', code: 0 } }
+      if (args[0] === 'port') return { stdout: '', stderr: '', code: 0 }
+      if (args[0] === 'rm') { running = false; return { stdout: '', stderr: '', code: 0 } }
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    await expect(startShardContainer(spec, fake, async () => true)).rejects.toThrow(/port/i)
+
+    const verbs = calls.map((c) => c[0])
+    expect(verbs.lastIndexOf('rm')).toBeGreaterThan(verbs.indexOf('run'))
+  })
+
+  test('a cleanup failure does not mask the original error', async () => {
+    // inspect code 1 = no such container, so the only `rm` is the cleanup one.
+    const fake = vi.fn(async (args: string[]) => {
+      if (args[0] === 'inspect') return { stdout: '', stderr: 'No such object', code: 1 }
+      if (args[0] === 'port') return { stdout: '4096/tcp -> 127.0.0.1:41000', stderr: '', code: 0 }
+      if (args[0] === 'rm') throw new Error('docker daemon went away')
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    await expect(
+      startShardContainer({ ...spec, healthTimeoutMs: 50 }, fake, async () => false),
+    ).rejects.toThrow(/health/i)
+  })
+
   test('throws when no port could be discovered', async () => {
     const fake = vi.fn(async (args: string[]) => {
       if (args[0] === 'inspect') return { stdout: 'false', stderr: '', code: 0 }
