@@ -6,6 +6,9 @@ import { splitModelId } from './model-id.js'
 
 export const SUBMISSION_FILE = 'SUBMISSION.md'
 
+/** Resolves which OpenCode server (client) serves a given agent's shard. */
+export type ClientResolver = (handle: AgentHandle) => OpenCodeClient
+
 /** The contract every agent is held to; the judged artifact is SUBMISSION.md. */
 export function buildAgentPrompt(goalMd: string): string {
   return [
@@ -26,19 +29,24 @@ export function buildAgentPrompt(goalMd: string): string {
  * artifact and for Phase 3 parity.
  */
 export class OpenCodeAgentRunner implements AgentRunner {
-  constructor(private client: OpenCodeClient, private sandbox: Sandbox) {}
+  private resolve: ClientResolver
+
+  constructor(client: OpenCodeClient | ClientResolver, private sandbox: Sandbox) {
+    this.resolve = typeof client === 'function' ? client : () => client
+  }
 
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
     const started = Date.now()
     const zero = { tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0 }
+    const client = this.resolve(handle)
 
     let sessionId: string | null = null
     try {
-      const session = await this.client.createSession(handle.workspacePath, `agent-${ctx.agentId}`)
+      const session = await client.createSession(handle.workspacePath, `agent-${ctx.agentId}`)
       sessionId = session.id
 
       const res = await Promise.race([
-        this.client.prompt(
+        client.prompt(
           session.id,
           handle.workspacePath,
           {
@@ -82,7 +90,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
     } catch (e) {
       const isTimeout = e instanceof TimeoutError
       if (isTimeout && sessionId) {
-        await this.client.abort(sessionId, handle.workspacePath).catch(() => {})
+        await client.abort(sessionId, handle.workspacePath).catch(() => {})
       }
       return {
         status: isTimeout ? 'timeout' : 'error',

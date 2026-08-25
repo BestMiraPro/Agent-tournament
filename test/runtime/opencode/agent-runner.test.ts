@@ -92,3 +92,29 @@ describe('OpenCodeAgentRunner', () => {
     expect(c.aborted).toBe(true)
   })
 })
+
+describe('per-shard client resolution', () => {
+  test('uses the client for the handle base url', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'x')
+    const a = new FakeClient(okResponse)
+    const b = new FakeClient(okResponse)
+    const runner = new OpenCodeAgentRunner(
+      (handle) => (handle.baseUrl === h.baseUrl ? (b as never) : (a as never)),
+      sb,
+    )
+    await runner.run(h, ctx('s'))
+    expect(b.lastBody).not.toBeNull()
+    expect(a.lastBody).toBeNull()
+  })
+
+  test('accepts a plain client for the single-server case', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'x')
+    const c = new FakeClient(okResponse)
+    const res = await new OpenCodeAgentRunner(c as never, sb).run(h, ctx('s'))
+    expect(res.status).toBe('ok')
+  })
+})
