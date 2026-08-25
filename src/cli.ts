@@ -10,12 +10,16 @@ import { MockAgentRunner, type AgentRunner } from './runtime/agent-runner.js'
 import { GOOD_KEYWORDS, MockProvider } from './runtime/mock-provider.js'
 import { MockSandbox } from './runtime/mock-sandbox.js'
 import { LocalSandbox } from './runtime/local-sandbox.js'
+import { removeContainer } from './runtime/docker/cli.js'
+import { startShardContainer } from './runtime/docker/container.js'
+import { ensureImage } from './runtime/docker/image.js'
+import { DockerSandbox } from './runtime/docker/sandbox.js'
 import type { Provider } from './runtime/provider.js'
 import { runPool } from './runtime/pool.js'
-import type { Sandbox } from './runtime/sandbox.js'
-import { OpenCodeAgentRunner } from './runtime/opencode/agent-runner.js'
+import type { AgentHandle, Sandbox } from './runtime/sandbox.js'
+import { OpenCodeAgentRunner, type ClientResolver } from './runtime/opencode/agent-runner.js'
 import { validateModel, summarizeValidation, type ModelRole } from './runtime/opencode/capability.js'
-import type { OpenCodeClient } from './runtime/opencode/client.js'
+import { OpenCodeClient } from './runtime/opencode/client.js'
 import { OpenCodeProvider } from './runtime/opencode/provider.js'
 import { attachServer, startServer, type ServerHandle } from './runtime/opencode/server.js'
 
@@ -27,7 +31,20 @@ export interface CliOptions {
   dbPath: string
   criteria: string | null
   mode?: 'mock' | 'real'
+  /**
+   * Which sandbox real mode runs agents in. `'local'` (the default) runs them as host
+   * processes against one shared opencode server; `'docker'` runs them inside
+   * resource-capped containers, sharded across at most `maxContainers` of them. Mock
+   * mode ignores this entirely — it always uses MockSandbox.
+   */
+  sandbox?: 'local' | 'docker'
   workspaceRoot?: string
+  /**
+   * Host path to an opencode `auth.json`, bind-mounted read-only into every agent
+   * container. Docker mode only. Without it the containers have no provider
+   * credentials, so every agent fails on its first model call.
+   */
+  authFile?: string
   serverUrl?: string
   judgeModel?: string
   reflectModel?: string
@@ -179,14 +196,90 @@ function buildRoster(modelIds: string[], population: number, temperature: number
   })
 }
 
+/** The image every agent container runs. Built on demand from docker/Dockerfile.agent. */
+export const AGENT_IMAGE = 'agent-arena:latest'
+
+/**
+ * Decides which sandbox a run actually uses.
+ *
+ * Mock mode ignores `--sandbox` completely: mock agents are pure functions, so there is
+ * nothing to isolate and no server to talk to. Real mode defaults to `'local'` — the
+ * Phase 2 behaviour — and only containerises when asked.
+ *
+ * An unrecognised value is a hard error rather than a fall back to `'local'`: `--sandbox`
+ * arrives as an unvalidated string, and quietly downgrading a typo would run agent-authored
+ * code directly on the host while the operator believed it was containerised.
+ */
+export function resolveSandboxMode(
+  mode: 'mock' | 'real',
+  sandbox: CliOptions['sandbox'],
+): RunConfig['sandbox'] {
+  if (mode === 'mock') return 'mock'
+  const requested = sandbox ?? 'local'
+  if (requested !== 'local' && requested !== 'docker') {
+    throw new Error(`unknown sandbox "${requested}" — expected "local" or "docker"`)
+  }
+  return requested
+}
+
+/**
+ * Builds the per-agent client lookup the OpenCode runner uses.
+ *
+ * Under Docker each shard has its own opencode server on its own published port, so the
+ * single shared client of local mode is wrong — an agent would be prompted against another
+ * shard's server, in a directory that does not exist there. The sandbox is the only thing
+ * that knows the mapping, so `endpoint()` is the source of truth.
+ *
+ * Clients are cached per baseUrl, not per agent: every agent in a shard talks to the same
+ * server, and a fresh client per agent would multiply connections by the population for no
+ * benefit. An empty baseUrl means "no dedicated server" (LocalSandbox), so the shared
+ * client is returned unchanged.
+ */
+export function makeClientResolver(
+  sandbox: Sandbox,
+  shared: OpenCodeClient,
+  create: (baseUrl: string) => OpenCodeClient,
+): ClientResolver {
+  const byBaseUrl = new Map<string, OpenCodeClient>()
+  return (handle: AgentHandle) => {
+    const { baseUrl } = sandbox.endpoint(handle)
+    if (!baseUrl) return shared
+    let client = byBaseUrl.get(baseUrl)
+    if (!client) {
+      client = create(baseUrl)
+      byBaseUrl.set(baseUrl, client)
+    }
+    return client
+  }
+}
+
 interface RealDeps {
   server: ServerHandle
   sandbox: Sandbox
   provider: Provider
   runner: AgentRunner
+  /**
+   * Non-null under Docker only. DockerSandbox has to know the whole population before it
+   * can shard it, but `Sandbox` has no such hook and the driver never calls one, so the
+   * caller must plan each round before `runRound` provisions anything.
+   */
+  planFor: ((agentIds: readonly string[]) => Promise<void>) | null
 }
 
-async function buildRealDeps(opts: CliOptions, config: RunConfig): Promise<RealDeps> {
+/**
+ * `runId` is only known after `engine.createRun`, which needs the engine, which needs the
+ * sandbox — so it cannot be a constructor argument. It is read at container-start time
+ * instead, which happens during the first PREPARE, long after the run row exists.
+ */
+interface RunIdHolder {
+  value: string
+}
+
+async function buildRealDeps(
+  opts: CliOptions,
+  config: RunConfig,
+  runIdHolder: RunIdHolder,
+): Promise<RealDeps> {
   if (!opts.workspaceRoot) {
     throw new Error('real mode requires workspaceRoot')
   }
@@ -194,15 +287,78 @@ async function buildRealDeps(opts: CliOptions, config: RunConfig): Promise<RealD
     ? await attachServer(opts.serverUrl, config.agentTimeoutMs)
     : await startServer({ timeoutMs: config.agentTimeoutMs })
 
-  const sandbox = new LocalSandbox(opts.workspaceRoot)
+  // Judging and reflection always run on the host server, in both sandbox modes: they are
+  // orchestrator work on collected text, not agent work, so they must never be exposed to
+  // an agent-controlled container.
   const provider = new OpenCodeProvider(server.client, opts.workspaceRoot, {
     timeoutMs: config.agentTimeoutMs,
   })
+
+  if (config.sandbox === 'docker') {
+    const authFile = opts.authFile ?? null
+    if (!authFile) {
+      console.warn(
+        'docker sandbox: no --auth-file given, so agent containers start without provider ' +
+          'credentials and every agent will fail on its first model call.',
+      )
+    }
+
+    await ensureImage(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
+
+    const sandbox = new DockerSandbox({
+      runId: runIdHolder.value,
+      root: opts.workspaceRoot,
+      maxContainers: config.maxContainers,
+      image: AGENT_IMAGE,
+      memory: config.containerMemory,
+      cpus: config.containerCpus,
+      authFile,
+      startContainer: (shardIndex, hostDir) =>
+        startShardContainer(
+          {
+            runId: runIdHolder.value,
+            shardIndex,
+            image: AGENT_IMAGE,
+            hostDir,
+            memory: config.containerMemory,
+            cpus: config.containerCpus,
+            authFile,
+          },
+          undefined,
+          // A container is up long before opencode is listening inside it; prompting a
+          // half-started server fails the agent for an infrastructure reason. The probe
+          // timeout is short and independent of agentTimeoutMs — health either answers
+          // in milliseconds or the container is broken.
+          async (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: 10_000 }).health(),
+        ),
+      stopContainer: async (name) => {
+        await removeContainer(name)
+      },
+    })
+
+    return {
+      server,
+      sandbox,
+      provider,
+      runner: new OpenCodeAgentRunner(
+        makeClientResolver(
+          sandbox,
+          server.client,
+          (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: config.agentTimeoutMs }),
+        ),
+        sandbox,
+      ),
+      planFor: (agentIds) => sandbox.planFor(agentIds),
+    }
+  }
+
+  const sandbox = new LocalSandbox(opts.workspaceRoot)
   return {
     server,
     sandbox,
     provider,
     runner: new OpenCodeAgentRunner(server.client, sandbox),
+    planFor: null,
   }
 }
 
@@ -215,12 +371,17 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
   // where there is no process to stop. Declared outside the try so the finally below
   // can still reach it if validation (or anything else after buildRealDeps) throws.
   let stopServer: (() => Promise<void>) | undefined
+  // Releases sandbox resources — under Docker, the shard containers. Same reasoning:
+  // a run that throws mid-round must not leave containers running.
+  let disposeSandbox: (() => Promise<void>) | undefined
 
   try {
     let config: RunConfig
     let sandbox: Sandbox
     let provider: Provider
     let runner: AgentRunner
+    let planFor: ((agentIds: readonly string[]) => Promise<void>) | null = null
+    const runIdHolder: RunIdHolder = { value: '' }
 
     if (mode === 'real') {
       const workerModels =
@@ -228,16 +389,17 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
       config = {
         ...DEFAULT_CONFIG,
         populationSize: opts.population,
-        sandbox: 'local',
+        sandbox: resolveSandboxMode('real', opts.sandbox),
         roster: buildRoster(workerModels, opts.population, 0.7),
         judge: { ...DEFAULT_CONFIG.judge, modelId: opts.judgeModel ?? DEFAULT_REAL_JUDGE_MODEL },
         reflect: { ...DEFAULT_CONFIG.reflect, modelId: opts.reflectModel ?? DEFAULT_REAL_REFLECT_MODEL },
       }
 
-      const built = await buildRealDeps(opts, config)
+      const built = await buildRealDeps(opts, config, runIdHolder)
       sandbox = built.sandbox
       provider = built.provider
       runner = built.runner
+      planFor = built.planFor
       stopServer = built.server.stop
 
       // Pre-flight: fail fast and legibly before any agent runs or money is spent,
@@ -279,11 +441,18 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
     })
 
     const run = engine.createRun('cli', opts.goal)
+    runIdHolder.value = run.id
+    disposeSandbox = () => engine.dispose(run.id)
+
     const rounds: CliOutput['rounds'] = []
     let finalRoundId: string | null = null
     let finalRoundIdx = 0
 
     for (let i = 0; i < opts.rounds; i++) {
+      // Re-planned every round, not once: breeding retires and creates agents, so the
+      // population that round N+1 provisions is not the one round N was sharded for, and
+      // an agent missing from the plan cannot be provisioned at all.
+      if (planFor) await planFor(repos.agents.listActive(run.id).map((a) => a.id))
       const r = await engine.runRound(run.id, { goalMd: opts.goal, criteriaMd: opts.criteria })
       const scores = repos.scores.forRound(r.roundId)
       const values = scores.map((s) => s.score)
@@ -318,7 +487,10 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
     }
   } finally {
     // A failed run (thrown from createRun/runRound) must not leak the opencode
-    // process — this must run whether the try block returns or throws.
+    // process or any shard container — this must run whether the try block returns or
+    // throws. Containers first: they are the expensive resource, and the host server is
+    // unrelated to whether they stop cleanly.
+    if (disposeSandbox) await disposeSandbox()
     if (stopServer) await stopServer()
   }
 }
@@ -335,7 +507,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       seed: { type: 'string', default: '42' },
       db: { type: 'string', default: ':memory:' },
       mode: { type: 'string', default: 'mock' },
+      sandbox: { type: 'string', default: 'local' },
       workspace: { type: 'string' },
+      'auth-file': { type: 'string' },
       server: { type: 'string' },
       'judge-model': { type: 'string' },
       'reflect-model': { type: 'string' },
@@ -352,7 +526,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     dbPath: values.db!,
     criteria: null,
     mode: values.mode === 'real' ? 'real' : 'mock',
+    // Passed through unvalidated on purpose: resolveSandboxMode rejects anything it does
+    // not recognise, so a typo fails loudly instead of silently running unsandboxed.
+    sandbox: values.sandbox as CliOptions['sandbox'],
     workspaceRoot: values.workspace,
+    authFile: values['auth-file'],
     serverUrl: values.server,
     judgeModel: values['judge-model'],
     reflectModel: values['reflect-model'],

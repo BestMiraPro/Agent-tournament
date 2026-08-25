@@ -1468,7 +1468,7 @@ git commit -m "fix: isolate PREPARE failures and dispose sandbox resources"
 - Create: `test/e2e/docker-tournament.test.ts`
 - Test: `test/cli.test.ts` (extend)
 
-- [ ] **Step 1: Add the failing tests to `test/cli.test.ts`**
+- [x] **Step 1: Add the failing tests to `test/cli.test.ts`**
 
 ```typescript
 describe('CLI docker mode', () => {
@@ -1491,19 +1491,19 @@ describe('CLI docker mode', () => {
 })
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run test/cli.test.ts`
 Expected: FAIL — `sandbox` is not a recognised option.
 
-- [ ] **Step 3: Add `containerMemory`, `containerCpus` and `maxContainers` defaults**
+- [x] **Step 3: Add `containerMemory`, `containerCpus` and `maxContainers` defaults**
 
 In `src/core/types.ts`, set `DEFAULT_CONFIG.maxContainers` to `4` and `containerMemory` to `'1g'`,
 with a comment recording the measurement: ~413 MiB per container under real work against ~5.2 GiB
 free on the reference host, so four containers is the safe default and equals the population for
 full isolation at small N.
 
-- [ ] **Step 4: Wire docker mode in `src/cli.ts`**
+- [x] **Step 4: Wire docker mode in `src/cli.ts`**
 
 Add `sandbox?: 'local' | 'docker'` to `CliOptions`, defaulting to `'local'`. When `'docker'` and
 mode is `'real'`:
@@ -1534,7 +1534,7 @@ Resolve the client per shard by passing a resolver to `OpenCodeAgentRunner`, cac
 `OpenCodeClient` per `baseUrl`. Call `await engine.dispose(run.id)` in the `finally` block so
 containers are always stopped. Add `--sandbox` and `--auth-file` CLI flags.
 
-- [ ] **Step 5: Create the gated end-to-end test `test/e2e/docker-tournament.test.ts`**
+- [x] **Step 5: Create the gated end-to-end test `test/e2e/docker-tournament.test.ts`**
 
 ```typescript
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -1574,17 +1574,17 @@ d('docker tournament (ARENA_DOCKER_E2E=1)', () => {
 })
 ```
 
-- [ ] **Step 6: Verify it skips by default**
+- [x] **Step 6: Verify it skips by default**
 
 Run: `npx vitest run test/e2e/docker-tournament.test.ts`
 Expected: skipped, exit 0.
 
-- [ ] **Step 7: Full suite**
+- [x] **Step 7: Full suite**
 
 Run: `npm test && npm run typecheck`
 Expected: all green.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/cli.ts src/core/types.ts test/cli.test.ts test/e2e/docker-tournament.test.ts

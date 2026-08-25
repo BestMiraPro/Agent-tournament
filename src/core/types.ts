@@ -77,6 +77,10 @@ export interface RunConfig {
   maxContainers: number
   containerMemory: string
   containerCpus: number
+  /** Ceiling on what one agent may leave in its workspace, in bytes. */
+  maxWorkspaceBytes: number
+  /** Ceiling on how many files one agent may leave behind (inode exhaustion). */
+  maxWorkspaceFiles: number
   seedDir: string | null
   roster: RosterEntry[]
   judge: {
@@ -108,9 +112,18 @@ export const DEFAULT_CONFIG: RunConfig = {
   concurrency: 8,
   agentTimeoutMs: 600_000,
   sandbox: 'mock',
-  maxContainers: 12,
-  containerMemory: '512m',
+  // Container sizing, measured rather than guessed (2026-08-25, reference host): an agent
+  // container idles at ~250 MiB and peaks at ~413 MiB under real work, against ~5.2 GiB of
+  // free Docker headroom. '512m' left almost no margin over the loaded figure and would
+  // OOM-kill agents mid-round — which surfaces as an agent failure rather than the
+  // infrastructure failure it is — so '1g' is the cap. Four 1g containers is what that
+  // headroom safely allows, and at the small populations run so far it also equals the
+  // population, giving every agent its own container and therefore full isolation.
+  maxContainers: 4,
+  containerMemory: '1g',
   containerCpus: 1,
+  maxWorkspaceBytes: 52_428_800,
+  maxWorkspaceFiles: 2000,
   seedDir: null,
   roster: [
     { modelId: 'opencode/muse-spark-1.2-contributor-free', count: 5, temperature: 0.7 },
