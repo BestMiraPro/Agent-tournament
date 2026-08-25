@@ -1,0 +1,125 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, test } from 'vitest'
+import { DockerSandbox } from '../../../src/runtime/docker/sandbox.js'
+
+const dirs: string[] = []
+const tmp = async () => {
+  const d = await mkdtemp(join(tmpdir(), 'arena-docker-'))
+  dirs.push(d)
+  return d
+}
+afterEach(async () => {
+  for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true })
+})
+
+/** Stands in for the container layer so these tests need no Docker daemon. */
+const fakeContainers = () => {
+  const started: { shardIndex: number; hostDir: string }[] = []
+  const stopped: string[] = []
+  return {
+    started,
+    stopped,
+    start: async (shardIndex: number, hostDir: string) => {
+      started.push({ shardIndex, hostDir })
+      return { name: `arena-t-${shardIndex}`, baseUrl: `http://127.0.0.1:${40000 + shardIndex}`, shardIndex }
+    },
+    stop: async (name: string) => { stopped.push(name) },
+  }
+}
+
+const make = async (agentIds: string[], maxContainers: number) => {
+  const root = await tmp()
+  const c = fakeContainers()
+  const sb = new DockerSandbox({
+    runId: 't', root, maxContainers, image: 'x', memory: '1g', cpus: 1, authFile: null,
+    startContainer: c.start, stopContainer: c.stop,
+  })
+  await sb.planFor(agentIds)
+  return { sb, c, root }
+}
+
+describe('DockerSandbox', () => {
+  test('workspacePath is the CONTAINER path, not the host path', async () => {
+    const { sb } = await make(['a1'], 1)
+    const h = await sb.provision('a1', {})
+    expect(h.workspacePath).toBe('/work/a1')
+  })
+
+  test('endpoint returns the shard container base url', async () => {
+    const { sb } = await make(['a1', 'a2'], 2)
+    const h1 = await sb.provision('a1', {})
+    const h2 = await sb.provision('a2', {})
+    expect(sb.endpoint(h1).baseUrl).not.toBe(sb.endpoint(h2).baseUrl)
+  })
+
+  test('agents in the same shard share a base url', async () => {
+    const { sb } = await make(['a1', 'a2'], 1)
+    const h1 = await sb.provision('a1', {})
+    const h2 = await sb.provision('a2', {})
+    expect(sb.endpoint(h1).baseUrl).toBe(sb.endpoint(h2).baseUrl)
+  })
+
+  test('starts one container per shard, not per agent', async () => {
+    const { sb, c } = await make(['a1', 'a2', 'a3', 'a4'], 2)
+    for (const id of ['a1', 'a2', 'a3', 'a4']) await sb.provision(id, {})
+    expect(c.started).toHaveLength(2)
+  })
+
+  test('each shard mounts its own directory, isolating shards from each other', async () => {
+    const { sb, c, root } = await make(['a1', 'a2'], 2)
+    // Containers start lazily, on the first provision into each shard.
+    await sb.provision('a1', {})
+    await sb.provision('a2', {})
+    expect(c.started.map((s) => s.hostDir).sort()).toEqual(
+      [join(root, 'shard-0'), join(root, 'shard-1')].sort(),
+    )
+  })
+
+  test('file operations use the host path and round-trip', async () => {
+    const { sb } = await make(['a1'], 1)
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'answer')
+    expect(await sb.readFile(h, 'SUBMISSION.md')).toBe('answer')
+  })
+
+  test('writes nested paths such as the genome file', async () => {
+    const { sb } = await make(['a1'], 1)
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, '.opencode/agents/competitor.md', 'genome')
+    expect(await sb.readFile(h, '.opencode/agents/competitor.md')).toBe('genome')
+  })
+
+  test('listFiles excludes opencode plumbing', async () => {
+    const { sb } = await make(['a1'], 1)
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'a')
+    await sb.writeFile(h, '.opencode/node_modules/x.js', 'b')
+    expect((await sb.listFiles(h)).map((f) => f.path)).toEqual(['SUBMISSION.md'])
+  })
+
+  test('reset clears the workspace but keeps the container', async () => {
+    const { sb, c } = await make(['a1'], 1)
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'X.md', 'data')
+    await sb.reset(h, {})
+    expect(await sb.readFile(h, 'X.md')).toBeNull()
+    expect(c.stopped).toEqual([])
+  })
+
+  test('teardown stops every shard container exactly once', async () => {
+    const { sb, c } = await make(['a1', 'a2', 'a3'], 2)
+    const h1 = await sb.provision('a1', {})
+    const h2 = await sb.provision('a2', {})
+    await sb.teardown(h1)
+    await sb.teardown(h2)
+    expect(new Set(c.stopped).size).toBe(c.stopped.length)
+  })
+
+  test('rejects paths escaping the workspace', async () => {
+    const { sb } = await make(['a1'], 1)
+    const h = await sb.provision('a1', {})
+    await expect(sb.writeFile(h, '../escape.md', 'x')).rejects.toThrow(/escape|outside/i)
+  })
+})
