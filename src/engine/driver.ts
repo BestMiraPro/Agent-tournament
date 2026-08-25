@@ -319,6 +319,17 @@ export class TournamentEngine {
         .teardown({ agentId: a.id, workspacePath: '', baseUrl: '' })
         .catch(() => {})
     }
+
+    // Per-agent teardown depends on bookkeeping that can go wrong: a sibling whose
+    // provisioning failed, a planned agent that was never provisioned, or a culled
+    // agent no longer in the active population all fall outside the loop above.
+    // Sandboxes that track every resource they ever started (DockerSandbox) expose
+    // disposeAll() as an unconditional backstop; call it when the sandbox provides
+    // one so nothing it started can outlive the run.
+    const disposeAll = (this.d.sandbox as Partial<{ disposeAll: () => Promise<void> }>).disposeAll
+    if (typeof disposeAll === 'function') {
+      await disposeAll.call(this.d.sandbox).catch(() => {})
+    }
   }
 }
 

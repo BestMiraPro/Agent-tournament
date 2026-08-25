@@ -38,6 +38,11 @@ export class DockerSandbox implements Sandbox {
   private shards: Shard[] = []
   private containers = new Map<number, StartedContainer>()
   private live = new Set<string>()
+  /** Every container ever started, keyed by name. Never pruned by `teardown`, so
+   *  `disposeAll` can clean up a container even after its per-shard bookkeeping
+   *  in `containers` has been removed. */
+  private everStarted = new Map<string, StartedContainer>()
+  private stoppedNames = new Set<string>()
 
   constructor(private opts: DockerSandboxOptions) {}
 
@@ -91,6 +96,7 @@ export class DockerSandbox implements Sandbox {
       await mkdir(this.shardHostDir(shardIndex), { recursive: true })
       container = await this.opts.startContainer(shardIndex, this.shardHostDir(shardIndex))
       this.containers.set(shardIndex, container)
+      this.everStarted.set(container.name, container)
     }
 
     this.live.add(agentId)
@@ -157,10 +163,17 @@ export class DockerSandbox implements Sandbox {
     return { baseUrl: handle.baseUrl }
   }
 
-  /** Stops the agent's shard container once every agent in that shard is torn down. */
+  /**
+   * Stops the agent's shard container once every agent in that shard is torn down.
+   *
+   * Teardown is cleanup — it must never be the thing that fails a run. If the agent was
+   * never part of the plan (e.g. a population change removed it before the driver got
+   * around to tearing it down), this is a quiet no-op rather than a thrown error.
+   */
   async teardown(handle: AgentHandle): Promise<void> {
     this.live.delete(handle.agentId)
-    const shardIndex = this.shardFor(handle.agentId)
+    const shardIndex = shardIndexOf(this.shards, handle.agentId)
+    if (shardIndex === null) return
     const shard = this.shards.find((s) => s.shardIndex === shardIndex)
     if (!shard) return
     if (shard.agentIds.some((id) => this.live.has(id))) return
@@ -168,7 +181,32 @@ export class DockerSandbox implements Sandbox {
     const container = this.containers.get(shardIndex)
     if (container) {
       this.containers.delete(shardIndex)
-      await this.opts.stopContainer(container.name)
+      await this.stopOnce(container)
     }
+  }
+
+  private async stopOnce(container: StartedContainer): Promise<void> {
+    if (this.stoppedNames.has(container.name)) return
+    this.stoppedNames.add(container.name)
+    await this.opts.stopContainer(container.name)
+  }
+
+  /**
+   * Stops every container this sandbox ever started, regardless of `live` state.
+   *
+   * `teardown` only stops a shard's container once every agent that ever shared it has
+   * been individually torn down — a check that depends on bookkeeping which can go wrong
+   * (a sibling whose provisioning failed, a planned agent never provisioned at all, a
+   * culled agent that no longer appears in the active population). `disposeAll` sidesteps
+   * that fragility entirely: it is the unconditional backstop that guarantees no shard
+   * container outlives the run. Safe to call more than once — each container is stopped
+   * at most once.
+   */
+  async disposeAll(): Promise<void> {
+    for (const container of this.everStarted.values()) {
+      await this.stopOnce(container)
+    }
+    this.containers.clear()
+    this.live.clear()
   }
 }

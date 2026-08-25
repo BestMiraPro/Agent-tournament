@@ -122,4 +122,38 @@ describe('DockerSandbox', () => {
     const h = await sb.provision('a1', {})
     await expect(sb.writeFile(h, '../escape.md', 'x')).rejects.toThrow(/escape|outside/i)
   })
+
+  test('teardown on an unplanned agent does not throw', async () => {
+    const { sb } = await make(['a1'], 1)
+    await sb.provision('a1', {})
+    // A population change can remove an agent from the plan entirely; a later
+    // teardown for it must be a quiet no-op, not a thrown error.
+    await expect(
+      sb.teardown({ agentId: 'ghost', workspacePath: '', baseUrl: '' }),
+    ).resolves.toBeUndefined()
+  })
+})
+
+describe('DockerSandbox.disposeAll', () => {
+  test('stops every started container, regardless of live state', async () => {
+    const { sb, c } = await make(['a1', 'a2', 'a3', 'a4'], 2)
+    // a1 and a2 each start their shard's container (shard-0 and shard-1
+    // respectively). a3 and a4 are planned into those same shards but are
+    // never provisioned — simulating a sibling whose provisioning failed, or
+    // a planned agent that was never provisioned at all. Neither shard's
+    // container is ever torn down via `teardown`.
+    await sb.provision('a1', {})
+    await sb.provision('a2', {})
+    await sb.disposeAll()
+    expect(c.stopped.slice().sort()).toEqual(['arena-t-0', 'arena-t-1'])
+  })
+
+  test('is safe to call twice: each container is stopped only once', async () => {
+    const { sb, c } = await make(['a1', 'a2'], 2)
+    await sb.provision('a1', {})
+    await sb.provision('a2', {})
+    await sb.disposeAll()
+    await sb.disposeAll()
+    expect(c.stopped.slice().sort()).toEqual(['arena-t-0', 'arena-t-1'])
+  })
 })
