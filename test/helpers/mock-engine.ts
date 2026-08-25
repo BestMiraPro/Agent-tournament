@@ -7,6 +7,7 @@ import { Judge, type JudgeInput, type JudgeOutput } from '../../src/judge/judge.
 import { Reflector } from '../../src/evolution/reflect.js'
 import { GOOD_KEYWORDS, MockProvider } from '../../src/runtime/mock-provider.js'
 import { MockSandbox } from '../../src/runtime/mock-sandbox.js'
+import type { AgentHandle, ProvisionOpts, Sandbox } from '../../src/runtime/sandbox.js'
 import { MockAgentRunner, type AgentRunner } from '../../src/runtime/agent-runner.js'
 
 /**
@@ -64,6 +65,35 @@ class ScrambledJudge extends Judge {
   }
 }
 
+/**
+ * Wraps a sandbox so that `provision` throws for the agent at the given ordinal
+ * position — the Nth distinct agentId it is ever asked to provision, zero-indexed.
+ * Stands in for a real provisioning failure (port exhaustion, image pull, OOM)
+ * without needing Docker, so PREPARE's failure-isolation can be exercised.
+ */
+function withFailProvision(sandbox: Sandbox, failIndex: number): Sandbox {
+  const seen = new Set<string>()
+  let ordinal = -1
+  return {
+    provision: async (agentId: string, opts: ProvisionOpts) => {
+      if (!seen.has(agentId)) {
+        seen.add(agentId)
+        ordinal++
+        if (ordinal === failIndex) {
+          throw new Error(`simulated provisioning failure for agent at index ${failIndex}`)
+        }
+      }
+      return sandbox.provision(agentId, opts)
+    },
+    reset: (h: AgentHandle, opts: ProvisionOpts) => sandbox.reset(h, opts),
+    writeFile: (h: AgentHandle, relPath: string, content: string) => sandbox.writeFile(h, relPath, content),
+    readFile: (h: AgentHandle, relPath: string) => sandbox.readFile(h, relPath),
+    listFiles: (h: AgentHandle) => sandbox.listFiles(h),
+    endpoint: (h: AgentHandle) => sandbox.endpoint(h),
+    teardown: (h: AgentHandle) => sandbox.teardown(h),
+  }
+}
+
 export function makeMockEngine(opts: {
   seed: number
   populationSize: number
@@ -74,6 +104,8 @@ export function makeMockEngine(opts: {
   hangingRunner?: boolean
   /** Build a roster whose counts do not sum to `populationSize`. */
   rosterMismatch?: boolean
+  /** Make sandbox.provision throw for the agent at this ordinal (zero-indexed). */
+  failProvisionFor?: number
 }) {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
@@ -93,7 +125,9 @@ export function makeMockEngine(opts: {
   }
 
   const provider = new MockProvider(opts.seed)
-  const sandbox = new MockSandbox()
+  const sandbox: Sandbox = opts.failProvisionFor !== undefined
+    ? withFailProvision(new MockSandbox(), opts.failProvisionFor)
+    : new MockSandbox()
   const judge = opts.scrambleRanks
     ? new ScrambledJudge(provider, config.judge, opts.seed, opts.seed + 1000)
     : new Judge(provider, config.judge, opts.seed)

@@ -133,3 +133,24 @@ describe('driver hardening', () => {
     }
   })
 })
+
+describe('driver sandbox lifecycle', () => {
+  test('tears down every agent workspace when the run is disposed', async () => {
+    const { engine, repos, sandbox } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    await engine.dispose(run.id)
+    const agents = repos.agents.listActive(run.id)
+    const h = { agentId: agents[0]!.id, workspacePath: '', baseUrl: '' }
+    await expect(sandbox.readFile(h as never, 'GOAL.md')).rejects.toThrow(/torn down/i)
+  })
+
+  test('a provisioning failure does not abort the round', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4, failProvisionFor: 1 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    const scores = repos.scores.forRound(round.roundId)
+    expect(scores).toHaveLength(4)
+    expect(scores.filter((s) => s.score === 0).length).toBeGreaterThanOrEqual(1)
+  })
+})

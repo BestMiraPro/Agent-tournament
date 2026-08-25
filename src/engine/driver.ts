@@ -8,7 +8,7 @@ import type { TopPerformer } from '../evolution/prompts.js'
 import type { Judge, JudgeInput } from '../judge/judge.js'
 import type { AgentRunner, AgentRunResult } from '../runtime/agent-runner.js'
 import { runPool } from '../runtime/pool.js'
-import type { Sandbox } from '../runtime/sandbox.js'
+import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
 
 export interface EngineDeps {
   repos: Repos
@@ -88,8 +88,10 @@ export class TournamentEngine {
         return genome ? [{ agent: a, genome }] : []
       })
 
-      const handles = new Map<string, Awaited<ReturnType<Sandbox['provision']>>>()
-      for (const p of prepared) {
+      // One provisioning failure (port exhaustion, image pull, OOM under Docker) must
+      // not abort the round before any agent runs — isolate each agent's PREPARE work
+      // through the pool rather than a plain sequential loop.
+      const prepResults = await runPool(prepared, config.concurrency, async (p) => {
         const h = await this.d.sandbox.provision(p.agent.id, {
           seedDir: config.seedDir ?? undefined,
         })
@@ -101,14 +103,36 @@ export class TournamentEngine {
           '.opencode/agents/competitor.md',
           serializeGenome(p.genome, { label: p.agent.label }),
         )
-        handles.set(p.agent.id, h)
-      }
+        return h
+      })
+
+      const handles = new Map<string, AgentHandle>()
+      const prepFailed = new Map<string, string>()
+      prepResults.forEach((r, i) => {
+        const agentId = prepared[i]!.agent.id
+        if (r.ok) handles.set(agentId, r.value)
+        else prepFailed.set(agentId, String(r.error).slice(0, 500))
+      })
 
       // RUN
       repos.rounds.setStatus(round.id, 'running')
       // The timeout is enforced here, not delegated to the runner: a runner that
       // ignores or mishandles `timeoutMs` would otherwise hang the whole round.
       const runResults = await runPool(prepared, config.concurrency, async (p) => {
+        // An agent whose provisioning failed has no handle to run against; record it
+        // as the error it already is instead of calling the runner with a missing
+        // handle.
+        const prepError = prepFailed.get(p.agent.id)
+        if (prepError !== undefined) {
+          const failed: AgentRunResult = {
+            status: 'error',
+            errorText: `provisioning failed: ${prepError}`,
+            tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
+            costUsd: 0, durationMs: 0,
+          }
+          return failed
+        }
+
         const started = Date.now()
         let timer: ReturnType<typeof setTimeout> | undefined
         try {
@@ -146,9 +170,11 @@ export class TournamentEngine {
       const judgeInputs: JudgeInput[] = []
       for (const [i, p] of prepared.entries()) {
         const res = runResults[i]!
-        const handle = handles.get(p.agent.id)!
-        const submissionMd = res.ok ? await this.d.sandbox.readFile(handle, 'SUBMISSION.md') : null
-        const files = res.ok ? await this.d.sandbox.listFiles(handle) : []
+        // No handle exists when this agent's own provisioning failed: there is no
+        // workspace to read a submission from.
+        const handle = handles.get(p.agent.id)
+        const submissionMd = res.ok && handle ? await this.d.sandbox.readFile(handle, 'SUBMISSION.md') : null
+        const files = res.ok && handle ? await this.d.sandbox.listFiles(handle) : []
 
         // A non-'ok' runner status is the actual reason there is nothing to judge and
         // must survive to the submission row. Deriving the status from the file alone
@@ -175,7 +201,7 @@ export class TournamentEngine {
           genomeId: p.genome.id,
           submissionMd,
           fileManifest: files,
-          workspacePath: handle.workspacePath,
+          workspacePath: handle?.workspacePath ?? '',
           status,
           errorText: res.ok ? res.value.errorText : String(res.error).slice(0, 500),
           tokensIn: res.ok ? res.value.tokensIn : 0,
@@ -282,6 +308,16 @@ export class TournamentEngine {
     } catch (e) {
       repos.rounds.setStatus(round.id, 'failed')
       throw e
+    }
+  }
+
+  /** Releases sandbox resources. With Docker this stops the shard containers. */
+  async dispose(runId: string): Promise<void> {
+    const agents = this.d.repos.agents.listActive(runId)
+    for (const a of agents) {
+      await this.d.sandbox
+        .teardown({ agentId: a.id, workspacePath: '', baseUrl: '' })
+        .catch(() => {})
     }
   }
 }
