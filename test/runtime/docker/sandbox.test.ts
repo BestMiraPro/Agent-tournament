@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DockerSandbox } from '../../../src/runtime/docker/sandbox.js'
+import { workspaceIsolated } from '../../../src/engine/capture.js'
 
 const dirs: string[] = []
 const tmp = async () => {
@@ -39,6 +40,79 @@ const make = async (agentIds: string[], maxContainers: number) => {
   await sb.planFor(agentIds)
   return { sb, c, root }
 }
+
+describe('DockerSandbox.isolatedWorkspace', () => {
+  test('one agent alone on a shard is isolated', async () => {
+    const { sb } = await make(['a1', 'a2'], 2)
+    const h1 = await sb.provision('a1', {})
+    expect(sb.isolatedWorkspace(h1)).toBe(true)
+  })
+
+  test('two agents sharing a shard are NOT isolated — for both of them', async () => {
+    const { sb } = await make(['a1', 'a2'], 1)
+    const h1 = await sb.provision('a1', {})
+    const h2 = await sb.provision('a2', {})
+    expect(sb.isolatedWorkspace(h1)).toBe(false)
+    expect(sb.isolatedWorkspace(h2)).toBe(false)
+  })
+
+  test('three agents on two shards: only the one that is alone is isolated', async () => {
+    // Round-robin puts a1+a3 on shard 0 and a2 alone on shard 1.
+    const { sb } = await make(['a1', 'a2', 'a3'], 2)
+    const h1 = await sb.provision('a1', {})
+    const h2 = await sb.provision('a2', {})
+    const h3 = await sb.provision('a3', {})
+    expect(sb.isolatedWorkspace(h1)).toBe(false)
+    expect(sb.isolatedWorkspace(h2)).toBe(true)
+    expect(sb.isolatedWorkspace(h3)).toBe(false)
+  })
+
+  test('an agent that was never planned is not isolated', async () => {
+    const { sb } = await make(['a1'], 4)
+    expect(
+      sb.isolatedWorkspace({ agentId: 'ghost', workspacePath: '/work/ghost', baseUrl: '' }),
+    ).toBe(false)
+  })
+
+  test('with no plan at all, nothing is isolated', async () => {
+    const root = await tmp()
+    const c = fakeContainers()
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 8, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      startContainer: c.start, stopContainer: c.stop,
+    })
+    // planFor deliberately not called.
+    expect(
+      sb.isolatedWorkspace({ agentId: 'a1', workspacePath: '/work/a1', baseUrl: '' }),
+    ).toBe(false)
+  })
+
+  test('re-planning a solo agent alongside a co-tenant revokes its isolation', async () => {
+    const { sb } = await make(['a1'], 4)
+    const h1 = await sb.provision('a1', {})
+    expect(sb.isolatedWorkspace(h1)).toBe(true)
+    // Breeding grows the population; the next round shards it differently.
+    await sb.planFor(['a1', 'a2', 'a3', 'a4', 'a5'])
+    expect(sb.isolatedWorkspace(h1)).toBe(false)
+  })
+
+  test('a torn-down co-tenant does not restore isolation — it could already have written', async () => {
+    const { sb } = await make(['a1', 'a2'], 1)
+    const h1 = await sb.provision('a1', {})
+    const h2 = await sb.provision('a2', {})
+    await sb.teardown(h2)
+    expect(sb.isolatedWorkspace(h1)).toBe(false)
+  })
+
+  test('capability-detected by workspaceIsolated rather than assumed', async () => {
+    const { sb } = await make(['a1'], 1)
+    const h = await sb.provision('a1', {})
+    expect(workspaceIsolated(sb, h)).toBe(true)
+    const shared = await make(['b1', 'b2'], 1)
+    const hb = await shared.sb.provision('b1', {})
+    expect(workspaceIsolated(shared.sb, hb)).toBe(false)
+  })
+})
 
 describe('DockerSandbox', () => {
   test('workspacePath is the CONTAINER path, not the host path', async () => {

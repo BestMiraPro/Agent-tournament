@@ -117,8 +117,24 @@ export const DEFAULT_CONFIG: RunConfig = {
   // free Docker headroom. '512m' left almost no margin over the loaded figure and would
   // OOM-kill agents mid-round — which surfaces as an agent failure rather than the
   // infrastructure failure it is — so '1g' is the cap. Four 1g containers is what that
-  // headroom safely allows, and at the small populations run so far it also equals the
-  // population, giving every agent its own container and therefore full isolation.
+  // headroom safely allows: the capacity preflight commits at most 80% of free memory, so
+  // 5.2 GiB free funds 4 containers and refuses a 5th.
+  //
+  // These two numbers do NOT buy workspace isolation, and it would be wrong to read them
+  // that way. maxContainers 4 against populationSize 20 is FIVE agents per container, and
+  // a shard is a single bind mount — every co-tenant can write into the others'
+  // workspaces. So under stock defaults DockerSandbox.isolatedWorkspace() is false for
+  // every agent, no capture is ever sealed, and no submission is ever certified
+  // verified-intact. Tamper *detection* still works (a positive finding needs only the
+  // round-wide barrier, not a sealed capture), and that is the whole of the protection
+  // these defaults provide: interference is recorded after the fact, not prevented.
+  //
+  // One container per agent is what makes "this is the agent's own unmodified work" a
+  // certifiable claim, and it costs maxContainers >= populationSize: at 20 x 1g that is
+  // 20 GiB committed, which the 80% headroom rule turns into 25 GiB of free Docker memory,
+  // plus 20 host CPUs for the containerCpus: 1 check. That is ~5x the reference host.
+  // Raising maxContainers alone does not achieve it — the preflight would simply refuse
+  // the run on any host that cannot fund it.
   maxContainers: 4,
   containerMemory: '1g',
   containerCpus: 1,

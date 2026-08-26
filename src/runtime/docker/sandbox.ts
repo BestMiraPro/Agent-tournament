@@ -61,6 +61,44 @@ export class DockerSandbox implements Sandbox {
     return idx
   }
 
+  /**
+   * Whether this agent is the ONLY party that could write into its workspace.
+   *
+   * A shard is one container with one bind mount: `shard-<n>/` on the host becomes
+   * `/work/` inside, and every agent placed on that shard gets a subdirectory of it. So
+   * co-tenants are not merely neighbours — each can write into the others' workspaces
+   * directly. Isolation therefore means exactly one thing here: this agent is the sole
+   * member of its shard, which is what `maxContainers >= populationSize` buys.
+   *
+   * `capture.ts` uses this to decide whether an intact submission may be certified as the
+   * agent's own work, so a wrong `true` is a security failure rather than a bug: it would
+   * certify a rival's substituted file as the victim's. Every branch that cannot PROVE
+   * sole occupancy therefore returns false — no plan yet, an agent absent from the plan,
+   * a shard record that cannot be found, or any occupant list that is not precisely this
+   * one agent.
+   *
+   * Deliberately reads the PLAN rather than live occupancy. A co-tenant that has since
+   * been torn down could still have written into this workspace earlier in the round, and
+   * teardown does not un-write it. Sole occupancy has to hold for the whole round, and
+   * only the plan says that.
+   *
+   * Never throws: an exception here would propagate through the capture path and lose the
+   * submission entirely, and the caller treats a thrown check as false anyway.
+   */
+  isolatedWorkspace(handle: AgentHandle): boolean {
+    try {
+      const shardIndex = shardIndexOf(this.shards, handle.agentId)
+      if (shardIndex === null) return false
+      const shard = this.shards.find((s) => s.shardIndex === shardIndex)
+      if (!shard) return false
+      // Not `length === 1 && includes(id)`: an occupant list that somehow repeated this
+      // agent is a bookkeeping state we cannot reason about, so it reads as not isolated.
+      return shard.agentIds.length === 1 && shard.agentIds[0] === handle.agentId
+    } catch {
+      return false
+    }
+  }
+
   private shardHostDir(shardIndex: number): string {
     return join(this.opts.root, `shard-${shardIndex}`)
   }
