@@ -1,4 +1,5 @@
 import { serializeGenome } from '../../core/genome.js'
+import type { QuiesceStatus } from '../../engine/capture.js'
 import type { AgentRunContext, AgentRunner, AgentRunResult } from '../agent-runner.js'
 import type { AgentHandle, Sandbox } from '../sandbox.js'
 import type { OpenCodeClient } from './client.js'
@@ -30,9 +31,42 @@ export function buildAgentPrompt(goalMd: string): string {
  */
 export class OpenCodeAgentRunner implements AgentRunner {
   private resolve: ClientResolver
+  /** Runs that have not returned yet, so `quiesce` knows what is still executing. */
+  private live = new Map<string, LiveRun>()
 
   constructor(client: OpenCodeClient | ClientResolver, private sandbox: Sandbox) {
     this.resolve = typeof client === 'function' ? client : () => client
+  }
+
+  /**
+   * Aborts this agent's session and waits for its run to actually come back.
+   *
+   * The abort acknowledgement alone is not proof: it says the server accepted the
+   * request, not that the session's last tool call has finished writing. The run
+   * promise settling is the evidence, so that is what is waited on — and when it does
+   * not settle in time the answer is `unconfirmed`, never a silent `stopped`.
+   */
+  async quiesce(handle: AgentHandle): Promise<QuiesceStatus> {
+    const run = this.live.get(handle.agentId)
+    // Absent means `run` already returned, which is the strongest confirmation there is.
+    if (run === undefined) return 'stopped'
+
+    if (run.sessionId !== null) {
+      // A failed abort is not decisive either way; settlement below still rules.
+      await run.client.abort(run.sessionId, run.directory).catch(() => {})
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        run.done.then((): QuiesceStatus => 'stopped'),
+        new Promise<QuiesceStatus>((resolve) => {
+          timer = setTimeout(() => resolve('unconfirmed'), QUIESCE_GRACE_MS)
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
@@ -40,10 +74,22 @@ export class OpenCodeAgentRunner implements AgentRunner {
     const zero = { tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0 }
     const client = this.resolve(handle)
 
+    let settle = (): void => {}
+    const tracked: LiveRun = {
+      client,
+      sessionId: null,
+      directory: handle.workspacePath,
+      done: new Promise<void>((resolve) => {
+        settle = resolve
+      }),
+    }
+    this.live.set(ctx.agentId, tracked)
+
     let sessionId: string | null = null
     try {
       const session = await client.createSession(handle.workspacePath, `agent-${ctx.agentId}`)
       sessionId = session.id
+      tracked.sessionId = session.id
 
       const res = await Promise.race([
         client.prompt(
@@ -98,9 +144,24 @@ export class OpenCodeAgentRunner implements AgentRunner {
         ...zero,
         durationMs: Date.now() - started,
       }
+    } finally {
+      // Only reached once nothing else in this method can run, which is exactly the
+      // condition `quiesce` reports as `stopped`.
+      this.live.delete(ctx.agentId)
+      settle()
     }
   }
 }
+
+interface LiveRun {
+  client: OpenCodeClient
+  sessionId: string | null
+  directory: string
+  done: Promise<void>
+}
+
+/** How long `quiesce` waits for an aborted run to come back before giving up on it. */
+export const QUIESCE_GRACE_MS = 10_000
 
 class TimeoutError extends Error {
   constructor() {

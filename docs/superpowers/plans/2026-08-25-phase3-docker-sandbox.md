@@ -1766,13 +1766,62 @@ git commit -m "feat: refuse to start a run that would overcommit the host"
 
 ## Task 12: Output capture, tamper detection and workspace quota
 
+> **Implemented with five amendments** (2026-08-26), after review found holes in the design below:
+>
+> - **(A) The capture TOCTOU window.** Capturing "immediately after the runner returns" is not
+>   enough: the runner returning only means the driver stopped waiting. The agent's own session
+>   can still be mid-tool-call (certain on the timeout path), and co-tenants of a shared shard
+>   are still executing. So `AgentRunner` gained an optional `quiesce(handle)` that aborts the
+>   session and waits for the run to actually come back, the driver calls it before every
+>   capture, and COLLECT only calls a verdict `verified` once every agent in the round has been
+>   confirmed stopped. See "Residual" below for what this does *not* fix.
+> - **(B) Every file is hashed**, not only SUBMISSION.md — `Capture.hashes` is a path -> sha256
+>   map over the whole manifest, and `verifyCapture` re-reads all of it (plus flags files
+>   planted after capture). Bounded by `hashBudget` so a hostile manifest cannot make the
+>   orchestrator read a million files.
+> - **(C) `maxWorkspaceFiles` defaults to 2000, not 500.** 500 is a false-positive trap: an
+>   `npm install` alone exceeds it. The check itself stays — `--pids-limit` does not stop one
+>   process from exhausting inodes.
+> - **(D) `capturedAt` kept** as audit trail.
+>
+> - **(E) `sealed` gates the "intact" verdict.** The first implementation of (A) computed
+>   `Capture.sealed` and then never read it: `verifyCapture` derived `verified` from the
+>   round-wide barrier alone, so a rival that substituted a file *before* the capture read was
+>   reported `tampered: false, verified: true` — the system stamping the attacker's file as the
+>   victim's own certified work, which is the precise failure (A) exists to prevent. The rule is
+>   now asymmetric, because the two directions need different evidence:
+>   - a POSITIVE finding needs the barrier and complete hashes; a difference observed once
+>     nothing can be writing is a fact, and does not need a sealed capture;
+>   - a NEGATIVE finding ("intact") additionally needs `capture.sealed`, since an unsealed
+>     capture may already hold the substitute.
+>
+>   `sealed` is asserted by the driver only when *both* writers are excluded: this agent
+>   (`quiesce` returned `stopped`) and any co-tenant (`workspaceIsolated(sandbox, handle)`, a
+>   capability check that is pessimistic when the sandbox cannot answer). Every agent now gets a
+>   `submission.captured` audit event carrying `{sealed, verified, tampered, hashesComplete}`,
+>   so "checked and clean" is distinguishable from "could not be checked" — absence of a
+>   `submission.tampered` event is not a clean bill of health.
+>
+> **Residual, unfixable by capture timing:** in shared-shard mode a rival can overwrite a
+> workspace *while its owner is still running*, and that is indistinguishable from the owner's
+> own writes — no capture schedule detects it. The only closures are one container per agent
+> (`maxContainers >= populationSize`) or stopping the whole shard container before reading any
+> workspace in it. **`DEFAULT_CONFIG` does not currently satisfy this**: `populationSize: 20`
+> against `maxContainers: 4` is five co-tenants per container, so under the defaults no capture
+> is ever sealed and every honest verdict is `verified: false`. That is the truthful report of
+> the guarantee available at that setting, not a bug in capture — but it does mean tamper
+> *detection* (the positive direction) is the only protection the default config actually buys.
+> Closing it needs either `maxContainers >= populationSize` (a memory decision, measured in
+> Task 11 as four 1g containers) or `DockerSandbox.isolatedWorkspace()` reporting per-shard
+> occupancy so the distinction is at least visible per agent.
+
 Three guardrails that sit at the boundary between an agent finishing and its work being judged.
 
 **Files:**
 - Create: `src/engine/capture.ts`
 - Test: `test/engine/capture.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 import { describe, expect, test } from 'vitest'
@@ -1863,12 +1912,12 @@ describe('checkQuota', () => {
 })
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run test/engine/capture.test.ts`
 Expected: FAIL — cannot resolve `capture.js`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```typescript
 import { createHash } from 'node:crypto'
@@ -1971,12 +2020,12 @@ export function checkQuota(files: readonly FileEntry[], quota: Quota): QuotaVerd
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/engine/capture.test.ts`
 Expected: PASS, 11 tests.
 
-- [ ] **Step 5: Wire it into the driver**
+- [x] **Step 5: Wire it into the driver**
 
 In `src/engine/driver.ts`, inside the RUN pool worker, call `captureSubmission` immediately after
 the runner returns, and keep the capture per agent. In COLLECT, use the **captured** text as the
@@ -1991,7 +2040,7 @@ one penalised.
 Add the quota fields to `RunConfig` with defaults: `maxWorkspaceBytes: 52_428_800` (50MB),
 `maxWorkspaceFiles: 500`.
 
-- [ ] **Step 6: Add driver tests**
+- [x] **Step 6: Add driver tests**
 
 ```typescript
 describe('driver capture guardrails', () => {
@@ -2015,12 +2064,12 @@ describe('driver capture guardrails', () => {
 Add a `floodFilesFor?: number` option to `makeMockEngine` that makes the runner for that agent index
 write more files than the quota allows.
 
-- [ ] **Step 7: Run the full suite**
+- [x] **Step 7: Run the full suite**
 
 Run: `npm test && npm run typecheck`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/engine/capture.ts src/engine/driver.ts src/core/types.ts test/engine/capture.test.ts test/engine/driver.test.ts test/helpers/mock-engine.ts

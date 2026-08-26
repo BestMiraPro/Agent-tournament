@@ -3,6 +3,15 @@ import { planSelection } from '../core/selection.js'
 import type { Genome, RunConfig, SubmissionStatus } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
 import { breed } from '../evolution/breed.js'
+import {
+  captureSubmission,
+  checkQuota,
+  quiesceAgent,
+  verifyCapture,
+  workspaceIsolated,
+  type Capture,
+  type QuiesceStatus,
+} from './capture.js'
 import type { Reflector } from '../evolution/reflect.js'
 import type { TopPerformer } from '../evolution/prompts.js'
 import type { Judge, JudgeInput } from '../judge/judge.js'
@@ -116,6 +125,11 @@ export class TournamentEngine {
 
       // RUN
       repos.rounds.setStatus(round.id, 'running')
+      // Output is captured inside the pool worker, the instant its agent stops, rather
+      // than in COLLECT: a rival sharing the container is still executing until the pool
+      // drains, and anything it destroys before then would be destroyed for good.
+      const captures = new Map<string, Capture>()
+      const quiesced = new Map<string, QuiesceStatus>()
       // The timeout is enforced here, not delegated to the runner: a runner that
       // ignores or mishandles `timeoutMs` would otherwise hang the whole round.
       const runResults = await runPool(prepared, config.concurrency, async (p) => {
@@ -133,11 +147,12 @@ export class TournamentEngine {
           return failed
         }
 
+        const handle = handles.get(p.agent.id)!
         const started = Date.now()
         let timer: ReturnType<typeof setTimeout> | undefined
         try {
           return await Promise.race([
-            this.d.runner.run(handles.get(p.agent.id)!, {
+            this.d.runner.run(handle, {
               agentId: p.agent.id,
               genome: p.genome,
               goalMd: input.goalMd,
@@ -162,19 +177,106 @@ export class TournamentEngine {
           // Without this the loser of the race keeps a timer alive for the full
           // agentTimeoutMs after every round, holding the process open.
           clearTimeout(timer)
+
+          // Capturing here rather than after the pool is deliberate, and so is the order:
+          // the run promise settling only means the driver stopped waiting — on the
+          // timeout path the agent's own session is still live and still writing into the
+          // directory about to be hashed. Stop it first, then read; otherwise the hash
+          // certifies a file its author kept editing. Runs in `finally` so a runner that
+          // threw still has whatever it produced preserved.
+          const stopped = await quiesceAgent(this.d.runner, handle)
+          quiesced.set(p.agent.id, stopped)
+          try {
+            captures.set(
+              p.agent.id,
+              await captureSubmission(this.d.sandbox, handle, {
+                // Sealed only if BOTH writers are excluded: this agent, which quiesce
+                // just stopped, and any co-tenant sharing its workspace. When agents
+                // share a container the second is false and the capture is honestly
+                // marked uncertifiable — a rival could have substituted the file in the
+                // gap between this agent stopping and this read, and no amount of
+                // re-reading later can tell that apart from the agent's own work.
+                executionStopped:
+                  stopped === 'stopped' && workspaceIsolated(this.d.sandbox, handle),
+                hashBudget: {
+                  maxFiles: config.maxWorkspaceFiles,
+                  maxBytes: config.maxWorkspaceBytes,
+                },
+              }),
+            )
+          } catch {
+            // A workspace that cannot be read is handled in COLLECT as a missing capture.
+          }
         }
       })
 
       // COLLECT
       repos.rounds.setStatus(round.id, 'collecting')
+      // `runPool` has drained, and every worker quiesced its own agent before returning,
+      // so no agent in this round is still executing. That barrier — not the capture's
+      // timing — is what makes "unchanged since capture" a claim worth recording. One
+      // agent that could not be confirmed stopped invalidates it for everybody, because
+      // any co-tenant left running could be the one doing the writing.
+      const executionStopped = prepared.every(
+        (p) => !handles.has(p.agent.id) || quiesced.get(p.agent.id) === 'stopped',
+      )
       const judgeInputs: JudgeInput[] = []
       for (const [i, p] of prepared.entries()) {
         const res = runResults[i]!
         // No handle exists when this agent's own provisioning failed: there is no
         // workspace to read a submission from.
         const handle = handles.get(p.agent.id)
-        const submissionMd = res.ok && handle ? await this.d.sandbox.readFile(handle, 'SUBMISSION.md') : null
-        const files = res.ok && handle ? await this.d.sandbox.listFiles(handle) : []
+        const capture = captures.get(p.agent.id)
+        // The captured text is the judged artifact, not a fresh read: a rival that
+        // overwrote this file after the capture must not get its substitute judged.
+        const submissionMd = res.ok && capture ? capture.submissionMd : null
+        const files = res.ok && capture ? capture.files : []
+
+        if (handle && capture) {
+          const verdict = await verifyCapture(this.d.sandbox, handle, capture, {
+            executionStopped,
+          })
+          // Recorded for every agent, not only the tampered ones. A score is only as
+          // trustworthy as the artifact behind it, and "no tamper event" conflates
+          // "checked and clean" with "could not be checked at all" — the second is what
+          // a shared container always yields, and it must not read as a clean bill.
+          repos.events.append({
+            runId,
+            roundId: round.id,
+            agentId: p.agent.id,
+            type: 'submission.captured',
+            payload: {
+              sealed: capture.sealed,
+              verified: verdict.verified,
+              tampered: verdict.tampered,
+              hashesComplete: capture.hashesComplete,
+              capturedAt: capture.capturedAt,
+              quiesce: quiesced.get(p.agent.id) ?? 'unsupported',
+            },
+          })
+          if (verdict.tampered) {
+            // The agent keeps the submission it earned; the interference is recorded.
+            repos.events.append({
+              runId,
+              roundId: round.id,
+              agentId: p.agent.id,
+              type: 'submission.tampered',
+              payload: {
+                detail: verdict.detail,
+                verified: verdict.verified,
+                capturedAt: capture.capturedAt,
+                quiesce: quiesced.get(p.agent.id) ?? 'unsupported',
+              },
+            })
+          }
+        }
+
+        // The agent that filled the disk is the one penalised, so this is its own status
+        // rather than a round-level failure.
+        const quota = checkQuota(files, {
+          maxBytes: config.maxWorkspaceBytes,
+          maxFiles: config.maxWorkspaceFiles,
+        })
 
         // A non-'ok' runner status is the actual reason there is nothing to judge and
         // must survive to the submission row. Deriving the status from the file alone
@@ -182,11 +284,15 @@ export class TournamentEngine {
         // timeout invisible in the database.
         const status: SubmissionStatus = !res.ok
           ? 'error'
-          : res.value.status !== 'ok'
-            ? res.value.status
-            : submissionMd
-              ? 'ok'
-              : 'no_submission'
+          : !quota.ok
+            // Deliberately outranks a 'timeout': exceeding the quota is the punishable
+            // act, and naming it is what makes the zero score explicable.
+            ? 'error'
+            : res.value.status !== 'ok'
+              ? res.value.status
+              : submissionMd
+                ? 'ok'
+                : 'no_submission'
 
         judgeInputs.push({
           agentId: p.agent.id,
@@ -203,7 +309,11 @@ export class TournamentEngine {
           fileManifest: files,
           workspacePath: handle?.workspacePath ?? '',
           status,
-          errorText: res.ok ? res.value.errorText : String(res.error).slice(0, 500),
+          errorText: !res.ok
+            ? String(res.error).slice(0, 500)
+            : quota.ok
+              ? res.value.errorText
+              : quota.reason,
           tokensIn: res.ok ? res.value.tokensIn : 0,
           tokensOut: res.ok ? res.value.tokensOut : 0,
           tokensCacheRead: res.ok ? res.value.tokensCacheRead : 0,

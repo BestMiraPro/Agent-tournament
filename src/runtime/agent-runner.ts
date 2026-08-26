@@ -1,4 +1,5 @@
 import type { Genome, SubmissionStatus } from '../core/types.js'
+import type { QuiesceStatus } from '../engine/capture.js'
 import { trueFitness } from './mock-provider.js'
 import type { AgentHandle, Sandbox } from './sandbox.js'
 
@@ -22,6 +23,14 @@ export interface AgentRunResult {
 
 export interface AgentRunner {
   run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult>
+  /**
+   * Stop this agent and resolve once it is confirmed to have stopped executing.
+   *
+   * Optional so a runner without it still works, but the driver may not certify a
+   * workspace captured from a runner it cannot stop: `run` returning only means the
+   * orchestrator stopped waiting, not that the agent stopped writing.
+   */
+  quiesce?(handle: AgentHandle): Promise<QuiesceStatus>
 }
 
 /**
@@ -31,6 +40,11 @@ export interface AgentRunner {
  */
 export class MockAgentRunner implements AgentRunner {
   constructor(private sandbox: Sandbox, private seed: number) {}
+
+  /** Everything this runner does is awaited inside `run`, so it is already stopped. */
+  async quiesce(): Promise<QuiesceStatus> {
+    return 'stopped'
+  }
 
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
     const started = Date.now()
