@@ -1,6 +1,7 @@
-import { docker, type ExecResult } from './cli.js'
+import { docker } from './cli.js'
 
-export type DockerFn = (args: string[], timeoutMs?: number) => Promise<ExecResult>
+export type { DockerFn } from './cli.js'
+import type { DockerFn } from './cli.js'
 
 /**
  * Ensures the agent image exists, building it if absent.

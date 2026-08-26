@@ -1,5 +1,5 @@
-import { buildRunArgs, docker, parsePortMapping } from './cli.js'
-import type { DockerFn } from './image.js'
+import { buildRunArgs, docker, parsePortMapping, removeContainer } from './cli.js'
+import type { DockerFn } from './cli.js'
 
 export interface ShardContainerSpec {
   runId: string
@@ -40,6 +40,7 @@ export async function startShardContainer(
   spec: ShardContainerSpec,
   run: DockerFn = docker,
   healthProbe?: (baseUrl: string) => Promise<boolean>,
+  onWarning?: (message: string) => void,
 ): Promise<ShardContainer> {
   const name = containerName(spec.runId, spec.shardIndex)
 
@@ -94,12 +95,10 @@ export async function startShardContainer(
   } catch (e) {
     // An adopted container is removed too: one wearing our name that cannot serve is
     // useless to us and would only be adopted again by the next attempt.
-    // Cleanup is best-effort — it must never replace the error that explains the failure.
-    try {
-      await run(['rm', '-f', name], 30_000)
-    } catch {
-      // ignore
-    }
+    // Cleanup is best-effort — it must never replace the error that explains the failure,
+    // but a cleanup that fails is a leaked container, so it is reported rather than
+    // swallowed. removeContainer never throws.
+    await removeContainer(name, onWarning, run)
     throw e
   }
 }

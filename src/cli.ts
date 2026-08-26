@@ -10,10 +10,16 @@ import { MockAgentRunner, type AgentRunner } from './runtime/agent-runner.js'
 import { GOOD_KEYWORDS, MockProvider } from './runtime/mock-provider.js'
 import { MockSandbox } from './runtime/mock-sandbox.js'
 import { LocalSandbox } from './runtime/local-sandbox.js'
+import {
+  planCapacity,
+  readHostCapacity,
+  type HostCapacity,
+} from './runtime/docker/capacity.js'
 import { removeContainer } from './runtime/docker/cli.js'
 import { startShardContainer } from './runtime/docker/container.js'
 import { ensureImage } from './runtime/docker/image.js'
 import { DockerSandbox } from './runtime/docker/sandbox.js'
+import { sweepOrphanContainers, type SweepOptions } from './runtime/docker/sweep.js'
 import type { Provider } from './runtime/provider.js'
 import { runPool } from './runtime/pool.js'
 import type { AgentHandle, Sandbox } from './runtime/sandbox.js'
@@ -253,6 +259,89 @@ export function makeClientResolver(
   }
 }
 
+/**
+ * The two Docker startup probes, injectable so the startup path can be tested without a
+ * daemon. The repo's convention elsewhere is a defaulted `run: DockerFn` parameter, but
+ * these two are reached through `runTournamentCli` rather than called directly, so they
+ * are grouped into one seam that the CLI threads down.
+ */
+export interface DockerStartupHooks {
+  readCapacity: () => Promise<HostCapacity>
+  sweep: (opts: SweepOptions) => Promise<string[]>
+}
+
+export const REAL_DOCKER_STARTUP: DockerStartupHooks = {
+  readCapacity: readHostCapacity,
+  sweep: sweepOrphanContainers,
+}
+
+/**
+ * Refuses a run whose container plan would overcommit the host.
+ *
+ * `planCapacity` has existed since the Task 11 preflight but nothing called it, so the
+ * guardrail was inert: an operator asking for more containers than the host can hold got
+ * a machine that swapped itself to a standstill, or agents OOM-killed mid-round and
+ * recorded as agent failures rather than the infrastructure failure they are. This is the
+ * call that makes it bite.
+ *
+ * A failure to *read* capacity is not a refusal. The daemon may not expose `info`/`stats`
+ * on every host, and refusing every run on those hosts would be worse than the
+ * overcommitment this is guarding against — so an unreadable host warns and proceeds.
+ */
+export async function assertHostCapacity(
+  config: RunConfig,
+  read: () => Promise<HostCapacity> = readHostCapacity,
+  onWarning: (message: string) => void = (m) => console.warn(m),
+): Promise<void> {
+  let host: HostCapacity
+  try {
+    host = await read()
+  } catch (e) {
+    onWarning(
+      `Could not read host capacity, so the overcommit preflight was skipped: ` +
+        `${(e as Error).message}`,
+    )
+    return
+  }
+
+  const verdict = planCapacity(
+    {
+      containers: config.maxContainers,
+      memory: config.containerMemory,
+      cpus: config.containerCpus,
+    },
+    host,
+  )
+  if (!verdict.ok) {
+    throw new Error(`docker sandbox: ${verdict.reason}`)
+  }
+}
+
+/**
+ * Runs the startup orphan sweep for a docker run, and nothing at all otherwise.
+ *
+ * Extracted from `runTournamentCli` so the call site's contract is directly testable: the
+ * rail that matters here is that the *live* run id reaches `sweepOrphanContainers`, and
+ * the CLI path that would exercise it in place needs a real daemon to get that far.
+ *
+ * Never throws. A sweep is opportunistic cleanup of a previous run's mess; failing to
+ * clean up must not stop this run from starting.
+ */
+export async function sweepBeforeRun(
+  config: RunConfig,
+  runId: string,
+  hooks: DockerStartupHooks,
+  onWarning: (message: string) => void = (m) => console.warn(m),
+): Promise<string[]> {
+  if (config.sandbox !== 'docker') return []
+  try {
+    return await hooks.sweep({ activeRunId: runId, onWarning })
+  } catch (e) {
+    onWarning(`Orphan container sweep failed: ${(e as Error).message}`)
+    return []
+  }
+}
+
 interface RealDeps {
   server: ServerHandle
   sandbox: Sandbox
@@ -279,10 +368,19 @@ async function buildRealDeps(
   opts: CliOptions,
   config: RunConfig,
   runIdHolder: RunIdHolder,
+  hooks: DockerStartupHooks,
 ): Promise<RealDeps> {
   if (!opts.workspaceRoot) {
     throw new Error('real mode requires workspaceRoot')
   }
+
+  // First, before the opencode server is spawned and long before the image is built: a
+  // run that cannot fit on this host should be refused in seconds, with a message naming
+  // the number that is wrong, rather than after minutes of setup.
+  if (config.sandbox === 'docker') {
+    await assertHostCapacity(config, hooks.readCapacity)
+  }
+
   const server = opts.serverUrl
     ? await attachServer(opts.serverUrl, config.agentTimeoutMs)
     : await startServer({ timeoutMs: config.agentTimeoutMs })
@@ -304,6 +402,11 @@ async function buildRealDeps(
     }
 
     await ensureImage(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
+
+    // Every removal failure in this branch reaches the operator through one callback.
+    // A container that could not be removed is a leak, and a silent leak is exactly what
+    // the sweep above then has to clean up on the next run.
+    const onWarning = (message: string) => console.warn(message)
 
     const sandbox = new DockerSandbox({
       runId: runIdHolder.value,
@@ -330,10 +433,12 @@ async function buildRealDeps(
           // timeout is short and independent of agentTimeoutMs — health either answers
           // in milliseconds or the container is broken.
           async (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: 10_000 }).health(),
+          onWarning,
         ),
       stopContainer: async (name) => {
-        await removeContainer(name)
+        await removeContainer(name, onWarning)
       },
+      onWarning,
     })
 
     return {
@@ -362,7 +467,10 @@ async function buildRealDeps(
   }
 }
 
-export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
+export async function runTournamentCli(
+  opts: CliOptions,
+  hooks: DockerStartupHooks = REAL_DOCKER_STARTUP,
+): Promise<CliOutput> {
   const db = openDb(opts.dbPath)
   const repos = makeRepos(db)
   const mode = opts.mode ?? 'mock'
@@ -395,7 +503,7 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
         reflect: { ...DEFAULT_CONFIG.reflect, modelId: opts.reflectModel ?? DEFAULT_REAL_REFLECT_MODEL },
       }
 
-      const built = await buildRealDeps(opts, config, runIdHolder)
+      const built = await buildRealDeps(opts, config, runIdHolder, hooks)
       sandbox = built.sandbox
       provider = built.provider
       runner = built.runner
@@ -443,6 +551,22 @@ export async function runTournamentCli(opts: CliOptions): Promise<CliOutput> {
     const run = engine.createRun('cli', opts.goal)
     runIdHolder.value = run.id
     disposeSandbox = () => engine.dispose(run.id)
+
+    // Deliberately after createRun rather than at process start: the sweep's second safety
+    // rail is that it never removes the live run's containers, and that requires a live run
+    // id to exclude. Nothing has been provisioned yet — containers are started during the
+    // first PREPARE inside runRound — so this is still before any container of ours exists,
+    // which is the only window where a sweep is both useful and safe.
+    //
+    // It does mean the capacity preflight above counted any orphan's memory as used. That
+    // errs toward refusing a run that would in fact have fit, which is the safe direction;
+    // re-running once the sweep has freed the memory succeeds.
+    const swept = await sweepBeforeRun(config, run.id, hooks)
+    if (swept.length > 0) {
+      console.warn(
+        `Swept ${swept.length} stranded container(s) from previous runs: ${swept.join(', ')}`,
+      )
+    }
 
     const rounds: CliOutput['rounds'] = []
     let finalRoundId: string | null = null

@@ -1,5 +1,8 @@
 import { execFile } from 'node:child_process'
 
+/** The shape of `docker` itself, so every caller can be handed a fake in tests. */
+export type DockerFn = (args: string[], timeoutMs?: number) => Promise<ExecResult>
+
 export interface ExecResult {
   stdout: string
   stderr: string
@@ -104,6 +107,31 @@ export async function hostPortFor(name: string): Promise<number | null> {
   return parsePortMapping(r.stdout)
 }
 
-export async function removeContainer(name: string): Promise<void> {
-  await docker(['rm', '-f', name], 30_000)
+/**
+ * Force-removes a container. Never throws: removal is cleanup, and cleanup must not be
+ * the thing that fails a run.
+ *
+ * A silent failure here is exactly how a container leaks, so a removal that does not
+ * succeed is reported through `onWarning` rather than swallowed. Callers that supply no
+ * `onWarning` keep the old silent behaviour.
+ */
+export async function removeContainer(
+  name: string,
+  onWarning?: (message: string) => void,
+  run: DockerFn = docker,
+): Promise<void> {
+  try {
+    const r = await run(['rm', '-f', name], 30_000)
+    if (r.code !== 0) {
+      onWarning?.(
+        `Could not remove container ${name}: ${(r.stderr || r.stdout).trim().slice(-300)}. ` +
+          `It may still be running — check with \`docker ps -a --filter name=${name}\`.`,
+      )
+    }
+  } catch (e) {
+    onWarning?.(
+      `Could not remove container ${name}: ${(e as Error).message}. ` +
+        `It may still be running — check with \`docker ps -a --filter name=${name}\`.`,
+    )
+  }
 }

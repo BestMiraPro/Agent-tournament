@@ -21,6 +21,8 @@ export interface DockerSandboxOptions {
   authFile: string | null
   startContainer: (shardIndex: number, hostDir: string) => Promise<StartedContainer>
   stopContainer: (name: string) => Promise<void>
+  /** Reports non-fatal problems — notably a container that could not be stopped. */
+  onWarning?: (message: string) => void
 }
 
 /**
@@ -185,10 +187,25 @@ export class DockerSandbox implements Sandbox {
     }
   }
 
+  /**
+   * Stops a container at most once, and never propagates a failure.
+   *
+   * A throwing `stopContainer` used to abort `disposeAll` mid-loop, so one unstoppable
+   * container stranded every container after it — the exact outcome disposeAll exists to
+   * prevent. The failure is reported instead: a container we could not stop is a leak the
+   * user needs to know about, and the next run's orphan sweep is what will collect it.
+   */
   private async stopOnce(container: StartedContainer): Promise<void> {
     if (this.stoppedNames.has(container.name)) return
     this.stoppedNames.add(container.name)
-    await this.opts.stopContainer(container.name)
+    try {
+      await this.opts.stopContainer(container.name)
+    } catch (e) {
+      this.opts.onWarning?.(
+        `Could not stop container ${container.name}: ${(e as Error).message}. ` +
+          `It may still be running — check with \`docker ps -a --filter name=${container.name}\`.`,
+      )
+    }
   }
 
   /**

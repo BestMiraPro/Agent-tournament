@@ -1,5 +1,21 @@
 import { describe, expect, test } from 'vitest'
-import { makeClientResolver, resolveSandboxMode, runTournamentCli } from '../src/cli.js'
+import {
+  assertHostCapacity,
+  makeClientResolver,
+  resolveSandboxMode,
+  runTournamentCli,
+  sweepBeforeRun,
+  type DockerStartupHooks,
+} from '../src/cli.js'
+import { DEFAULT_CONFIG, type RunConfig } from '../src/core/types.js'
+import type { HostCapacity } from '../src/runtime/docker/capacity.js'
+import type { SweepOptions } from '../src/runtime/docker/sweep.js'
+
+const roomyHost: HostCapacity = {
+  totalMemoryBytes: 16 * 1024 ** 3,
+  usedMemoryBytes: 1 * 1024 ** 3,
+  cpus: 8,
+}
 import { OpenCodeClient } from '../src/runtime/opencode/client.js'
 import type { AgentHandle, Sandbox } from '../src/runtime/sandbox.js'
 
@@ -66,6 +82,150 @@ describe('CLI docker mode', () => {
       dbPath: ':memory:', criteria: null, mode: 'mock', sandbox: 'docker',
     })
     expect(out.rounds).toHaveLength(2)
+  })
+})
+
+describe('CLI host-capacity preflight', () => {
+  const dockerConfig = (over: Partial<RunConfig> = {}): RunConfig => ({
+    ...DEFAULT_CONFIG,
+    sandbox: 'docker',
+    maxContainers: 4,
+    containerMemory: '1g',
+    containerCpus: 1,
+    ...over,
+  })
+
+  // 16 GiB total / 1 GiB used / 8 CPUs leaves ~12 GiB committable, so 4x1g fits.
+  const roomy: HostCapacity = {
+    totalMemoryBytes: 16 * 1024 ** 3,
+    usedMemoryBytes: 1 * 1024 ** 3,
+    cpus: 8,
+  }
+  const cramped: HostCapacity = {
+    totalMemoryBytes: 2 * 1024 ** 3,
+    usedMemoryBytes: 1 * 1024 ** 3,
+    cpus: 8,
+  }
+
+  test('refuses a run whose containers would overcommit host memory', async () => {
+    await expect(assertHostCapacity(dockerConfig(), async () => cramped)).rejects.toThrow(
+      /docker sandbox: Requested 4 containers/i,
+    )
+  })
+
+  test('refuses a run that would oversubscribe the host CPUs', async () => {
+    await expect(
+      assertHostCapacity(dockerConfig({ maxContainers: 8, containerCpus: 4 }), async () => ({
+        ...roomy,
+        cpus: 2,
+      })),
+    ).rejects.toThrow(/Oversubscribing CPUs/i)
+  })
+
+  test('allows a run that fits within the host headroom', async () => {
+    await expect(assertHostCapacity(dockerConfig(), async () => roomy)).resolves.toBeUndefined()
+  })
+
+  test('an unreadable host warns and proceeds rather than refusing every run', async () => {
+    const warnings: string[] = []
+    await expect(
+      assertHostCapacity(
+        dockerConfig(),
+        async () => {
+          throw new Error('docker info unavailable')
+        },
+        (m) => warnings.push(m),
+      ),
+    ).resolves.toBeUndefined()
+    expect(warnings.join('\n')).toMatch(/preflight was skipped/i)
+  })
+
+  test('the CLI refuses to start a docker run that would overcommit the host', async () => {
+    const hooks: DockerStartupHooks = {
+      readCapacity: async () => cramped,
+      sweep: async () => [],
+    }
+    await expect(
+      runTournamentCli(
+        {
+          goal: 'g', rounds: 1, population: 2, seed: 1,
+          dbPath: ':memory:', criteria: null, mode: 'real', sandbox: 'docker',
+          workspaceRoot: '/tmp/does-not-need-to-exist',
+        },
+        hooks,
+      ),
+    ).rejects.toThrow(/docker sandbox: Requested/i)
+  })
+})
+
+describe('CLI orphan sweep', () => {
+  const dockerConfig: RunConfig = { ...DEFAULT_CONFIG, sandbox: 'docker' }
+
+  test('passes the live run id so the sweep cannot destroy the run performing it', async () => {
+    const seen: SweepOptions[] = []
+    await sweepBeforeRun(
+      dockerConfig,
+      'run-abc',
+      { readCapacity: async () => roomyHost, sweep: async (o) => (seen.push(o), []) },
+    )
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.activeRunId).toBe('run-abc')
+  })
+
+  test('reports the containers it swept', async () => {
+    const removed = await sweepBeforeRun(dockerConfig, 'run-abc', {
+      readCapacity: async () => roomyHost,
+      sweep: async () => ['arena-old-0', 'arena-old-1'],
+    })
+    expect(removed).toEqual(['arena-old-0', 'arena-old-1'])
+  })
+
+  test('does not sweep outside docker mode', async () => {
+    let called = false
+    const removed = await sweepBeforeRun(
+      { ...DEFAULT_CONFIG, sandbox: 'local' },
+      'run-abc',
+      { readCapacity: async () => roomyHost, sweep: async () => ((called = true), ['x']) },
+    )
+    expect(called).toBe(false)
+    expect(removed).toEqual([])
+  })
+
+  test('a failing sweep warns but never stops the run from starting', async () => {
+    const warnings: string[] = []
+    const removed = await sweepBeforeRun(
+      dockerConfig,
+      'run-abc',
+      {
+        readCapacity: async () => roomyHost,
+        sweep: async () => {
+          throw new Error('daemon down')
+        },
+      },
+      (m) => warnings.push(m),
+    )
+    expect(removed).toEqual([])
+    expect(warnings.join('\n')).toMatch(/sweep failed: daemon down/i)
+  })
+
+  test('mock mode never sweeps — there are no containers to strand', async () => {
+    const seen: unknown[] = []
+    await runTournamentCli(
+      {
+        goal: 'g', rounds: 1, population: 2, seed: 42,
+        dbPath: ':memory:', criteria: null, mode: 'mock',
+      },
+      {
+        readCapacity: async () => {
+          throw new Error('should not be read in mock mode')
+        },
+        sweep: async (o) => {
+          seen.push(o)
+          return []
+        },
+      },
+    )
+    expect(seen).toHaveLength(0)
   })
 })
 

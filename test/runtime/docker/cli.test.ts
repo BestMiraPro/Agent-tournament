@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'vitest'
-import { parsePortMapping, buildRunArgs } from '../../../src/runtime/docker/cli.js'
+import { describe, expect, test, vi } from 'vitest'
+import { parsePortMapping, buildRunArgs, removeContainer } from '../../../src/runtime/docker/cli.js'
 
 describe('parsePortMapping', () => {
   test('extracts the host port from docker port output', () => {
@@ -79,5 +79,31 @@ describe('buildRunArgs', () => {
 
   test('names the container', () => {
     expect(buildRunArgs(base).join(' ')).toContain('--name arena-run1-0')
+  })
+})
+
+describe('removeContainer', () => {
+  test('makes a failed removal visible instead of silently leaking the container', async () => {
+    const run = vi.fn(async () => ({ stdout: '', stderr: 'permission denied', code: 1 }))
+    const warnings: string[] = []
+    await expect(
+      removeContainer('arena-run1-0', (m) => warnings.push(m), run),
+    ).resolves.toBeUndefined()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/arena-run1-0/)
+    expect(warnings[0]).toMatch(/permission denied/)
+  })
+
+  test('stays silent on success and never throws when docker itself rejects', async () => {
+    const ok = vi.fn(async () => ({ stdout: '', stderr: '', code: 0 }))
+    const warnings: string[] = []
+    await removeContainer('arena-run1-0', (m) => warnings.push(m), ok)
+    expect(warnings).toEqual([])
+
+    const boom = vi.fn(async () => { throw new Error('spawn ENOENT') })
+    await expect(
+      removeContainer('arena-run1-0', (m) => warnings.push(m), boom),
+    ).resolves.toBeUndefined()
+    expect(warnings).toHaveLength(1)
   })
 })

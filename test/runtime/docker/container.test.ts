@@ -119,6 +119,39 @@ describe('startShardContainer', () => {
     ).rejects.toThrow(/health/i)
   })
 
+  test('warns when the failure-path cleanup cannot remove the container', async () => {
+    const fake = vi.fn(async (args: string[]) => {
+      if (args[0] === 'inspect') return { stdout: '', stderr: 'No such object', code: 1 }
+      if (args[0] === 'port') return { stdout: '4096/tcp -> 127.0.0.1:41000', stderr: '', code: 0 }
+      if (args[0] === 'rm') return { stdout: '', stderr: 'daemon gone', code: 1 }
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    const warnings: string[] = []
+    await expect(
+      startShardContainer({ ...spec, healthTimeoutMs: 50 }, fake, async () => false, (m) =>
+        warnings.push(m),
+      ),
+    ).rejects.toThrow(/health/i)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/arena-run1-0/)
+    expect(warnings[0]).toMatch(/daemon gone/)
+  })
+
+  test('does not warn when the failure-path cleanup succeeds', async () => {
+    const fake = vi.fn(async (args: string[]) => {
+      if (args[0] === 'inspect') return { stdout: '', stderr: 'No such object', code: 1 }
+      if (args[0] === 'port') return { stdout: '4096/tcp -> 127.0.0.1:41000', stderr: '', code: 0 }
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    const warnings: string[] = []
+    await expect(
+      startShardContainer({ ...spec, healthTimeoutMs: 50 }, fake, async () => false, (m) =>
+        warnings.push(m),
+      ),
+    ).rejects.toThrow(/health/i)
+    expect(warnings).toEqual([])
+  })
+
   test('throws when no port could be discovered', async () => {
     const fake = vi.fn(async (args: string[]) => {
       if (args[0] === 'inspect') return { stdout: 'false', stderr: '', code: 0 }

@@ -148,6 +148,37 @@ describe('DockerSandbox.disposeAll', () => {
     expect(c.stopped.slice().sort()).toEqual(['arena-t-0', 'arena-t-1'])
   })
 
+  test('a container that will not stop is reported, and does not strand the rest', async () => {
+    // disposeAll is the last line of defence against leaked containers. If one
+    // stop fails it must neither throw nor abandon the containers after it in
+    // the loop — and the failure must be visible rather than silent.
+    const root = await tmp()
+    const stopped: string[] = []
+    const warnings: string[] = []
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 2, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      startContainer: async (shardIndex: number) => ({
+        name: `arena-t-${shardIndex}`,
+        baseUrl: `http://127.0.0.1:${40000 + shardIndex}`,
+        shardIndex,
+      }),
+      stopContainer: async (name: string) => {
+        if (name === 'arena-t-0') throw new Error('daemon gone')
+        stopped.push(name)
+      },
+      onWarning: (m) => warnings.push(m),
+    })
+    await sb.planFor(['a1', 'a2'])
+    await sb.provision('a1', {})
+    await sb.provision('a2', {})
+
+    await expect(sb.disposeAll()).resolves.toBeUndefined()
+    expect(stopped).toEqual(['arena-t-1'])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/arena-t-0/)
+    expect(warnings[0]).toMatch(/daemon gone/)
+  })
+
   test('is safe to call twice: each container is stopped only once', async () => {
     const { sb, c } = await make(['a1', 'a2'], 2)
     await sb.provision('a1', {})
