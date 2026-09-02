@@ -1,3 +1,5 @@
+import type { BudgetLimits, ModelPrice } from '../engine/budget.js'
+
 export type SubmissionStatus = 'ok' | 'timeout' | 'error' | 'no_submission'
 export type GenomeOrigin = 'seed' | 'elite' | 'mutation' | 'clone' | 'crossover' | 'manual'
 export type AgentStatus = 'active' | 'retired' | 'culled'
@@ -104,7 +106,18 @@ export interface RunConfig {
     bottomPct: number
     crossoverPct: number
   }
-  pricing: Record<string, { inPerM: number; outPerM: number }>
+  /**
+   * Guardrail against the tournament's own selection pressure: agents are selected on
+   * outcome, so any behaviour that raises rank — including burning tokens — is selected
+   * FOR. Tokens are the primary denomination (the free-tier default roster reports
+   * `cost: 0`, so a USD-only budget would never trip); USD is secondary and only
+   * enforceable where `pricing` below is actually known. See `src/engine/budget.ts` for
+   * why every limit fails closed rather than defaulting to unlimited.
+   */
+  budget: BudgetLimits
+  /** Per-million-token rates by model id, consumed by the budget tracker for the USD
+   *  side of enforcement. Empty by default — most roster models have no known price. */
+  pricing: Record<string, ModelPrice>
 }
 
 export const DEFAULT_CONFIG: RunConfig = {
@@ -163,5 +176,24 @@ export const DEFAULT_CONFIG: RunConfig = {
     allowModelMutation: true,
   },
   selection: { eliteCount: 1, topPct: 0.2, bottomPct: 0.2, crossoverPct: 0 },
+  // Deliberately conservative: these are what stop an unattended run from quietly
+  // burning a lot before anyone notices, not a tuned ceiling for any particular goal.
+  // Per-agent 200k is comfortably above a normal agentic session's token count but
+  // far below a single runaway loop; round 1M is roughly 5 agents' worth of that
+  // ceiling at once (a whole roster misbehaving together, not just one outlier);
+  // run 5M is 5 rounds' worth of a fully-breached round, so a multi-round tournament
+  // still trips well before it could do serious damage. USD stays uncapped by
+  // default because `pricing` is usually unknown for the free-tier roster below, and
+  // a USD limit that cannot be computed must not silently behave as unlimited — see
+  // BudgetTracker's fail-closed rules. Infinity is the one sentinel it accepts for
+  // "no limit"; anything else (0, undefined, NaN) is a configuration error.
+  budget: {
+    maxRunTokens: 5_000_000,
+    maxRoundTokens: 1_000_000,
+    maxAgentTokens: 200_000,
+    maxRunUsd: Infinity,
+    maxRoundUsd: Infinity,
+    maxAgentUsd: Infinity,
+  },
   pricing: {},
 }

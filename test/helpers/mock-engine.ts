@@ -15,6 +15,13 @@ import { SUBMISSION_FILE, type QuiesceStatus } from '../../src/engine/capture.js
 /** Strategy markers, in the style of `__FAIL__`, so a behaviour follows one seed index. */
 export const FLOOD_MARKER = '__FLOOD__'
 export const SABOTAGE_MARKER = '__SABOTAGE__'
+export const HUGE_TOKENS_MARKER = '__HUGE_TOKENS__'
+/**
+ * Reported tokensIn for an agent marked with HUGE_TOKENS_MARKER. Comfortably past every
+ * DEFAULT_CONFIG budget ceiling (agent 200k, round 1M) from a single agent's usage, so a
+ * breach test needs neither a huge population nor many rounds to trip one.
+ */
+export const HUGE_TOKENS = 2_000_000
 /** How many files the flooding agent writes; must exceed FLOOD_QUOTA_FILES. */
 export const FLOOD_FILE_COUNT = 40
 /** The quota a flood test runs under. Far below the real default purely for speed. */
@@ -64,6 +71,28 @@ class MischiefRunner implements AgentRunner {
           SABOTAGED_TEXT,
         )
       }
+    }
+    return res
+  }
+}
+
+/**
+ * Wraps a runner so a marked agent reports a huge token count once its run returns,
+ * without needing thousands of real agents or rounds to accumulate that much spend.
+ * Mirrors `MischiefRunner`'s shape: delegate the real run, then distort the result for
+ * the one agent carrying the marker.
+ */
+class HugeTokensRunner implements AgentRunner {
+  quiesce?: (handle: AgentHandle) => Promise<QuiesceStatus>
+
+  constructor(private inner: AgentRunner) {
+    if (inner.quiesce) this.quiesce = (h) => this.inner.quiesce!(h)
+  }
+
+  async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
+    const res = await this.inner.run(handle, ctx)
+    if (ctx.genome.strategyMd.includes(HUGE_TOKENS_MARKER)) {
+      return { ...res, tokensIn: HUGE_TOKENS, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0 }
     }
     return res
   }
@@ -234,6 +263,9 @@ export function makeMockEngine(opts: {
   sabotageDuringCapture?: boolean
   /** Give each agent a workspace no co-tenant can reach, as one-agent-per-container does. */
   isolatedWorkspaces?: boolean
+  /** Make the agent at this seed index report HUGE_TOKENS on completion, for exercising
+   *  budget enforcement without needing a huge population or many rounds. */
+  hugeTokensFor?: number
 }) {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
@@ -246,8 +278,11 @@ export function makeMockEngine(opts: {
     populationSize: opts.populationSize,
     sandbox: 'mock',
     // One at a time makes "the victim was already captured" an ordering guarantee
-    // instead of a timing assumption.
-    concurrency: sabotaging || racing ? 1 : 4,
+    // instead of a timing assumption. Budget tests get the same treatment: with the
+    // pool otherwise dispatching all of a small population in one synchronous burst,
+    // "later agents were skipped once the budget tripped" would be a race rather than
+    // a fact.
+    concurrency: sabotaging || racing || opts.hugeTokensFor !== undefined ? 1 : 4,
     // The real default is 2000 files, which is deliberately generous; a flood test that
     // wrote 2001 files would only be slower, not more truthful.
     maxWorkspaceFiles:
@@ -280,7 +315,9 @@ export function makeMockEngine(opts: {
     ? new HangingRunner()
     : opts.floodFilesFor !== undefined || sabotaging
       ? new MischiefRunner(mockRunner, sandbox, provisionOrder, !opts.unstoppableSaboteur)
-      : mockRunner
+      : opts.hugeTokensFor !== undefined
+        ? new HugeTokensRunner(mockRunner)
+        : mockRunner
 
   const engine = new TournamentEngine({
     repos,
@@ -297,6 +334,7 @@ export function makeMockEngine(opts: {
       if (opts.failFirst && i === 0) return '__FAIL__'
       if (opts.floodFilesFor === i) return `${FLOOD_MARKER} ${base}`
       if (opts.sabotageBy === i) return `${SABOTAGE_MARKER} ${base}`
+      if (opts.hugeTokensFor === i) return `${HUGE_TOKENS_MARKER} ${base}`
       return base
     },
   })

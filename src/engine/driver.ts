@@ -2,6 +2,7 @@ import { serializeGenome } from '../core/genome.js'
 import { planSelection } from '../core/selection.js'
 import type { Genome, RunConfig, SubmissionStatus } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
+import { BudgetTracker, type BudgetBreach, type BudgetStatus } from './budget.js'
 import { breed } from '../evolution/breed.js'
 import {
   captureSubmission,
@@ -33,9 +34,20 @@ export interface RoundResult {
   roundId: string
   roundIdx: number
   metaDigest: string
+  /**
+   * Null when the round finished within budget. Set the instant `startRound` +
+   * every agent's `record` this round leaves the tracker over an aggregate cap.
+   * REFLECT is skipped whenever this is non-null, so the caller (the CLI) should
+   * stop the round loop rather than starting another round on an already-blown budget.
+   */
+  budgetBreach: BudgetBreach | null
 }
 
 export class TournamentEngine {
+  /** One tracker per run, keyed by run id — `runRound` may be called many times for
+   *  the same run, and run-level spend (unlike round-level) must survive across all of them. */
+  private budgets = new Map<string, BudgetTracker>()
+
   constructor(private d: EngineDeps) {}
 
   createRun(name: string, initialGoal: string) {
@@ -51,7 +63,18 @@ export class TournamentEngine {
       )
     }
 
+    // Constructed — and so validated — before the run row is persisted, the same way
+    // the roster-sum check above fails before anything is written. `models` turns a
+    // USD limit set without full roster pricing into a construction-time refusal
+    // instead of a mid-run discovery once money is already being spent.
+    const budget = new BudgetTracker({
+      ...config.budget,
+      pricing: config.pricing,
+      models: config.roster.map((r) => r.modelId),
+    })
+
     const run = repos.runs.create({ name, config, seedDir: config.seedDir })
+    this.budgets.set(run.id, budget)
 
     let index = 0
     for (const entry of config.roster) {
@@ -88,7 +111,15 @@ export class TournamentEngine {
     const round = repos.rounds.create({ runId, idx: roundIdx, goalMd: input.goalMd })
     repos.rounds.markStarted(round.id)
 
+    const budget = this.budgets.get(runId)
+    if (!budget) {
+      throw new Error(`no budget tracker registered for run ${runId} — call createRun first`)
+    }
+
     try {
+      // Round counters reset; run totals and any run-level breach deliberately survive.
+      budget.startRound()
+
       // PREPARE
       repos.rounds.setStatus(round.id, 'preparing')
       const agents = repos.agents.listActive(runId)
@@ -147,11 +178,26 @@ export class TournamentEngine {
           return failed
         }
 
+        // The dispatch gate: checked per agent as the pool pulls it off the queue, not
+        // once for the whole phase, so an aggregate cap that trips mid-round stops
+        // agents still waiting behind `concurrency` without touching ones already
+        // dispatched — those are left to drain and are still scored, since that work is
+        // paid for either way.
+        if (budget.shouldStopDispatch()) {
+          const skipped: AgentRunResult = {
+            status: 'error',
+            errorText: 'agent dispatch skipped: the run/round budget was already exhausted',
+            tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
+            costUsd: 0, durationMs: 0,
+          }
+          return skipped
+        }
+
         const handle = handles.get(p.agent.id)!
         const started = Date.now()
         let timer: ReturnType<typeof setTimeout> | undefined
         try {
-          return await Promise.race([
+          const result = await Promise.race([
             this.d.runner.run(handle, {
               agentId: p.agent.id,
               genome: p.genome,
@@ -162,6 +208,18 @@ export class TournamentEngine {
               timer = setTimeout(() => reject(new DriverTimeout()), config.agentTimeoutMs)
             }),
           ])
+          // Folded in the instant the run returns, so a concurrent sibling still
+          // queued behind `shouldStopDispatch` above sees this spend immediately.
+          budget.record({
+            agentId: p.agent.id,
+            modelId: p.genome.modelId,
+            tokensIn: result.tokensIn,
+            tokensOut: result.tokensOut,
+            tokensCacheRead: result.tokensCacheRead,
+            tokensCacheWrite: result.tokensCacheWrite,
+            costUsd: result.costUsd,
+          })
+          return result
         } catch (e) {
           if (e instanceof DriverTimeout) {
             const timedOut: AgentRunResult = {
@@ -209,6 +267,12 @@ export class TournamentEngine {
           }
         }
       })
+
+      // `record` only happens during RUN above, so nothing after this point changes
+      // spend — this snapshot is valid for the rest of the round. A breach here still
+      // lets COLLECT/JUDGE run so whatever already completed gets scored (it is paid
+      // for either way); only REFLECT is skipped, below.
+      const budgetBreach = budget.check()
 
       // COLLECT
       repos.rounds.setStatus(round.id, 'collecting')
@@ -363,62 +427,78 @@ export class TournamentEngine {
 
       // REFLECT
       repos.rounds.setStatus(round.id, 'reflecting')
-      const byAgent = new Map(judged.scores.map((s) => [s.agentId, s]))
-      const subByAgent = new Map(judgeInputs.map((j) => [j.agentId, j]))
-      // The spec asks for the top-K *other* agents. A shared list handed ranks 2..K+1
-      // their own strategy back as something to imitate, wasting a leader slot on
-      // self-reinforcement. Pooling topK + 1 means every agent still sees a full topK
-      // after its own entry is removed.
-      const leaderPool = judged.scores.slice(0, config.reflect.topK + 1)
-      const topPerformersFor = (agentId: string): TopPerformer[] =>
-        leaderPool
-          .filter((s) => s.agentId !== agentId)
-          .slice(0, config.reflect.topK)
-          .flatMap((s) => {
-            const g = repos.genomes.forRound(s.agentId, roundIdx)
-            return g ? [{
-              rank: s.rank,
-              strategy: g.strategyMd,
-              excerpt: (subByAgent.get(s.agentId)?.submissionMd ?? '').slice(0, 400),
-              rationale: s.rationaleMd,
-            }] : []
-          })
-
-      // NOTE: the Reflector receives its allowed-model list via its constructor, not
-      // from here, so this driver deliberately derives nothing from config.roster.
-      // Task 21's CLI must pass `config.roster.map((r) => r.modelId)` when it builds
-      // the Reflector — the mock helper hardcodes ['mock/model'], so a mistake there
-      // would not be caught by these tests.
-      const reflected = await runPool(plan.survivors, config.concurrency, async (agentId) => {
-        const g = repos.genomes.forRound(agentId, roundIdx)!
-        const s = byAgent.get(agentId)!
-        return [agentId, await this.d.reflector.reflect({
-          ownStrategy: g.strategyMd,
-          ownNotes: g.notesMd,
-          ownRank: s.rank,
-          ownScore: s.score,
-          ownRationale: s.rationaleMd,
-          topPerformers: topPerformersFor(agentId),
-          metaDigest: judged.metaDigest,
-          nextGoal: input.goalMd,
-          goalChanged: false,
-          currentModelId: g.modelId,
-          currentTemperature: g.temperature,
-        })] as const
-      })
-
       const mutated = new Map<string, Genome>()
-      for (const r of reflected) if (r.ok) mutated.set(r.value[0], r.value[1])
+      // Reflection is the one thing a breach skips: it is pure extra spend on top of a
+      // round that already blew its budget, and skipping it is what makes breed()
+      // below carry every survivor's genome forward byte-identical (breed() falls back
+      // to the previous round's genome for any agent absent from `mutated`).
+      if (budgetBreach === null) {
+        const byAgent = new Map(judged.scores.map((s) => [s.agentId, s]))
+        const subByAgent = new Map(judgeInputs.map((j) => [j.agentId, j]))
+        // The spec asks for the top-K *other* agents. A shared list handed ranks 2..K+1
+        // their own strategy back as something to imitate, wasting a leader slot on
+        // self-reinforcement. Pooling topK + 1 means every agent still sees a full topK
+        // after its own entry is removed.
+        const leaderPool = judged.scores.slice(0, config.reflect.topK + 1)
+        const topPerformersFor = (agentId: string): TopPerformer[] =>
+          leaderPool
+            .filter((s) => s.agentId !== agentId)
+            .slice(0, config.reflect.topK)
+            .flatMap((s) => {
+              const g = repos.genomes.forRound(s.agentId, roundIdx)
+              return g ? [{
+                rank: s.rank,
+                strategy: g.strategyMd,
+                excerpt: (subByAgent.get(s.agentId)?.submissionMd ?? '').slice(0, 400),
+                rationale: s.rationaleMd,
+              }] : []
+            })
+
+        // NOTE: the Reflector receives its allowed-model list via its constructor, not
+        // from here, so this driver deliberately derives nothing from config.roster.
+        // Task 21's CLI must pass `config.roster.map((r) => r.modelId)` when it builds
+        // the Reflector — the mock helper hardcodes ['mock/model'], so a mistake there
+        // would not be caught by these tests.
+        const reflected = await runPool(plan.survivors, config.concurrency, async (agentId) => {
+          const g = repos.genomes.forRound(agentId, roundIdx)!
+          const s = byAgent.get(agentId)!
+          return [agentId, await this.d.reflector.reflect({
+            ownStrategy: g.strategyMd,
+            ownNotes: g.notesMd,
+            ownRank: s.rank,
+            ownScore: s.score,
+            ownRationale: s.rationaleMd,
+            topPerformers: topPerformersFor(agentId),
+            metaDigest: judged.metaDigest,
+            nextGoal: input.goalMd,
+            goalChanged: false,
+            currentModelId: g.modelId,
+            currentTemperature: g.temperature,
+          })] as const
+        })
+
+        for (const r of reflected) if (r.ok) mutated.set(r.value[0], r.value[1])
+      }
 
       await breed({ repos, runId, nextRoundIdx: roundIdx + 1, plan, mutated })
 
       repos.rounds.markEnded(round.id, repos.submissions.totalCost(round.id))
       repos.rounds.setStatus(round.id, 'complete')
-      return { roundId: round.id, roundIdx, metaDigest: judged.metaDigest }
+      return { roundId: round.id, roundIdx, metaDigest: judged.metaDigest, budgetBreach }
     } catch (e) {
       repos.rounds.setStatus(round.id, 'failed')
       throw e
     }
+  }
+
+  /**
+   * Snapshot of this run's budget tracker — tokens/USD spent and remaining, and
+   * whether USD is even known for the models actually used. Exists so a caller (the
+   * CLI) can report what a breached run spent without reaching into engine internals.
+   * Null only if `createRun` was never called for this run id.
+   */
+  budgetStatus(runId: string): BudgetStatus | null {
+    return this.budgets.get(runId)?.status() ?? null
   }
 
   /** Releases sandbox resources. With Docker this stops the shard containers. */

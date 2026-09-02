@@ -305,3 +305,82 @@ describe('driver capture guardrails', () => {
     }
   })
 })
+
+describe('driver budget enforcement', () => {
+  test('a round that breaches the budget still completes, and the breach is reported', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4, hugeTokensFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
+    expect(round.budgetBreach).not.toBeNull()
+    expect(round.budgetBreach?.reason).toMatch(/token/i)
+
+    // The rest of the round still ran: every agent was scored, including the one that
+    // blew the budget — that work is paid for either way.
+    expect(repos.scores.forRound(round.roundId)).toHaveLength(4)
+  })
+
+  test('reflection is skipped once the round breaches budget, so survivor genomes carry forward unchanged', async () => {
+    const { engine, repos, reflector } = makeMockEngine({ seed: 1, populationSize: 4, hugeTokensFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const reflectSpy = vi.spyOn(reflector, 'reflect')
+
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(round.budgetBreach).not.toBeNull()
+    expect(reflectSpy).not.toHaveBeenCalled()
+
+    // Rank 2 is a survivor (population 4: 1 elite, 0 culled at these selection
+    // defaults), so under normal operation reflection would be free to mutate it.
+    const survivor = repos.scores.forRound(round.roundId).find((s) => s.rank === 2)!
+    const before = repos.genomes.forRound(survivor.agentId, round.roundIdx)!
+    const after = repos.genomes.forRound(survivor.agentId, round.roundIdx + 1)!
+    expect(after.strategyMd).toBe(before.strategyMd)
+    expect(after.notesMd).toBe(before.notesMd)
+    expect(after.modelId).toBe(before.modelId)
+    expect(after.temperature).toBe(before.temperature)
+  })
+
+  test('a run under budget behaves exactly as before', async () => {
+    const { engine, repos, reflector } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('t', 'goal')
+    const reflectSpy = vi.spyOn(reflector, 'reflect')
+
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    expect(round.budgetBreach).toBeNull()
+    expect(reflectSpy).toHaveBeenCalled()
+    expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
+    expect(repos.scores.forRound(round.roundId)).toHaveLength(4)
+  })
+
+  // makeMockEngine forces concurrency to 1 whenever hugeTokensFor is set, so agent 0
+  // (the one carrying the marker) is guaranteed to run and record BEFORE the pool ever
+  // pulls agents 1-3 off the queue — making "later agents were never dispatched" a fact
+  // instead of a race. This is the guardrail the isolation tests warn a project like
+  // this one can ship plumbed but mute: `shouldStopDispatch` exists and is called, but
+  // nothing proves it ever actually stops a dispatch without a test shaped like this one.
+  test('shouldStopDispatch stops agents still queued once an earlier one blows the budget', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4, hugeTokensFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const agents = repos.agents.listActive(run.id)
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const subs = repos.submissions.forRound(round.roundId)
+    const byAgent = new Map(subs.map((s) => [s.agentId, s]))
+
+    // Agent 0 actually ran (it is the one that blew the budget, not a casualty of it).
+    const first = byAgent.get(agents[0]!.id)!
+    expect(first.status).toBe('ok')
+    expect(first.tokensIn).toBe(2_000_000)
+
+    // Agents 1-3 were still queued when agent 0's usage tripped the round cap, so the
+    // pool must never have called the runner for them at all.
+    for (const agent of agents.slice(1)) {
+      const sub = byAgent.get(agent.id)!
+      expect(sub.status).toBe('error')
+      expect(sub.errorText).toMatch(/dispatch skipped/i)
+      expect(sub.tokensIn).toBe(0)
+    }
+  })
+})

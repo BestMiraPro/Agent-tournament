@@ -588,6 +588,26 @@ export async function runTournamentCli(
         bestScore: Math.max(...values),
         metaDigest: r.metaDigest,
       })
+
+      // The round itself already completed and was scored — that work is paid for
+      // either way — but starting another round on an already-blown budget would
+      // just keep spending against a cap that has already tripped. Stop here.
+      if (r.budgetBreach) {
+        console.warn(`\nBudget breached in round ${r.roundIdx}: ${r.budgetBreach.reason}`)
+        const status = engine.budgetStatus(run.id)
+        if (status) {
+          // A dollar figure is only meaningful for models this run actually knows the
+          // price of — printing $0.00 when pricing is simply absent would read as "this
+          // run was free," which is exactly the failure mode the budget exists to catch.
+          const usdLine = status.unpricedModels.length > 0
+            ? `USD spend unknown — no pricing for: ${status.unpricedModels.join(', ')}`
+            : `$${status.runSpend.toFixed(4)} spent this run ($${status.roundSpend.toFixed(4)} this round)`
+          console.warn(
+            `Spent ${status.runTokens} tokens this run (${status.roundTokens} this round). ${usdLine}`,
+          )
+        }
+        break
+      }
     }
 
     // The winner is the rank-1 agent of the final round. Scanning `listActive` for the
