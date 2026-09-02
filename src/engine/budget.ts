@@ -188,7 +188,11 @@ export class BudgetTracker {
 
     const limits = {} as BudgetLimits
     for (const key of LIMIT_KEYS) {
-      limits[key] = assertLimit(key, (config as Record<string, unknown>)[key])
+      // `BudgetConfig` has no index signature, so tsc refuses the direct cast to
+      // `Record<string, unknown>` as an insufficient-overlap error (TS2352) — go
+      // through `unknown` first, exactly as the compiler suggests. No runtime effect;
+      // a type assertion is erased at compile time either way.
+      limits[key] = assertLimit(key, (config as unknown as Record<string, unknown>)[key])
     }
     this.limits = limits
 
