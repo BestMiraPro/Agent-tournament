@@ -4,6 +4,7 @@ import type { Genome, RunConfig, SubmissionStatus } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
 import { BudgetTracker, type BudgetBreach, type BudgetStatus } from './budget.js'
 import { breed } from '../evolution/breed.js'
+import type { EngineEvent, EventSink } from './events.js'
 import {
   captureSubmission,
   checkQuota,
@@ -28,6 +29,7 @@ export interface EngineDeps {
   judge: Judge
   reflector: Reflector
   seedStrategy: (index: number) => string
+  onEvent?: EventSink
 }
 
 export interface RoundResult {
@@ -49,6 +51,14 @@ export class TournamentEngine {
   private budgets = new Map<string, BudgetTracker>()
 
   constructor(private d: EngineDeps) {}
+
+  private emit(event: EngineEvent): void {
+    try {
+      this.d.onEvent?.(event)
+    } catch {
+      /* a dashboard subscriber must never break a tournament */
+    }
+  }
 
   createRun(name: string, initialGoal: string) {
     const { repos, config } = this.d
@@ -122,6 +132,7 @@ export class TournamentEngine {
 
       // PREPARE
       repos.rounds.setStatus(round.id, 'preparing')
+      this.emit({ type: 'round.status', runId, roundIdx, status: 'preparing' })
       const agents = repos.agents.listActive(runId)
       const prepared = agents.flatMap((a) => {
         const genome = repos.genomes.forRound(a.id, roundIdx)
@@ -156,6 +167,7 @@ export class TournamentEngine {
 
       // RUN
       repos.rounds.setStatus(round.id, 'running')
+      this.emit({ type: 'round.status', runId, roundIdx, status: 'running' })
       // Output is captured inside the pool worker, the instant its agent stops, rather
       // than in COLLECT: a rival sharing the container is still executing until the pool
       // drains, and anything it destroys before then would be destroyed for good.
@@ -164,6 +176,27 @@ export class TournamentEngine {
       // The timeout is enforced here, not delegated to the runner: a runner that
       // ignores or mishandles `timeoutMs` would otherwise hang the whole round.
       const runResults = await runPool(prepared, config.concurrency, async (p) => {
+        // Emitted once, as this agent's worker is dispatched, regardless of how it
+        // eventually ends — matched by exactly one done/failed emission via `finish` below.
+        this.emit({ type: 'agent.status', runId, agentId: p.agent.id, status: 'running' })
+        const finish = (result: AgentRunResult): AgentRunResult => {
+          this.emit({
+            type: 'agent.status',
+            runId,
+            agentId: p.agent.id,
+            status: result.status === 'ok' ? 'done' : 'failed',
+          })
+          this.emit({
+            type: 'agent.usage',
+            runId,
+            agentId: p.agent.id,
+            tokensIn: result.tokensIn,
+            tokensOut: result.tokensOut,
+            costUsd: result.costUsd,
+          })
+          return result
+        }
+
         // An agent whose provisioning failed has no handle to run against; record it
         // as the error it already is instead of calling the runner with a missing
         // handle.
@@ -175,7 +208,7 @@ export class TournamentEngine {
             tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
             costUsd: 0, durationMs: 0,
           }
-          return failed
+          return finish(failed)
         }
 
         // The dispatch gate: checked per agent as the pool pulls it off the queue, not
@@ -190,7 +223,7 @@ export class TournamentEngine {
             tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
             costUsd: 0, durationMs: 0,
           }
-          return skipped
+          return finish(skipped)
         }
 
         const handle = handles.get(p.agent.id)!
@@ -219,7 +252,7 @@ export class TournamentEngine {
             tokensCacheWrite: result.tokensCacheWrite,
             costUsd: result.costUsd,
           })
-          return result
+          return finish(result)
         } catch (e) {
           if (e instanceof DriverTimeout) {
             const timedOut: AgentRunResult = {
@@ -228,7 +261,7 @@ export class TournamentEngine {
               tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
               costUsd: 0, durationMs: Date.now() - started,
             }
-            return timedOut
+            return finish(timedOut)
           }
           throw e
         } finally {
@@ -276,6 +309,7 @@ export class TournamentEngine {
 
       // COLLECT
       repos.rounds.setStatus(round.id, 'collecting')
+      this.emit({ type: 'round.status', runId, roundIdx, status: 'collecting' })
       // `runPool` has drained, and every worker quiesced its own agent before returning,
       // so no agent in this round is still executing. That barrier — not the capture's
       // timing — is what makes "unchanged since capture" a claim worth recording. One
@@ -389,6 +423,7 @@ export class TournamentEngine {
 
       // JUDGE
       repos.rounds.setStatus(round.id, 'judging')
+      this.emit({ type: 'round.status', runId, roundIdx, status: 'judging' })
       const { criteriaMd, source } = await this.d.judge.resolveCriteria(
         input.goalMd,
         input.criteriaMd,
@@ -402,6 +437,7 @@ export class TournamentEngine {
 
       // EVOLVE
       repos.rounds.setStatus(round.id, 'evolving')
+      this.emit({ type: 'round.status', runId, roundIdx, status: 'evolving' })
       const plan = planSelection(
         judged.scores.map((s) => ({ agentId: s.agentId, rank: s.rank, score: s.score })),
         config.selection,
@@ -424,9 +460,16 @@ export class TournamentEngine {
           score: s.score, rationaleMd: s.rationaleMd, band: bandOf(s.agentId, s.rank),
         })),
       )
+      this.emit({
+        type: 'round.scored',
+        runId,
+        roundIdx,
+        scores: judged.scores.map((s) => ({ agentId: s.agentId, rank: s.rank, score: s.score })),
+      })
 
       // REFLECT
       repos.rounds.setStatus(round.id, 'reflecting')
+      this.emit({ type: 'round.status', runId, roundIdx, status: 'reflecting' })
       const mutated = new Map<string, Genome>()
       // Reflection is the one thing a breach skips: it is pure extra spend on top of a
       // round that already blew its budget, and skipping it is what makes breed()
@@ -484,9 +527,17 @@ export class TournamentEngine {
 
       repos.rounds.markEnded(round.id, repos.submissions.totalCost(round.id))
       repos.rounds.setStatus(round.id, 'complete')
+      this.emit({ type: 'round.status', runId, roundIdx, status: 'complete' })
+      this.emit({
+        type: 'round.complete',
+        runId,
+        roundIdx,
+        budgetBreach: budgetBreach?.reason ?? null,
+      })
       return { roundId: round.id, roundIdx, metaDigest: judged.metaDigest, budgetBreach }
     } catch (e) {
       repos.rounds.setStatus(round.id, 'failed')
+      this.emit({ type: 'round.status', runId, roundIdx, status: 'failed' })
       throw e
     }
   }

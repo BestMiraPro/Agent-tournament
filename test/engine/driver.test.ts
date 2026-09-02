@@ -384,3 +384,66 @@ describe('driver budget enforcement', () => {
     }
   })
 })
+
+describe('driver event emission', () => {
+  test('emits round status transitions in lifecycle order', async () => {
+    const seen: string[] = []
+    const { engine, } = makeMockEngine({
+      seed: 1, populationSize: 4,
+      onEvent: (e) => { if (e.type === 'round.status') seen.push(e.status) },
+    })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(seen).toContain('running')
+    expect(seen).toContain('judging')
+    expect(seen.at(-1)).toBe('complete')
+  })
+
+  test('emits a status per agent, ending in done or failed', async () => {
+    const byAgent = new Map<string, string[]>()
+    const { engine } = makeMockEngine({
+      seed: 1, populationSize: 4,
+      onEvent: (e) => {
+        if (e.type === 'agent.status') {
+          byAgent.set(e.agentId, [...(byAgent.get(e.agentId) ?? []), e.status])
+        }
+      },
+    })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(byAgent.size).toBe(4)
+    for (const statuses of byAgent.values()) {
+      expect(statuses).toContain('running')
+      expect(['done', 'failed']).toContain(statuses.at(-1))
+    }
+  })
+
+  test('emits scores once judging completes', async () => {
+    let scored: { agentId: string; rank: number }[] = []
+    const { engine } = makeMockEngine({
+      seed: 1, populationSize: 4,
+      onEvent: (e) => { if (e.type === 'round.scored') scored = e.scores },
+    })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(scored).toHaveLength(4)
+    expect(scored.map((s) => s.rank).sort((a, b) => a - b)).toEqual([1, 2, 3, 4])
+  })
+
+  test('a subscriber that throws does not fail the round', async () => {
+    const { engine, repos } = makeMockEngine({
+      seed: 1, populationSize: 3,
+      onEvent: () => { throw new Error('subscriber exploded') },
+    })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
+  })
+
+  test('emits nothing when no sink is provided', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
+  })
+})

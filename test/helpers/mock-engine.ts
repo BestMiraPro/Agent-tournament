@@ -3,6 +3,7 @@ import { makeRepos } from '../../src/db/repos.js'
 import { makeRng } from '../../src/core/rng.js'
 import { DEFAULT_CONFIG, type RunConfig } from '../../src/core/types.js'
 import { TournamentEngine } from '../../src/engine/driver.js'
+import type { EventSink } from '../../src/engine/events.js'
 import { Judge, type JudgeInput, type JudgeOutput } from '../../src/judge/judge.js'
 import { Reflector } from '../../src/evolution/reflect.js'
 import { GOOD_KEYWORDS, MockProvider } from '../../src/runtime/mock-provider.js'
@@ -266,6 +267,8 @@ export function makeMockEngine(opts: {
   /** Make the agent at this seed index report HUGE_TOKENS on completion, for exercising
    *  budget enforcement without needing a huge population or many rounds. */
   hugeTokensFor?: number
+  /** Subscribe to engine events emitted during the run, for testing the event sink. */
+  onEvent?: EventSink
 }) {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
@@ -337,6 +340,7 @@ export function makeMockEngine(opts: {
       if (opts.hugeTokensFor === i) return `${HUGE_TOKENS_MARKER} ${base}`
       return base
     },
+    onEvent: opts.onEvent,
   })
 
   // Exposed (not just wired into the engine) so a test can spy on `reflect` and
