@@ -118,3 +118,36 @@ describe('per-shard client resolution', () => {
     expect(res.status).toBe('ok')
   })
 })
+
+describe('session id exposure', () => {
+  test('reports the session id as soon as the session is created', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'x')
+    const seen: { agentId: string; sessionId: string }[] = []
+    const runner = new OpenCodeAgentRunner(new FakeClient(okResponse) as never, sb, {
+      onSessionCreated: (agentId, sessionId) => seen.push({ agentId, sessionId }),
+    })
+    await runner.run(h, ctx('s'))
+    expect(seen).toEqual([{ agentId: 'a1', sessionId: 'ses_1' }])
+  })
+
+  test('a throwing hook does not fail the run', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'x')
+    const runner = new OpenCodeAgentRunner(new FakeClient(okResponse) as never, sb, {
+      onSessionCreated: () => { throw new Error('hook exploded') },
+    })
+    const res = await runner.run(h, ctx('s'))
+    expect(res.status).toBe('ok')
+  })
+
+  test('works without the hook', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'x')
+    const res = await new OpenCodeAgentRunner(new FakeClient(okResponse) as never, sb).run(h, ctx('s'))
+    expect(res.status).toBe('ok')
+  })
+})

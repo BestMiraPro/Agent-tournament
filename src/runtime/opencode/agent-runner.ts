@@ -10,6 +10,15 @@ export const SUBMISSION_FILE = 'SUBMISSION.md'
 /** Resolves which OpenCode server (client) serves a given agent's shard. */
 export type ClientResolver = (handle: AgentHandle) => OpenCodeClient
 
+export interface AgentRunnerOptions {
+  /**
+   * Fired the instant a session exists, so a live dashboard can map OpenCode's
+   * sessionID-keyed events onto agents. It cannot wait for AgentRunResult: by then
+   * every event for this agent has already been emitted and dropped.
+   */
+  onSessionCreated?: (agentId: string, sessionId: string) => void
+}
+
 /** The contract every agent is held to; the judged artifact is SUBMISSION.md. */
 export function buildAgentPrompt(goalMd: string): string {
   return [
@@ -34,7 +43,11 @@ export class OpenCodeAgentRunner implements AgentRunner {
   /** Runs that have not returned yet, so `quiesce` knows what is still executing. */
   private live = new Map<string, LiveRun>()
 
-  constructor(client: OpenCodeClient | ClientResolver, private sandbox: Sandbox) {
+  constructor(
+    client: OpenCodeClient | ClientResolver,
+    private sandbox: Sandbox,
+    private options: AgentRunnerOptions = {},
+  ) {
     this.resolve = typeof client === 'function' ? client : () => client
   }
 
@@ -90,6 +103,11 @@ export class OpenCodeAgentRunner implements AgentRunner {
       const session = await client.createSession(handle.workspacePath, `agent-${ctx.agentId}`)
       sessionId = session.id
       tracked.sessionId = session.id
+      try {
+        this.options.onSessionCreated?.(ctx.agentId, session.id)
+      } catch {
+        /* a dashboard subscriber must never break an agent's run */
+      }
 
       const res = await Promise.race([
         client.prompt(
