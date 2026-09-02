@@ -274,6 +274,77 @@ describe('Judge resilience', () => {
   })
 })
 
+describe('Judge.score — batched mode preserves rationales and finals digest', () => {
+  /**
+   * Stub provider for the batched-mode rationale/digest defect. Extracts the
+   * agentId embedded in each submission body (`AGENT=<id>`) and returns a
+   * rationale keyed to that agentId, plus a meta_digest keyed to call order,
+   * so the test can assert exactly whose rationale survived and which call's
+   * digest survived — without depending on rng.shuffle's actual batch/ref
+   * assignment (batching and anonymization both reorder inputs).
+   */
+  const distinctiveJudge = (digests: string[]): Provider => ({
+    async complete(req) {
+      const re = /<submission ref="([^"]+)">([\s\S]*?)<\/submission>/g
+      const items: { ref: string; agentId: string; fitness: number }[] = []
+      for (const m of req.prompt.matchAll(re)) {
+        const body = m[2] ?? ''
+        items.push({
+          ref: m[1]!,
+          agentId: /AGENT=(\S+)/.exec(body)?.[1] ?? 'unknown',
+          fitness: Number(/FITNESS=([\d.]+)/.exec(body)?.[1] ?? '0'),
+        })
+      }
+      items.sort((a, b) => b.fitness - a.fitness)
+      const digest = `digest-call-${digests.length + 1}`
+      digests.push(digest)
+      return JSON.stringify({
+        rankings: items.map((it, i) => ({
+          ref: it.ref,
+          rank: i + 1,
+          score: 100 - i,
+          rationale: `distinctive-rationale-for-${it.agentId}`,
+        })),
+        meta_digest: digest,
+      })
+    },
+  })
+
+  const markedPopulation = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      agentId: `agent-${i}`,
+      submissionMd: `work product FITNESS=${i} AGENT=agent-${i}`,
+      files: [],
+      status: 'ok' as const,
+    }))
+
+  test('surfaces the real per-agent rationale, not a synthesized placement string', async () => {
+    const digests: string[] = []
+    const res = await new Judge(distinctiveJudge(digests), cfg, 42)
+      .score('goal', 'criteria', markedPopulation(30))
+
+    expect(res.mode).toBe('batched_finals')
+    expect(res.scores).toHaveLength(30)
+    for (const s of res.scores) {
+      expect(s.rationaleMd).toBe(`distinctive-rationale-for-${s.agentId}`)
+      expect(s.rationaleMd).not.toMatch(/^Placed \d+ of \d+/)
+    }
+  })
+
+  test('meta digest is non-empty and comes from the finals call, not the first batch', async () => {
+    const digests: string[] = []
+    const res = await new Judge(distinctiveJudge(digests), cfg, 42)
+      .score('goal', 'criteria', markedPopulation(30))
+
+    // 6 batches (population 30 / batchSize 5) plus one finals call among the
+    // 6 batch winners.
+    expect(digests.length).toBe(7)
+    expect(res.metaDigest.length).toBeGreaterThan(0)
+    expect(res.metaDigest).toBe(digests[digests.length - 1])
+    expect(res.metaDigest).not.toBe(digests[0])
+  })
+})
+
 describe('Judge schema usage', () => {
   test('passes the ranking schema to the provider', async () => {
     let seenSchema: unknown = null
