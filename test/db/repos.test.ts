@@ -61,6 +61,17 @@ describe('repos', () => {
     expect(repos.rounds.get(round.id)?.status).toBe('judging')
   })
 
+  test('lists runs newest first', () => {
+    const { db, repos, run } = setup()
+    const second = repos.runs.create({ name: 'second', config: DEFAULT_CONFIG, seedDir: null })
+    // Force distinct timestamps so ordering is deterministic even when both runs are
+    // created within the same millisecond.
+    db.prepare('UPDATE runs SET created_at = ? WHERE id = ?').run(run.createdAt - 1000, run.id)
+    db.prepare('UPDATE runs SET created_at = ? WHERE id = ?').run(run.createdAt + 1000, second.id)
+    const runs = repos.runs.list()
+    expect(runs.map((r) => r.id)).toEqual([second.id, run.id])
+  })
+
   test('lists rounds for a run ordered by idx', () => {
     const { repos, run } = setup()
     repos.rounds.create({ runId: run.id, idx: 2, goalMd: 'second' })
