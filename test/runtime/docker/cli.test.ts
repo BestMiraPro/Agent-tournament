@@ -107,3 +107,31 @@ describe('removeContainer', () => {
     expect(warnings).toHaveLength(1)
   })
 })
+
+describe('parsePortMapping bare host form', () => {
+  // `docker port <name> 4096/tcp` prints only the host side, with no arrow.
+  // Verified against a live daemon: this is what the production call site receives.
+  test('parses the bare host:port form', () => {
+    expect(parsePortMapping('127.0.0.1:32773')).toBe(32773)
+  })
+
+  test('parses a bare form with trailing whitespace', () => {
+    expect(parsePortMapping(['127.0.0.1:32773', ''].join('\n'))).toBe(32773)
+  })
+
+  test('parses a bare 0.0.0.0 binding', () => {
+    expect(parsePortMapping('0.0.0.0:41000')).toBe(41000)
+  })
+
+  test('parses a bare bracketed IPv6 binding', () => {
+    expect(parsePortMapping('[::1]:41000')).toBe(41000)
+  })
+
+  test('still parses the arrow form from a bare `docker port` call', () => {
+    expect(parsePortMapping('4096/tcp -> 127.0.0.1:32769')).toBe(32769)
+  })
+
+  test('returns null for unrelated output', () => {
+    expect(parsePortMapping('Error: No such container')).toBeNull()
+  })
+})

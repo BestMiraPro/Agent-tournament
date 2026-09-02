@@ -24,8 +24,19 @@ export function docker(args: string[], timeoutMs = 60_000): Promise<ExecResult> 
 
 /** `docker port` prints e.g. `4096/tcp -> 127.0.0.1:32769`. */
 export function parsePortMapping(out: string): number | null {
-  for (const line of out.split('\n')) {
-    const m = /->\s*(?:\[[^\]]+\]|[^:]+):(\d+)\s*$/.exec(line.trim())
+  for (const raw of out.split('\n')) {
+    const line = raw.trim()
+    if (line.length === 0) continue
+
+    // `docker port <name>` prints the mapping with an arrow:
+    //     4096/tcp -> 127.0.0.1:32769
+    // but `docker port <name> 4096/tcp` prints ONLY the host side:
+    //     127.0.0.1:32769
+    // Both forms must parse. Matching the arrow alone made every provision fail with
+    // "could not discover a published port", because the caller passes the port.
+    const afterArrow = line.includes('->') ? line.slice(line.lastIndexOf('->') + 2).trim() : line
+
+    const m = /^(?:\[[^\]]+\]|[^:]+):(\d+)$/.exec(afterArrow)
     if (m) return Number(m[1])
   }
   return null
