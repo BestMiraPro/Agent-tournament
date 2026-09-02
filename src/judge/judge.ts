@@ -223,19 +223,19 @@ export class Judge {
       batches.push(shuffled.slice(i, i + this.cfg.batchSize))
     }
 
-    const placings = new Map<string, number>()
+    const placings = new Map<string, { rank: number; rationale: string }>()
     const winners: JudgeInput[] = []
-    let digest = ''
+    let batchDigest = ''
 
     for (const batch of batches) {
       const { anon, byRef } = this.anonymize(batch, roundIdx)
       const parsed = await this.callJudge(
         buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
       )
-      digest ||= parsed.meta_digest
+      batchDigest ||= parsed.meta_digest
       for (const r of parsed.rankings) {
         const agentId = byRef.get(r.ref)
-        if (agentId) placings.set(agentId, r.rank)
+        if (agentId) placings.set(agentId, { rank: r.rank, rationale: r.rationale })
       }
       const top = parsed.rankings.find((r) => r.rank === 1)
       const winnerId = top ? byRef.get(top.ref) : undefined
@@ -243,26 +243,34 @@ export class Judge {
       if (winner) winners.push(winner)
     }
 
-    const finalsOrder = new Map<string, number>()
+    const finalsOrder = new Map<string, { rank: number; rationale: string }>()
+    // Only a real finals call (winners.length > 1) produces a finals digest; the
+    // degenerate single-winner case below never talks to the judge, so there is
+    // no finals digest to prefer and scoreBatched must fall back to the batch one.
+    let finalsDigest = ''
     if (winners.length > 1) {
       const { anon, byRef } = this.anonymize(winners, roundIdx)
       const parsed = await this.callJudge(
         buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
       )
+      finalsDigest = parsed.meta_digest
       for (const r of parsed.rankings) {
         const agentId = byRef.get(r.ref)
-        if (agentId) finalsOrder.set(agentId, r.rank)
+        if (agentId) finalsOrder.set(agentId, { rank: r.rank, rationale: r.rationale })
       }
     } else if (winners[0]) {
-      finalsOrder.set(winners[0].agentId, 1)
+      finalsOrder.set(winners[0].agentId, {
+        rank: 1,
+        rationale: placings.get(winners[0].agentId)?.rationale ?? '',
+      })
     }
 
     // Finalists first by their finals rank, then everyone else by batch placing.
     const ordered = [...inputs].sort((a, b) => {
-      const fa = finalsOrder.get(a.agentId) ?? Infinity
-      const fb = finalsOrder.get(b.agentId) ?? Infinity
+      const fa = finalsOrder.get(a.agentId)?.rank ?? Infinity
+      const fb = finalsOrder.get(b.agentId)?.rank ?? Infinity
       if (fa !== fb) return fa - fb
-      return (placings.get(a.agentId) ?? 99) - (placings.get(b.agentId) ?? 99)
+      return (placings.get(a.agentId)?.rank ?? 99) - (placings.get(b.agentId)?.rank ?? 99)
     })
 
     const n = ordered.length
@@ -271,9 +279,19 @@ export class Judge {
         agentId: inp.agentId,
         rank: i + 1,
         score: Math.round(((n - i) / n) * 100 * 100) / 100,
-        rationaleMd: `Placed ${i + 1} of ${n} across batch and finals ranking.`,
+        // Prefer the finals rationale for agents who reached the finals round; fall
+        // back to their batch rationale otherwise. Only a judge response that omits
+        // an agent's ref from every call it appeared in (malformed output) falls
+        // through to the generic placement string.
+        rationaleMd:
+          finalsOrder.get(inp.agentId)?.rationale ||
+          placings.get(inp.agentId)?.rationale ||
+          `Placed ${i + 1} of ${n} across batch and finals ranking.`,
       })),
-      metaDigest: digest,
+      // The finals digest describes the models that actually competed for the top
+      // places, so it is preferred; fall back to a batch digest only when there was
+      // no finals round (population fit in a single batch).
+      metaDigest: finalsDigest || batchDigest,
     }
   }
 

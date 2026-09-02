@@ -21,7 +21,7 @@ describe('Reflector', () => {
   test('produces a strategy at least as fit as the original', async () => {
     const r = new Reflector(new MockProvider(1), cfg, ['m'])
     const out = await r.reflect({ ...base, currentModelId: 'm', currentTemperature: 0.7 })
-    expect(trueFitness(out.strategyMd)).toBeGreaterThanOrEqual(trueFitness('plain'))
+    expect(trueFitness(out.strategyMd)).toBeGreaterThan(trueFitness('plain'))
   })
 
   test('enforces the strategy character cap', async () => {

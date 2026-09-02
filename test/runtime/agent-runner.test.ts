@@ -34,9 +34,17 @@ describe('MockAgentRunner', () => {
   test('reports token usage and duration', async () => {
     const sb = new MockSandbox()
     const h = await sb.provision('a1', {})
+    const before = Date.now()
     const res = await new MockAgentRunner(sb, 1).run(h, ctx('verify'))
+    const elapsed = Date.now() - before
     expect(res.tokensIn).toBeGreaterThan(0)
+    // `durationMs` must reflect real wall-clock time actually spent inside `run`,
+    // not just be non-negative (which `Date.now() - x` always is). Bound it above
+    // by the wall-clock time the call actually took, with a small tolerance for
+    // timer resolution — a hardcoded or otherwise bogus duration would exceed it.
+    expect(Number.isFinite(res.durationMs)).toBe(true)
     expect(res.durationMs).toBeGreaterThanOrEqual(0)
+    expect(res.durationMs).toBeLessThanOrEqual(elapsed + 5)
   })
 
   test('simulates failure for a strategy marked to fail', async () => {
