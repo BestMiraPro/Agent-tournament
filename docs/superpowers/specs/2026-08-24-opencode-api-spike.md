@@ -201,3 +201,43 @@ Free structured-output models: `opencode/nemotron-3.5-lightning-free`, `mimo-v2.
 4. Cost comes from `info.cost`; token accounting must carry the cache breakdown.
 5. The local sandbox is one server plus per-agent directories, not a server per agent.
 6. Default judge changes from the non-existent `Kimi-K3` to `GLM-5.2`.
+
+---
+
+## 9. The `/event` SSE stream requires `?directory=` (verified 2026-08-25, for Phase 4)
+
+Subscribing to `GET /event` **without** a `directory` query parameter yields only
+`server.connected` and `server.heartbeat`. An agent ran for 10.9 seconds doing real tool work
+during that subscription and produced **zero** message or session events.
+
+Subscribing to `GET /event?directory=<abs-path>` — the same directory used for the session —
+delivers the full stream.
+
+This matters because the failure is silent: the connection succeeds, frames arrive, and a live
+UI would simply display nothing forever while appearing healthy.
+
+**Wire event types are lowercase-dotted, not the OpenAPI schema names.** The spec calls the
+schema `EventMessagePartUpdated`; the `type` field on the wire is `message.part.updated`. Coding
+against the schema names would match nothing.
+
+Observed types, and what each is good for:
+
+| wire `type` | use |
+|---|---|
+| `session.status` (`{type:'busy'}` / idle) | agent running vs finished |
+| `session.idle` | agent done |
+| `message.part.delta` | token-by-token streaming (`field`, `delta`) |
+| `message.part.updated` | tool calls and text parts as they appear |
+| `message.updated` | message-level state |
+| `session.diff` | workspace changes during the session |
+| `file.edited`, `file.watcher.updated` | agent wrote a file |
+| `session.created`, `session.updated` | session lifecycle |
+| `server.connected`, `server.heartbeat` | transport liveness |
+
+Every payload carries `properties.sessionID`, so a dashboard can map events to agents by keeping
+a `sessionID → agentId` map built when each session is created.
+
+**Consequence for Phase 4.** A live per-agent grid is feasible without polling. The orchestrator
+subscribes once per shard endpoint with that shard's directory, maps `sessionID` to `agentId`, and
+relays. With Docker sharding each container needs its own subscription, since each has its own
+server.
