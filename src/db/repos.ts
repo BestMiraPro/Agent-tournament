@@ -107,6 +107,15 @@ export function makeRepos(db: Db) {
         const r = db.prepare('SELECT MAX(idx) AS m FROM rounds WHERE run_id = ?').get(runId) as any
         return r?.m ?? 0
       },
+      listForRun(runId: string): RoundRow[] {
+        const rows = db.prepare('SELECT * FROM rounds WHERE run_id = ? ORDER BY idx').all(runId) as any[]
+        return rows.map((r) => ({
+          id: r.id, runId: r.run_id, idx: r.idx, goalMd: r.goal_md,
+          criteriaMd: r.criteria_md, criteriaSource: r.criteria_source,
+          judgeMode: r.judge_mode, status: r.status, metaDigest: r.meta_digest,
+          startedAt: r.started_at, endedAt: r.ended_at, costUsd: r.cost_usd,
+        }))
+      },
       markStarted(roundId: string): void {
         db.prepare('UPDATE rounds SET started_at = ? WHERE id = ?').run(now(), roundId)
       },

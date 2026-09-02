@@ -60,6 +60,15 @@ describe('repos', () => {
     repos.rounds.setStatus(round.id, 'judging')
     expect(repos.rounds.get(round.id)?.status).toBe('judging')
   })
+
+  test('lists rounds for a run ordered by idx', () => {
+    const { repos, run } = setup()
+    repos.rounds.create({ runId: run.id, idx: 2, goalMd: 'second' })
+    repos.rounds.create({ runId: run.id, idx: 1, goalMd: 'first' })
+    const rounds = repos.rounds.listForRun(run.id)
+    expect(rounds.map((r) => r.idx)).toEqual([1, 2])
+    expect(rounds.map((r) => r.goalMd)).toEqual(['first', 'second'])
+  })
 })
 
 describe('config round-trip', () => {
