@@ -6,3 +6,5 @@ runs/
 *.db-wal
 .env
 .env.local
+*.out
+build*.log
