@@ -1,0 +1,19 @@
+# Agent arena container: runs an opencode server for one shard of tournament agents.
+#
+# Verified 2026-08-25: 960MB image, ~250MiB idle, ~413MiB under real work.
+FROM node:24-slim
+
+# git is required: opencode initialises a repo in the working directory for its
+# snapshot/diff features and fails noisily without it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g opencode-ai@1.18.21 \
+    && npm cache clean --force
+
+WORKDIR /work
+
+# 0.0.0.0 so the published port is reachable from the host.
+EXPOSE 4096
+CMD ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]

@@ -1,0 +1,11 @@
+# This repo lives on a Windows mount but is authored with LF.
+# Without this, every checkout re-CRLFs the tree and `git status` shows
+# ~66 files modified with zero real content changes -- noise that has
+# already caused one worker to clobber a commit.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

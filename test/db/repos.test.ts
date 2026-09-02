@@ -61,3 +61,27 @@ describe('repos', () => {
     expect(repos.rounds.get(round.id)?.status).toBe('judging')
   })
 })
+
+describe('config round-trip', () => {
+  test('preserves Infinity budget limits through the database', () => {
+    const { repos } = setup()
+    const cfg = {
+      ...DEFAULT_CONFIG,
+      budget: { ...DEFAULT_CONFIG.budget, maxRunUsd: Infinity, maxRoundUsd: Infinity },
+    }
+    const run = repos.runs.create({ name: 'inf', config: cfg, seedDir: null })
+    const back = repos.runs.get(run.id)!
+    expect(back.config.budget.maxRunUsd).toBe(Infinity)
+    expect(back.config.budget.maxRoundUsd).toBe(Infinity)
+  })
+
+  test('preserves finite budget limits unchanged', () => {
+    const { repos } = setup()
+    const cfg = {
+      ...DEFAULT_CONFIG,
+      budget: { ...DEFAULT_CONFIG.budget, maxRunTokens: 1234 },
+    }
+    const run = repos.runs.create({ name: 'fin', config: cfg, seedDir: null })
+    expect(repos.runs.get(run.id)!.config.budget.maxRunTokens).toBe(1234)
+  })
+})

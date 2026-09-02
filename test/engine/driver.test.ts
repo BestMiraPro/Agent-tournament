@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { makeMockEngine } from '../helpers/mock-engine.js'
+import { makeMockEngine, SABOTAGED_TEXT } from '../helpers/mock-engine.js'
 import { parseGenome } from '../../src/core/genome.js'
 
 describe('TournamentEngine', () => {
@@ -130,6 +130,257 @@ describe('driver hardening', () => {
       const selfRank = req.ownRank
       const sawSelf = req.topPerformers.some((tp) => tp.rank === selfRank)
       expect(sawSelf).toBe(false)
+    }
+  })
+})
+
+describe('driver sandbox lifecycle', () => {
+  test('tears down every agent workspace when the run is disposed', async () => {
+    const { engine, repos, sandbox } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    await engine.dispose(run.id)
+    const agents = repos.agents.listActive(run.id)
+    const h = { agentId: agents[0]!.id, workspacePath: '', baseUrl: '' }
+    await expect(sandbox.readFile(h as never, 'GOAL.md')).rejects.toThrow(/torn down/i)
+  })
+
+  test('a provisioning failure does not abort the round', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4, failProvisionFor: 1 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    const scores = repos.scores.forRound(round.roundId)
+    expect(scores).toHaveLength(4)
+    expect(scores.filter((s) => s.score === 0).length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('driver capture guardrails', () => {
+  test('an agent exceeding the workspace quota is scored zero', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3, floodFilesFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const subs = repos.submissions.forRound(round.roundId)
+    const flooded = subs.find((s) => s.status === 'error' && /limit/i.test(s.errorText ?? ''))
+    expect(flooded).toBeDefined()
+
+    const score = repos.scores.forRound(round.roundId).find((s) => s.agentId === flooded!.agentId)
+    expect(score?.score).toBe(0)
+  })
+
+  test('the round completes despite a quota violation', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3, floodFilesFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
+  })
+
+  test('an agent within the quota is judged normally', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3, floodFilesFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    const subs = repos.submissions.forRound(round.roundId)
+    expect(subs.filter((s) => s.status === 'ok')).toHaveLength(2)
+  })
+
+  // The window this closes: a rival sharing the container overwrites a workspace after
+  // its owner has finished. The substituted text must never become the judged artifact.
+  test('a rival cannot get a substituted submission judged', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3, sabotageBy: 1 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const victim = repos.agents.listActive(run.id)[0]!
+    const sub = repos.submissions.forRound(round.roundId).find((s) => s.agentId === victim.id)!
+    expect(sub.submissionMd).not.toBe(SABOTAGED_TEXT)
+    expect(sub.submissionMd).toContain('Approach:')
+  })
+
+  test('the substitution is recorded as a tamper event against the victim', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3, sabotageBy: 1 })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const victim = repos.agents.listActive(run.id)[0]!
+    const events = repos.events
+      .forRun(run.id)
+      .filter((e) => e.type === 'submission.tampered' && e.agentId === victim.id)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.payload.detail).toMatch(/modified/i)
+    // Every agent was confirmed stopped before COLLECT re-read the workspace, so the
+    // verdict is a finding rather than an observation that might already be stale.
+    expect(events[0]!.payload.verified).toBe(true)
+  })
+
+  test('an untampered agent produces no tamper event', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3, sabotageBy: 1 })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const saboteur = repos.agents.listActive(run.id)[1]!
+    const events = repos.events
+      .forRun(run.id)
+      .filter((e) => e.type === 'submission.tampered' && e.agentId === saboteur.id)
+    expect(events).toHaveLength(0)
+  })
+
+  // If any agent in the round could not be confirmed stopped, a co-tenant may still be
+  // writing, so nothing captured that round can honestly be called verified.
+  test('nothing is certified when an agent cannot be confirmed stopped', async () => {
+    const { engine, repos } = makeMockEngine({
+      seed: 1,
+      populationSize: 3,
+      sabotageBy: 1,
+      unstoppableSaboteur: true,
+    })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const victim = repos.agents.listActive(run.id)[0]!
+    const event = repos.events
+      .forRun(run.id)
+      .find((e) => e.type === 'submission.tampered' && e.agentId === victim.id)!
+    expect(event.payload.detail).toMatch(/modified/i)
+    expect(event.payload.verified).toBe(false)
+  })
+
+  // Amendment (A). The window the earlier design left open: the substitution lands
+  // BEFORE the orchestrator's read, so the bytes on record are already the rival's and
+  // every later re-read agrees with them. Nothing host-side can recover the victim's
+  // text here — what must never happen is the system stamping the rival's file as the
+  // victim's own verified work.
+  test('a substitution during the capture read cannot be certified as intact', async () => {
+    const { engine, repos } = makeMockEngine({
+      seed: 1,
+      populationSize: 3,
+      sabotageDuringCapture: true,
+    })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const victim = repos.agents.listActive(run.id)[0]!
+    const sub = repos.submissions.forRound(round.roundId).find((s) => s.agentId === victim.id)!
+    // The rival's text did land — this is the irreducible part.
+    expect(sub.submissionMd).toBe(SABOTAGED_TEXT)
+
+    const event = repos.events
+      .forRun(run.id)
+      .find((e) => e.type === 'submission.captured' && e.agentId === victim.id)!
+    // Every agent stopped and every file hashed, so the ONLY thing standing between the
+    // rival's file and a clean bill of health is the capture being unsealed.
+    expect(event.payload.tampered).toBe(false)
+    expect(event.payload.sealed).toBe(false)
+    expect(event.payload.verified).toBe(false)
+  })
+
+  test('a shared workspace is never sealed, however cleanly the round ran', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3 })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const captured = repos.events.forRun(run.id).filter((e) => e.type === 'submission.captured')
+    expect(captured).toHaveLength(3)
+    for (const e of captured) expect(e.payload.verified).toBe(false)
+  })
+
+  // The other side of the same rule: give an agent a workspace nobody else can reach and
+  // the capture becomes certifiable, so the flag is a real distinction and not a
+  // constant `false` dressed up as a safety property.
+  test('an isolated workspace yields a sealed, verified-intact capture', async () => {
+    const { engine, repos } = makeMockEngine({
+      seed: 1,
+      populationSize: 3,
+      isolatedWorkspaces: true,
+    })
+    const run = engine.createRun('t', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const captured = repos.events.forRun(run.id).filter((e) => e.type === 'submission.captured')
+    expect(captured).toHaveLength(3)
+    for (const e of captured) {
+      expect(e.payload.sealed).toBe(true)
+      expect(e.payload.tampered).toBe(false)
+      expect(e.payload.verified).toBe(true)
+    }
+  })
+})
+
+describe('driver budget enforcement', () => {
+  test('a round that breaches the budget still completes, and the breach is reported', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4, hugeTokensFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
+    expect(round.budgetBreach).not.toBeNull()
+    expect(round.budgetBreach?.reason).toMatch(/token/i)
+
+    // The rest of the round still ran: every agent was scored, including the one that
+    // blew the budget — that work is paid for either way.
+    expect(repos.scores.forRound(round.roundId)).toHaveLength(4)
+  })
+
+  test('reflection is skipped once the round breaches budget, so survivor genomes carry forward unchanged', async () => {
+    const { engine, repos, reflector } = makeMockEngine({ seed: 1, populationSize: 4, hugeTokensFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const reflectSpy = vi.spyOn(reflector, 'reflect')
+
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(round.budgetBreach).not.toBeNull()
+    expect(reflectSpy).not.toHaveBeenCalled()
+
+    // Rank 2 is a survivor (population 4: 1 elite, 0 culled at these selection
+    // defaults), so under normal operation reflection would be free to mutate it.
+    const survivor = repos.scores.forRound(round.roundId).find((s) => s.rank === 2)!
+    const before = repos.genomes.forRound(survivor.agentId, round.roundIdx)!
+    const after = repos.genomes.forRound(survivor.agentId, round.roundIdx + 1)!
+    expect(after.strategyMd).toBe(before.strategyMd)
+    expect(after.notesMd).toBe(before.notesMd)
+    expect(after.modelId).toBe(before.modelId)
+    expect(after.temperature).toBe(before.temperature)
+  })
+
+  test('a run under budget behaves exactly as before', async () => {
+    const { engine, repos, reflector } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('t', 'goal')
+    const reflectSpy = vi.spyOn(reflector, 'reflect')
+
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    expect(round.budgetBreach).toBeNull()
+    expect(reflectSpy).toHaveBeenCalled()
+    expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
+    expect(repos.scores.forRound(round.roundId)).toHaveLength(4)
+  })
+
+  // makeMockEngine forces concurrency to 1 whenever hugeTokensFor is set, so agent 0
+  // (the one carrying the marker) is guaranteed to run and record BEFORE the pool ever
+  // pulls agents 1-3 off the queue — making "later agents were never dispatched" a fact
+  // instead of a race. This is the guardrail the isolation tests warn a project like
+  // this one can ship plumbed but mute: `shouldStopDispatch` exists and is called, but
+  // nothing proves it ever actually stops a dispatch without a test shaped like this one.
+  test('shouldStopDispatch stops agents still queued once an earlier one blows the budget', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4, hugeTokensFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const agents = repos.agents.listActive(run.id)
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const subs = repos.submissions.forRound(round.roundId)
+    const byAgent = new Map(subs.map((s) => [s.agentId, s]))
+
+    // Agent 0 actually ran (it is the one that blew the budget, not a casualty of it).
+    const first = byAgent.get(agents[0]!.id)!
+    expect(first.status).toBe('ok')
+    expect(first.tokensIn).toBe(2_000_000)
+
+    // Agents 1-3 were still queued when agent 0's usage tripped the round cap, so the
+    // pool must never have called the runner for them at all.
+    for (const agent of agents.slice(1)) {
+      const sub = byAgent.get(agent.id)!
+      expect(sub.status).toBe('error')
+      expect(sub.errorText).toMatch(/dispatch skipped/i)
+      expect(sub.tokensIn).toBe(0)
     }
   })
 })

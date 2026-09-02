@@ -105,6 +105,10 @@ export class LocalSandbox implements Sandbox {
     return out
   }
 
+  endpoint(_handle: AgentHandle): { baseUrl: string } {
+    return { baseUrl: '' }
+  }
+
   async teardown(handle: AgentHandle): Promise<void> {
     this.live.delete(handle.agentId)
   }
