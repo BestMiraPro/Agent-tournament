@@ -283,3 +283,18 @@ describe('makeClientResolver', () => {
     expect(resolve(handle('a', ''))).toBe(fallbackClient)
   })
 })
+
+describe('capacity preflight uses the effective container count', () => {
+  test('a small population is not refused because maxContainers is high', async () => {
+    // 2 agents can only ever start 2 containers, whatever maxContainers says.
+    const cfg = { ...DEFAULT_CONFIG, populationSize: 2, maxContainers: 8, containerMemory: '1g', containerCpus: 1 }
+    const host = { totalMemoryBytes: 4.1 * 1024 ** 3, usedMemoryBytes: 0.8 * 1024 ** 3, cpus: 16 }
+    await expect(assertHostCapacity(cfg, async () => host, () => {})).resolves.toBeUndefined()
+  })
+
+  test('a genuinely oversized run is still refused', async () => {
+    const cfg = { ...DEFAULT_CONFIG, populationSize: 40, maxContainers: 40, containerMemory: '1g', containerCpus: 1 }
+    const host = { totalMemoryBytes: 4.1 * 1024 ** 3, usedMemoryBytes: 0.8 * 1024 ** 3, cpus: 16 }
+    await expect(assertHostCapacity(cfg, async () => host, () => {})).rejects.toThrow(/memory/i)
+  })
+})

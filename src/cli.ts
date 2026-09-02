@@ -304,9 +304,15 @@ export async function assertHostCapacity(
     return
   }
 
+  // Check the containers this run will ACTUALLY start, not the configured ceiling.
+  // `planShards` clamps shard count to the population, so a 2-agent run never starts
+  // more than 2 containers however high `maxContainers` is. Validating the ceiling
+  // instead refuses runs that would have fit comfortably.
+  const containers = Math.max(1, Math.min(config.maxContainers, config.populationSize))
+
   const verdict = planCapacity(
     {
-      containers: config.maxContainers,
+      containers,
       memory: config.containerMemory,
       cpus: config.containerCpus,
     },
