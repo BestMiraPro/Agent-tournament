@@ -51,14 +51,19 @@ stable, a given agent lands on the same ref every round — so a real judge's fi
 becomes a persistent per-agent fitness bonus that selection then amplifies.
 Fix: thread the round index into the seed.
 
-**7. Batched mode discards every rationale and silently changes the score scale.**
-Above 25 agents, `scoreBatched` keeps only `rank` and drops `rationale`, and keeps only the *first*
-batch's `meta_digest`. Reflection then receives no critique at all — neither its own nor the leaders' —
-at exactly the population size where the system is most interesting. Spec §10 defines rationales and
-the digest as reflection's core inputs.
-Separately, batched scores are rank-derived (`((n-i)/n)*100`), not judge scores, so any fitness chart
-silently compares two different scales depending on which side of `singleCallMaxPopulation` the
-population sits.
+**7.** ~~Batched mode discards every rationale and silently changes the score scale.~~
+~~Above 25 agents, `scoreBatched` keeps only `rank` and drops `rationale`, and keeps only the *first*~~
+~~batch's `meta_digest`. Reflection then receives no critique at all — neither its own nor the leaders' —~~
+~~at exactly the population size where the system is most interesting. Spec §10 defines rationales and~~
+~~the digest as reflection's core inputs.~~
+**Fixed:** `scoreBatched` now carries each agent's real `rationale` through instead of synthesizing
+`"Placed N of M"`, and `metaDigest` prefers the finals-round digest (falling back to a batch digest
+only when no finals round ran) instead of always keeping the first batch's. See
+`test/judge/judge.test.ts` — `Judge.score — batched mode preserves rationales and finals digest`.
+**Still open:** batched scores remain rank-derived (`((n-i)/n)*100`), not judge scores, so any fitness
+chart still silently compares two different scales depending on which side of `singleCallMaxPopulation`
+the population sits. That part of this finding was explicitly out of scope for the rationale/digest fix
+and is not addressed here.
 
 ## Security — live the moment agents are real
 
@@ -113,17 +118,24 @@ Phase 3 writes against the current shape.
 
 ## Test suite repairs
 
-Three Phase 1 tests do not discriminate and should be tightened:
+Three Phase 1 tests did not discriminate and have been tightened (each verified by breaking the
+guarded implementation, confirming the new assertion fails, then restoring it):
 
-- `test/db/open.test.ts` "is idempotent when reopened" opens a *fresh* `:memory:` db and asserts
+- ~~`test/db/open.test.ts` "is idempotent when reopened" opens a *fresh* `:memory:` db and asserts
   `SELECT 1` doesn't throw. It never reopens anything. Passes even with the `IF NOT EXISTS` guards
-  removed. Fix: use a file-backed temp db, insert, close, reopen, assert the row survives.
-- `test/evolution/reflect.test.ts` "produces a strategy at least as fit as the original" reduces to
-  `>= 0`, which `trueFitness` cannot violate. Passes if `reflect` returns an empty string. Fix: use
-  `toBeGreaterThan`.
-- `test/runtime/agent-runner.test.ts` asserts `durationMs >= 0`, unconditionally true for
-  `Date.now() - started`.
+  removed.~~ **Fixed:** now uses a file-backed temp db (`mkdtemp`/`tmpdir`), inserts a row via
+  `openDb`, closes, reopens the same path, and asserts both that reopening doesn't throw and that the
+  row survives.
+- ~~`test/evolution/reflect.test.ts` "produces a strategy at least as fit as the original" reduces to
+  `>= 0`, which `trueFitness` cannot violate. Passes if `reflect` returns an empty string.~~ **Fixed:**
+  now uses `toBeGreaterThan`; the fixture's mock genuinely adds a keyword, so the strict form holds.
+- ~~`test/runtime/agent-runner.test.ts` asserts `durationMs >= 0`, unconditionally true for
+  `Date.now() - started`.~~ **Fixed:** now bounds `durationMs` above by the wall-clock time the `run()`
+  call actually took (measured around the call, with a small tolerance), in addition to being finite
+  and non-negative.
 
 Coverage hole: batched judge mode has exactly one test, asserting shape only. Nothing tests that
 batched ranking tracks fitness, that rationales survive, or that judge-failure fallback works. It is
 the least-tested and most-degraded path in the phase.
+**Partially addressed:** rationale- and digest-survival across the batch/finals split are now covered
+(see item 7 above). Whether batched *ranking* tracks fitness end-to-end is still untested.
