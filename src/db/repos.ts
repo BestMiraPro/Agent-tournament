@@ -31,6 +31,22 @@ export interface RoundRow {
   costUsd: number
 }
 
+/**
+ * JSON has no representation for Infinity: `JSON.stringify` emits `null`, and reading that
+ * back hands a non-number to consumers. `BudgetTracker` deliberately fails closed on a
+ * non-number limit, so a run resumed from the database would throw rather than run
+ * unlimited. These two functions preserve the sentinel across the round trip.
+ */
+const INFINITY_SENTINEL = '__Infinity__'
+
+function encodeConfig(config: unknown): string {
+  return JSON.stringify(config, (_k, v) => (v === Infinity ? INFINITY_SENTINEL : v))
+}
+
+function decodeConfig(json: string): RunConfig {
+  return JSON.parse(json, (_k, v) => (v === INFINITY_SENTINEL ? Infinity : v)) as RunConfig
+}
+
 export function makeRepos(db: Db) {
   return {
     runs: {
@@ -41,7 +57,7 @@ export function makeRepos(db: Db) {
         }
         db.prepare(
           'INSERT INTO runs (id, name, created_at, status, config_json, seed_dir) VALUES (?,?,?,?,?,?)',
-        ).run(row.id, row.name, row.createdAt, row.status, JSON.stringify(row.config), row.seedDir)
+        ).run(row.id, row.name, row.createdAt, row.status, encodeConfig(row.config), row.seedDir)
         return row
       },
       get(runId: string): RunRow | null {
@@ -49,7 +65,7 @@ export function makeRepos(db: Db) {
         if (!r) return null
         return {
           id: r.id, name: r.name, createdAt: r.created_at, status: r.status,
-          config: JSON.parse(r.config_json), seedDir: r.seed_dir,
+          config: decodeConfig(r.config_json), seedDir: r.seed_dir,
         }
       },
     },
