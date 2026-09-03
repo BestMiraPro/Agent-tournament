@@ -50,6 +50,16 @@ export interface ComposedRun {
   cleanup: () => Promise<void>
 }
 
+/**
+ * Mirrors the CLI's runIdHolder (cli.ts): a mutable carrier for the live run
+ * id, which is only known after `engine.createRun` — after composition. The
+ * dashboard passes one so container names and the orphan sweep use the live
+ * id; the CLI passes none and keeps the pending-id behavior it has today.
+ */
+export interface RunIdHolder {
+  value: string
+}
+
 function runConfigFor(spec: RunSpec): RunConfig {
   return {
     ...DEFAULT_CONFIG,
@@ -69,7 +79,11 @@ function runConfigFor(spec: RunSpec): RunConfig {
  * both paths validate, cap, and warn identically. Seams keep every test
  * daemon-free: pass fakes, never a real Docker host or provider account.
  */
-export async function composeRun(spec: RunSpec, seams: Partial<ComposeSeams> = {}): Promise<ComposedRun> {
+export async function composeRun(
+  spec: RunSpec,
+  seams: Partial<ComposeSeams> = {},
+  opts: { runIdHolder?: RunIdHolder } = {},
+): Promise<ComposedRun> {
   const s: ComposeSeams = { ...defaultSeams, ...seams }
   const config = runConfigFor(spec)
   const warnings: string[] = []
@@ -117,10 +131,17 @@ export async function composeRun(spec: RunSpec, seams: Partial<ComposeSeams> = {
   }
 
   if (spec.sandbox === 'docker') {
-    await sweepBeforeRun(config, `pending-${Date.now()}`, {
-      readCapacity: s.readCapacity as never,
-      sweep: s.sweepFn as never,
-    }, onWarning).catch(() => [])
+    // With a holder the caller is the dashboard: it sets the live run id right
+    // after engine.createRun and sweeps with it before the first round (the CLI
+    // ordering in cli.ts). Sweeping here with a pending id would exclude
+    // nothing — on a shared host it could remove another live run's containers
+    // — so the sweep is the caller's job whenever a holder is provided.
+    if (!opts.runIdHolder) {
+      await sweepBeforeRun(config, `pending-${Date.now()}`, {
+        readCapacity: s.readCapacity as never,
+        sweep: s.sweepFn as never,
+      }, onWarning).catch(() => [])
+    }
     await s.ensureImageFn(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
     const shardServers: { baseUrl: string; directory: string }[] = []
     const sandbox = new DockerSandbox({
@@ -132,9 +153,13 @@ export async function composeRun(spec: RunSpec, seams: Partial<ComposeSeams> = {
       cpus: config.containerCpus,
       authFile: spec.authFile,
       startContainer: async (shardIndex, hostDir) => {
+        // Read live: containers start during the first round, long after the
+        // caller has set the holder to the live run id, so a pending-timestamp
+        // id never reaches a container name for a live run.
+        const runId = opts.runIdHolder ? opts.runIdHolder.value : `pending-${Date.now()}`
         const started = await startShardContainer(
           {
-            runId: `pending-${Date.now()}`,
+            runId,
             shardIndex,
             image: AGENT_IMAGE,
             hostDir,

@@ -33,4 +33,26 @@ export class RunRegistry {
   get size(): number {
     return this.records.size
   }
+
+  list(): RunRecord[] {
+    return [...this.records.values()]
+  }
+}
+
+/**
+ * Tears a run down in dependency order: stop the event bridges first so no
+ * more agent activity is relayed, then release sandbox/server resources, then
+ * let the run manager dispose whatever round state remains. Never throws —
+ * shutdown must not break on one run.
+ */
+export async function disposeRunRecord(record: RunRecord): Promise<void> {
+  for (const bridge of record.bridges) {
+    try {
+      bridge.stop()
+    } catch {
+      /* one stuck bridge must not strand the rest */
+    }
+  }
+  await record.composed.cleanup().catch(() => {})
+  await record.manager.disposeAll().catch(() => {})
 }

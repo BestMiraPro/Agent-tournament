@@ -1,19 +1,37 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
+import type { RunConfig } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
-import type { RunManager } from './run-manager.js'
-import type { ComposedRun } from './compose-run.js'
-import type { RunRegistry } from './runs.js'
+import { TournamentEngine } from '../engine/driver.js'
+import type { EventSink } from '../engine/events.js'
+import { Reflector } from '../evolution/reflect.js'
+import { Judge } from '../judge/judge.js'
+import type { ComposedRun, RunIdHolder } from './compose-run.js'
+import { startEventBridge } from './event-bridge.js'
+import type { RunRecord, RunRegistry } from './runs.js'
 import { parseRunSpec, type RunSpec } from './run-spec.js'
 import { buildRunSnapshot } from './state.js'
+import { RunManager } from './run-manager.js'
 
 export interface ApiDeps {
   repos: Repos
   manager: RunManager
   createRun: (name: string, goal: string) => string
-  composeRun?: (spec: RunSpec) => Promise<ComposedRun>
-  composeWith?: (spec: RunSpec) => Promise<ComposedRun>
+  composeRun?: (spec: RunSpec, opts?: { runIdHolder?: RunIdHolder }) => Promise<ComposedRun>
+  composeWith?: (spec: RunSpec, opts?: { runIdHolder?: RunIdHolder }) => Promise<ComposedRun>
   registry?: RunRegistry
+  emit?: EventSink
+  sweepWith?: (config: RunConfig, runId: string, onWarning: (message: string) => void) => Promise<string[]>
+}
+
+/** Compose/create failures are client or contention problems, never 500s. */
+function specErrorCode(e: unknown): 400 | 409 {
+  const message = e instanceof Error ? e.message : String(e)
+  return /EADDRINUSE|already in use|already running|conflict|busy/i.test(message) ? 409 : 400
+}
+
+function specErrorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
 }
 
 export function buildApi(deps: ApiDeps): FastifyInstance {
@@ -32,9 +50,69 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       if (!compose) {
         return reply.code(400).send({ error: 'real modes unavailable' })
       }
-      const composed = await compose(spec)
-      const row = deps.repos.runs.create({ name: spec.name, config: composed.config, seedDir: spec.seedDir })
-      return reply.code(201).send({ runId: row.id })
+      // Mutable carrier for the live run id (mirrors cli.ts): compose runs
+      // before the run row exists, containers start during the first round and
+      // read it live, and the orphan sweep below runs with it — so a
+      // pending-timestamp id never reaches a sweep exclusion or container name.
+      const holder: RunIdHolder = { value: '' }
+      let composed: ComposedRun
+      try {
+        composed = await compose(spec, { runIdHolder: holder })
+      } catch (e) {
+        return reply.code(specErrorCode(e)).send({ error: specErrorMessage(e) })
+      }
+      const emit: EventSink = deps.emit ?? (() => {})
+      // Engine construction mirrors src/server/index.ts: composed pieces in
+      // place of the mock literals, Judge/Reflector over the composed provider.
+      const engine = new TournamentEngine({
+        repos: deps.repos,
+        config: composed.config,
+        sandbox: composed.sandbox,
+        runner: composed.runner,
+        judge: new Judge(composed.provider, composed.config.judge, 42),
+        reflector: new Reflector(
+          composed.provider,
+          composed.config.reflect,
+          composed.config.roster.map((r) => r.modelId),
+        ),
+        seedStrategy: (i) => `attempt the goal, variant ${i}`,
+        onEvent: emit,
+      })
+      let runId: string
+      try {
+        runId = engine.createRun(spec.name, spec.goal).id
+      } catch (e) {
+        await composed.cleanup().catch(() => {})
+        return reply.code(specErrorCode(e)).send({ error: specErrorMessage(e) })
+      }
+      holder.value = runId
+      // Deliberately after createRun: the sweep must exclude the live run, and
+      // nothing is provisioned yet (containers start in the first round), so
+      // this is the same safe window the CLI sweeps in.
+      if (composed.config.sandbox === 'docker' && deps.sweepWith) {
+        await deps.sweepWith(composed.config, runId, (m) => composed.warnings.push(m)).catch(() => {})
+      }
+      const manager = new RunManager(engine, emit)
+      const record: RunRecord = {
+        runId, spec, engine, manager, composed,
+        bridges: [], warnings: composed.warnings, capacity: composed.capacity,
+      }
+      deps.registry?.set(record)
+      const lookupAgent = (sessionId: string): string | null =>
+        composed.sessionMap.get(sessionId) ?? null
+      if (spec.sandbox === 'local' && spec.workspaceRoot) {
+        record.bridges.push(startEventBridge({
+          baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
+          directory: spec.workspaceRoot, runId, lookupAgent, emit,
+        }))
+      } else if (spec.sandbox === 'docker') {
+        for (const shard of composed.shardServers) {
+          record.bridges.push(startEventBridge({
+            baseUrl: shard.baseUrl, directory: shard.directory, runId, lookupAgent, emit,
+          }))
+        }
+      }
+      return reply.code(201).send({ runId, warnings: composed.warnings })
     }
     if (!body.name || !body.goal) {
       return reply.code(400).send({ error: 'name and goal are required' })
