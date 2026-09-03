@@ -142,4 +142,84 @@ describe('dashboard end to end', () => {
     expect(res.statusCode).toBe(409)
     await app.close()
   })
+
+  test('analytics endpoints serve the mock run; legacy DELETE 409s and leaves the row', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const population = 4
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      populationSize: population,
+      sandbox: 'mock',
+      roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
+    }
+    const broadcaster = new EventBroadcaster()
+    const emit = (e: EngineEvent) => broadcaster.broadcast(e)
+    const provider = new MockProvider(42)
+    const sandbox = new MockSandbox()
+    const engine = new TournamentEngine({
+      repos, config, sandbox,
+      runner: new MockAgentRunner(sandbox, 42),
+      judge: new Judge(provider, config.judge, 42),
+      reflector: new Reflector(provider, config.reflect, ['mock/model']),
+      seedStrategy: (i) => `attempt the goal, variant ${i}`,
+      onEvent: emit,
+    })
+    const manager = new RunManager(engine, emit)
+    const app = buildApi({ repos, manager, createRun: (name) => engine.createRun(name, '').id })
+
+    const created = JSON.parse(
+      (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'e2e', goal: 'g' } })).body,
+    )
+    const runId: string = created.runId
+    const started = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'write a good answer' },
+    })
+    expect(started.statusCode).toBe(202)
+    await manager.waitForIdle(runId)
+
+    const snapshot = JSON.parse(
+      (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).body,
+    )
+    expect(snapshot.lastRoundIdx).toBe(1)
+    const firstAgent = snapshot.agents[0] as { agentId: string; label: string }
+
+    const detailRes = await app.inject({ method: 'GET', url: `/api/runs/${runId}/agents/${firstAgent.agentId}` })
+    expect(detailRes.statusCode).toBe(200)
+    const detail = JSON.parse(detailRes.body)
+    expect(detail.agent.label).toBe(firstAgent.label)
+    expect(detail.genomes.length).toBeGreaterThanOrEqual(1)
+    expect(detail.history).toHaveLength(1)
+    expect(detail.lineage.length).toBeGreaterThanOrEqual(1)
+    // The seed agent has no parent: the lineage tail must resolve to one.
+    const seedEntry = detail.lineage[detail.lineage.length - 1] as { agentId: string }
+    const seedRes = await app.inject({ method: 'GET', url: `/api/runs/${runId}/agents/${seedEntry.agentId}` })
+    expect(seedRes.statusCode).toBe(200)
+    expect(JSON.parse(seedRes.body).agent.parentAgentId).toBeNull()
+
+    const roundsRes = await app.inject({ method: 'GET', url: `/api/runs/${runId}/rounds` })
+    expect(roundsRes.statusCode).toBe(200)
+    const rounds = JSON.parse(roundsRes.body)
+    expect(rounds).toHaveLength(1)
+    const [only] = rounds
+    expect(typeof only.fitness.mean).toBe('number')
+    expect(typeof only.fitness.min).toBe('number')
+    expect(typeof only.fitness.max).toBe('number')
+    expect(only.fitness.mean).toBeGreaterThanOrEqual(only.fitness.min)
+    expect(only.fitness.mean).toBeLessThanOrEqual(only.fitness.max)
+    expect(only.modelShare.length).toBeGreaterThanOrEqual(1)
+    expect(only.modelShare.reduce((n: number, m: { count: number }) => n + m.count, 0)).toBe(population)
+    expect(only.diversity).toBeGreaterThanOrEqual(0)
+    expect(only.diversity).toBeLessThanOrEqual(1)
+
+    // The e2e run is legacy (3-arg server, no registry record): DELETE pins 409,
+    // and the row is untouched — the snapshot still serves.
+    const stopped = await app.inject({ method: 'DELETE', url: `/api/runs/${runId}` })
+    expect(stopped.statusCode).toBe(409)
+    expect(JSON.parse(stopped.body).error).toMatch('not stoppable')
+    const after = await app.inject({ method: 'GET', url: `/api/runs/${runId}` })
+    expect(after.statusCode).toBe(200)
+
+    await app.close()
+  }, 60_000)
 })
