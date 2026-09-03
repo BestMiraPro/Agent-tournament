@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify'
+import { z } from 'zod'
 import type { Repos } from '../db/repos.js'
 import type { RunManager } from './run-manager.js'
 import type { ComposedRun } from './compose-run.js'
@@ -68,6 +69,57 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) })
     }
     return reply.code(202).send({ started: true })
+  })
+
+  app.patch('/api/runs/:id/config', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const run = deps.repos.runs.get(id)
+    if (!run) return reply.code(404).send({ error: 'no such run' })
+    if (deps.manager.isBusy(id)) return reply.code(409).send({ error: 'run is busy' })
+    const patchSchema = z.object({
+      roster: z.array(z.object({
+        modelId: z.string().min(1),
+        count: z.number().int().min(1),
+        temperature: z.number().min(0).max(2),
+      })).min(1).optional(),
+      budget: z.object({
+        maxRunTokens: z.number().int().positive(),
+        maxRoundTokens: z.number().int().positive(),
+        maxAgentTokens: z.number().int().positive(),
+      }).partial().optional(),
+      judge: z.object({
+        modelId: z.string().min(1),
+        mode: z.enum(['auto', 'single_call', 'batched_finals']),
+      }).partial().optional(),
+    })
+    let patch: z.infer<typeof patchSchema>
+    try {
+      patch = patchSchema.parse(req.body ?? {})
+    } catch (e) {
+      return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
+    }
+    if (patch.roster) {
+      const total = patch.roster.reduce((n, r) => n + r.count, 0)
+      if (total !== run.config.populationSize) {
+        return reply.code(400).send({
+          error: `roster counts sum to ${total} but populationSize is ${run.config.populationSize}`,
+        })
+      }
+    }
+    const next = {
+      ...run.config,
+      roster: patch.roster ?? run.config.roster,
+      budget: { ...run.config.budget, ...patch.budget },
+      judge: { ...run.config.judge, ...patch.judge },
+    }
+    deps.repos.runs.updateConfig(id, next)
+    const record = deps.registry?.get(id)
+    if (record) {
+      if (patch.roster) record.spec.roster = patch.roster
+      if (patch.budget) record.spec.budget = { ...record.spec.budget, ...patch.budget }
+      if (patch.judge) record.spec.judge = { ...record.spec.judge, ...patch.judge }
+    }
+    return { warnings: record?.warnings ?? [] }
   })
 
   return app

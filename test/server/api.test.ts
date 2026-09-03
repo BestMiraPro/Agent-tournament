@@ -113,3 +113,9 @@ describe('API', () => {
     expect(res.statusCode).toBe(201)
   })
 })
+
+test('PATCH /api/runs/:id/config rejects unknown runs', async () => {
+  const { app } = setup()
+  const res = await app.inject({ method: 'PATCH', url: '/api/runs/nope/config', payload: { budget: { maxAgentTokens: 10 } } })
+  expect(res.statusCode).toBe(404)
+})

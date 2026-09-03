@@ -62,3 +62,10 @@ describe('buildRunSnapshot', () => {
     expect(() => JSON.stringify(buildRunSnapshot(repos, run.id))).not.toThrow()
   })
 })
+
+test('snapshot carries sandbox and roster from run config', () => {
+  const { repos, run } = setup()
+  const s = buildRunSnapshot(repos, run.id, { sandbox: 'mock', roster: [], warnings: [], capacity: null } as never)!
+  expect(s.sandbox).toBe('mock')
+  expect(s.warnings).toEqual([])
+})

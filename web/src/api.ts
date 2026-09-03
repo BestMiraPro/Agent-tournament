@@ -25,6 +25,10 @@ export interface RunSnapshot {
   scores: SnapshotScore[]
   busy: boolean
   lastError: string | null
+  sandbox: string
+  roster: { modelId: string; count: number; temperature: number }[]
+  capacity: { committed: number; maxContainers: number } | null
+  warnings: string[]
 }
 
 const json = async (res: Response) => {
@@ -47,4 +51,11 @@ export const startRound = (runId: string, goalMd: string): Promise<unknown> =>
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ goalMd }),
+  }).then(json)
+
+export const patchConfig = (runId: string, config: unknown): Promise<{ warnings: string[] }> =>
+  fetch(`/api/runs/${runId}/config`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(config),
   }).then(json)

@@ -25,10 +25,21 @@ export interface RunSnapshot {
   goalMd: string | null
   agents: SnapshotAgent[]
   scores: SnapshotScore[]
+  sandbox: string
+  roster: { modelId: string; count: number; temperature: number }[]
+  capacity: { committed: number; maxContainers: number } | null
+  warnings: string[]
+}
+
+export interface RunSnapshotExtra {
+  sandbox?: string
+  roster?: { modelId: string; count: number; temperature: number }[]
+  capacity?: { committed: number; maxContainers: number } | null
+  warnings?: string[]
 }
 
 /** The full picture the dashboard renders on connect, before any live event arrives. */
-export function buildRunSnapshot(repos: Repos, runId: string): RunSnapshot | null {
+export function buildRunSnapshot(repos: Repos, runId: string, extra?: RunSnapshotExtra): RunSnapshot | null {
   const run = repos.runs.get(runId)
   if (!run) return null
 
@@ -68,5 +79,11 @@ export function buildRunSnapshot(repos: Repos, runId: string): RunSnapshot | nul
     }
   }
 
-  return { runId, name: run.name, lastRoundIdx, goalMd, agents: snapshotAgents, scores }
+  return {
+    runId, name: run.name, lastRoundIdx, goalMd, agents: snapshotAgents, scores,
+    sandbox: extra?.sandbox ?? run.config.sandbox,
+    roster: extra?.roster ?? run.config.roster,
+    capacity: extra?.capacity ?? null,
+    warnings: extra?.warnings ?? [],
+  }
 }

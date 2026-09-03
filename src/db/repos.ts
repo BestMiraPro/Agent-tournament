@@ -68,6 +68,9 @@ export function makeRepos(db: Db) {
           config: decodeConfig(r.config_json), seedDir: r.seed_dir,
         }
       },
+      updateConfig(runId: string, config: RunConfig): void {
+        db.prepare('UPDATE runs SET config_json = ? WHERE id = ?').run(encodeConfig(config), runId)
+      },
       list(): { id: string; name: string; createdAt: number }[] {
         const rows = db.prepare('SELECT id, name, created_at FROM runs ORDER BY created_at DESC').all() as any[]
         return rows.map((r) => ({ id: r.id, name: r.name, createdAt: r.created_at }))
