@@ -20,3 +20,6 @@ button { padding: .5rem .8rem; font: inherit; cursor: pointer; }
 button:disabled { opacity: .5; cursor: default; }
 .muted { opacity: .6; font-size: .85rem; }
 .error { color: #ef4444; font-size: .85rem; }
+.setup { display: grid; gap: .5rem; max-width: 34rem; }
+.setup label { font-weight: 600; font-size: .85rem; }
+.setup input, .setup select { font: inherit; padding: .4rem; }

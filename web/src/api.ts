@@ -43,6 +43,22 @@ export const createRun = (name: string, goal: string): Promise<{ runId: string }
     body: JSON.stringify({ name, goal }),
   }).then(json)
 
+export interface FullRunSpec {
+  name: string
+  goal: string
+  sandbox: 'mock' | 'local' | 'docker'
+  roster: { modelId: string; count: number; temperature: number }[]
+  workspaceRoot: string | null
+  authFile: string | null
+}
+
+export const createRunFull = (spec: FullRunSpec): Promise<{ runId: string; warnings?: string[] }> =>
+  fetch('/api/runs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(spec),
+  }).then(json)
+
 export const getRun = (runId: string): Promise<RunSnapshot> =>
   fetch(`/api/runs/${runId}`).then(json)
 
