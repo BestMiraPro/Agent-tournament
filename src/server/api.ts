@@ -127,10 +127,16 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
 
   app.get('/api/runs/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const snapshot = buildRunSnapshot(deps.repos, id)
+    // Runtime capacity/warnings only exist on the per-run record (composed
+    // runs); legacy runs fall through to the config defaults in the snapshot.
+    const record = deps.registry?.get(id)
+    const snapshot = buildRunSnapshot(
+      deps.repos, id,
+      record ? { capacity: record.capacity, warnings: record.warnings } : undefined,
+    )
     if (!snapshot) return reply.code(404).send({ error: 'no such run' })
     // Composed runs have their own manager/engine; the global one never sees them.
-    const mgr = deps.registry?.get(id)?.manager ?? deps.manager
+    const mgr = record?.manager ?? deps.manager
     return {
       ...snapshot,
       busy: mgr.isBusy(id),

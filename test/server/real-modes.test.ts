@@ -333,6 +333,32 @@ describe('real-mode wiring', () => {
     expect(body.lastError).toBe('record error')
   })
 
+  test('GET /api/runs/:id surfaces the record capacity and warnings', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    const row = repos.runs.create({ name: 'r', config: DEFAULT_CONFIG, seedDir: null })
+    registry.set({
+      runId: row.id, spec: {} as never, engine: {} as never,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      composed: { cleanup: async () => {} } as never,
+      bridges: [],
+      warnings: ['1 worker model(s) unusable — agents assigned to them will fail and be culled:'],
+      capacity: { committed: 2, maxContainers: 4 },
+    })
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('nope') }) as never,
+      registry,
+    } as never)
+    const res = await app.inject({ method: 'GET', url: `/api/runs/${row.id}` })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body) as { warnings: string[]; capacity: { committed: number; maxContainers: number } | null }
+    expect(body.warnings).toHaveLength(1)
+    expect(body.capacity).toEqual({ committed: 2, maxContainers: 4 })
+  })
+
   test('defaultSeams carries the real preflight functions, not no-ops', () => {
     expect(defaultSeams.validateModels).toBe(validateRosterModels)
     expect(typeof defaultSeams.readCapacity).toBe('function')
