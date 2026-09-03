@@ -33,6 +33,16 @@ describe('lineDiff', () => {
     ])
   })
 
+  test('a reordered line is a del before the kept line and an add after it', () => {
+    // Pins the deterministic tie-break: dp[i+1][j] >= dp[i][j+1] emits del first
+    expect(lineDiff('x\ny\nz', 'x\nz\ny')).toEqual([
+      { kind: 'same', text: 'x' },
+      { kind: 'del', text: 'y' },
+      { kind: 'same', text: 'z' },
+      { kind: 'add', text: 'y' },
+    ])
+  })
+
   test('empty a, single line b is one add', () => {
     expect(lineDiff('', 'single')).toEqual([{ kind: 'add', text: 'single' }])
   })

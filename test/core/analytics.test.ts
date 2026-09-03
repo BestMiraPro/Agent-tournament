@@ -36,4 +36,10 @@ describe('strategyDiversity', () => {
     // pairs: ({a,b},{a,b}) -> 0, ({a,b},{c,d}) -> 1, ({a,b},{c,d}) -> 1; mean = 2/3
     expect(strategyDiversity(['a b', 'a b', 'c d'])).toBeCloseTo(2 / 3)
   })
+
+  test('partial overlap with unequal set sizes divides by the union', () => {
+    // |A∩B|/|A∪B| = 1/3 — an inter/|A| or inter/min(|A|,|B|) denominator
+    // would give 1/1 or 1/1 and pass every other test here
+    expect(strategyDiversity(['a b c', 'a'])).toBeCloseTo(2 / 3)
+  })
 })
