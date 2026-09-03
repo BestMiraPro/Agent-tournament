@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import './styles.css'
-import { createRunFull, getRun, serverError, startRound, type FullRunSpec, type RunSnapshot } from './api.js'
+import { createRunFull, deleteRun, getRun, serverError, startRound, type FullRunSpec, type RunSnapshot } from './api.js'
 import { useLiveRun } from './useLiveRun.js'
 import { AgentDrawer } from './components/AgentDrawer.js'
+import { AnalyticsPanel } from './components/AnalyticsPanel.js'
 import { AgentGrid } from './components/AgentGrid.js'
 import { Leaderboard } from './components/Leaderboard.js'
 import { RoundControls } from './components/RoundControls.js'
@@ -37,6 +38,9 @@ export function App() {
   const [creating, setCreating] = useState(false)
   const [setupError, setSetupError] = useState<string | null>(null)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
+  const [stopped, setStopped] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [stopError, setStopError] = useState<string | null>(null)
   const live = useLiveRun(snapshot)
 
   const refresh = useCallback(async (runId: string) => {
@@ -92,6 +96,23 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live.busy, live.roundIdx])
 
+  // A stop cannot be undone server-side, but a fresh round means this run is
+  // alive again (e.g. a new run reusing this view) — drop the stale note.
+  const lastRoundIdx = snapshot?.lastRoundIdx
+  useEffect(() => {
+    setStopped(false)
+  }, [lastRoundIdx])
+
+  const handleStop = useCallback((runId: string) => {
+    if (!window.confirm('Stop this run? In-flight work is discarded.')) return
+    setStopping(true)
+    setStopError(null)
+    deleteRun(runId)
+      .then(() => setStopped(true))
+      .catch((e) => setStopError(serverError(e)))
+      .finally(() => setStopping(false))
+  }, [])
+
   if (!snapshot) {
     return (
       <>
@@ -107,7 +128,16 @@ export function App() {
 
   return (
     <>
-      <h1>Agent Tournament — {snapshot.name}</h1>
+      <div className="arena-head">
+        <h1>Agent Tournament — {snapshot.name}</h1>
+        {!stopped && (
+          <button className="stop" disabled={stopping} onClick={() => handleStop(snapshot.runId)}>
+            {stopping ? 'Stopping…' : 'Stop run'}
+          </button>
+        )}
+      </div>
+      {stopped && <p className="muted">Run stopped.</p>}
+      {stopError && <p className="error">{stopError}</p>}
       {snapshot.warnings.length > 0 && <p className="muted">{snapshot.warnings.join(' · ')}</p>}
       <div className="layout">
         <AgentGrid agents={snapshot.agents} live={live} onSelect={setSelectedAgentId} />
@@ -125,6 +155,12 @@ export function App() {
           {live.lastBreach && <p className="error">Budget: {live.lastBreach}</p>}
         </aside>
       </div>
+      <AnalyticsPanel
+        runId={snapshot.runId}
+        agents={snapshot.agents}
+        onOpenAgent={setSelectedAgentId}
+        refreshKey={snapshot.lastRoundIdx}
+      />
       {selectedAgentId && (
         <AgentDrawer
           runId={snapshot.runId}

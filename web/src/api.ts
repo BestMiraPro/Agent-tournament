@@ -113,6 +113,21 @@ export const getRun = (runId: string): Promise<RunSnapshot> =>
 export const getAgentDetail = (runId: string, agentId: string): Promise<AgentDetail> =>
   fetch(`/api/runs/${runId}/agents/${agentId}`).then(json)
 
+export interface RoundStats {
+  idx: number
+  goalMd: string
+  costUsd: number
+  fitness: { mean: number; min: number; max: number }
+  modelShare: { modelId: string; count: number }[]
+  diversity: number
+}
+
+export const getRoundStats = (runId: string): Promise<RoundStats[]> =>
+  fetch(`/api/runs/${runId}/rounds`).then(json)
+
+export const deleteRun = (runId: string): Promise<{ stopped: boolean }> =>
+  fetch(`/api/runs/${runId}`, { method: 'DELETE' }).then(json)
+
 export const startRound = (runId: string, goalMd: string): Promise<unknown> =>
   fetch(`/api/runs/${runId}/rounds`, {
     method: 'POST',
