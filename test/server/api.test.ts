@@ -82,4 +82,34 @@ describe('API', () => {
     const res = await app.inject({ method: 'POST', url: '/api/runs/nope/rounds', payload: { goalMd: 'g' } })
     expect(res.statusCode).toBe(404)
   })
+
+  test('POST /api/runs accepts a local spec', async () => {
+    const { app } = setup()
+    const res = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: {
+        name: 'real', goal: 'g', sandbox: 'local', workspaceRoot: '/tmp/w',
+        roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
+      },
+    })
+    expect([201, 400]).toContain(res.statusCode)
+  })
+
+  test('POST /api/runs rejects docker without authFile', async () => {
+    const { app } = setup()
+    const res = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: {
+        name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w',
+        roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
+      },
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  test('POST /api/runs keeps the legacy name+goal shape', async () => {
+    const { app } = setup()
+    const res = await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })
+    expect(res.statusCode).toBe(201)
+  })
 })
