@@ -10,10 +10,12 @@ import { OpenCodeAgentRunner } from '../runtime/opencode/agent-runner.js'
 import { OpenCodeClient } from '../runtime/opencode/client.js'
 import { OpenCodeProvider } from '../runtime/opencode/provider.js'
 import { attachServer, startServer, type ServerHandle } from '../runtime/opencode/server.js'
-import { AGENT_IMAGE, assertHostCapacity, makeClientResolver, sweepBeforeRun } from '../cli.js'
+import { AGENT_IMAGE, assertHostCapacity, makeClientResolver, sweepBeforeRun, validateRosterModels } from '../cli.js'
 import { ensureImage } from '../runtime/docker/image.js'
+import { readHostCapacity } from '../runtime/docker/capacity.js'
 import { startShardContainer } from '../runtime/docker/container.js'
 import { removeContainer } from '../runtime/docker/cli.js'
+import { sweepOrphanContainers } from '../runtime/docker/sweep.js'
 import { DockerSandbox } from '../runtime/docker/sandbox.js'
 import type { RunSpec } from './run-spec.js'
 
@@ -26,13 +28,19 @@ export interface ComposeSeams {
   validateModels: (client: OpenCodeClient, directory: string, config: RunConfig) => Promise<void>
 }
 
+/**
+ * The real startup functions. The CLI overrides these explicitly (no-op
+ * sweep + validateModels, its own hooks) so its behavior is unchanged; the
+ * server path runs with the defaults and gets the full (model, role)
+ * preflight, host-capacity read, and orphan sweep.
+ */
 export const defaultSeams: ComposeSeams = {
   startHostServer: (opts) => startServer({ timeoutMs: opts.timeoutMs }),
   attachHostServer: (url, timeoutMs) => attachServer(url, timeoutMs),
   ensureImageFn: (image, contextDir, dockerfile) => ensureImage(image, contextDir, dockerfile),
-  readCapacity: undefined as never,
-  sweepFn: undefined as never,
-  validateModels: undefined as never,
+  readCapacity: readHostCapacity,
+  sweepFn: sweepOrphanContainers,
+  validateModels: validateRosterModels,
 }
 
 export interface ComposedRun {
@@ -115,100 +123,107 @@ export async function composeRun(
   const server = spec.serverUrl
     ? await s.attachHostServer(spec.serverUrl, config.agentTimeoutMs)
     : await s.startHostServer({ timeoutMs: config.agentTimeoutMs })
-  const provider = new OpenCodeProvider(server.client, workspaceRoot, {
-    timeoutMs: config.agentTimeoutMs,
-  })
   try {
-    const validate = s.validateModels ?? (async () => {})
-    await validate(server.client, workspaceRoot, config)
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e)
-    if (/judge|reflect/i.test(message)) {
-      await server.stop().catch(() => {})
-      throw e
-    }
-    onWarning(message)
-  }
-
-  if (spec.sandbox === 'docker') {
-    // With a holder the caller is the dashboard: it sets the live run id right
-    // after engine.createRun and sweeps with it before the first round (the CLI
-    // ordering in cli.ts). Sweeping here with a pending id would exclude
-    // nothing — on a shared host it could remove another live run's containers
-    // — so the sweep is the caller's job whenever a holder is provided.
-    if (!opts.runIdHolder) {
-      await sweepBeforeRun(config, `pending-${Date.now()}`, {
-        readCapacity: s.readCapacity as never,
-        sweep: s.sweepFn as never,
-      }, onWarning).catch(() => [])
-    }
-    await s.ensureImageFn(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
-    const shardServers: { baseUrl: string; directory: string }[] = []
-    const sandbox = new DockerSandbox({
-      runId: `pending-${Date.now()}`,
-      root: workspaceRoot,
-      maxContainers: config.maxContainers,
-      image: AGENT_IMAGE,
-      memory: config.containerMemory,
-      cpus: config.containerCpus,
-      authFile: spec.authFile,
-      startContainer: async (shardIndex, hostDir) => {
-        // Read live: containers start during the first round, long after the
-        // caller has set the holder to the live run id, so a pending-timestamp
-        // id never reaches a container name for a live run.
-        const runId = opts.runIdHolder ? opts.runIdHolder.value : `pending-${Date.now()}`
-        const started = await startShardContainer(
-          {
-            runId,
-            shardIndex,
-            image: AGENT_IMAGE,
-            hostDir,
-            memory: config.containerMemory,
-            cpus: config.containerCpus,
-            authFile: spec.authFile,
-          },
-          undefined,
-          async (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: 10_000 }).health(),
-          onWarning,
-        )
-        shardServers.push({ baseUrl: started.baseUrl, directory: hostDir })
-        return started
-      },
-      stopContainer: async (name) => {
-        await removeContainer(name, onWarning)
-      },
-      onWarning,
+    const provider = new OpenCodeProvider(server.client, workspaceRoot, {
+      timeoutMs: config.agentTimeoutMs,
     })
-    const runner = new OpenCodeAgentRunner(
-      makeClientResolver(sandbox, server.client, (baseUrl) =>
-        new OpenCodeClient({ baseUrl, timeoutMs: config.agentTimeoutMs })),
-      sandbox,
-      { onSessionCreated: sessionHook },
-    )
+    try {
+      const validate = s.validateModels ?? (async () => {})
+      await validate(server.client, workspaceRoot, config)
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      // Judge/reflect unusable is fatal (rethrown; the catch below stops the
+      // server); a worker failure is only a warning — agents on a bad model
+      // score 0, get culled, and are replaced by working clones.
+      if (/judge|reflect/i.test(message)) throw e
+      onWarning(message)
+    }
+
+    if (spec.sandbox === 'docker') {
+      // With a holder the caller is the dashboard: it sets the live run id right
+      // after engine.createRun and sweeps with it before the first round (the CLI
+      // ordering in cli.ts). Sweeping here with a pending id would exclude
+      // nothing — on a shared host it could remove another live run's containers
+      // — so the sweep is the caller's job whenever a holder is provided.
+      if (!opts.runIdHolder) {
+        await sweepBeforeRun(config, `pending-${Date.now()}`, {
+          readCapacity: s.readCapacity as never,
+          sweep: s.sweepFn as never,
+        }, onWarning).catch(() => [])
+      }
+      await s.ensureImageFn(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
+      const shardServers: { baseUrl: string; directory: string }[] = []
+      const sandbox = new DockerSandbox({
+        runId: `pending-${Date.now()}`,
+        root: workspaceRoot,
+        maxContainers: config.maxContainers,
+        image: AGENT_IMAGE,
+        memory: config.containerMemory,
+        cpus: config.containerCpus,
+        authFile: spec.authFile,
+        startContainer: async (shardIndex, hostDir) => {
+          // Read live: containers start during the first round, long after the
+          // caller has set the holder to the live run id, so a pending-timestamp
+          // id never reaches a container name for a live run.
+          const runId = opts.runIdHolder ? opts.runIdHolder.value : `pending-${Date.now()}`
+          const started = await startShardContainer(
+            {
+              runId,
+              shardIndex,
+              image: AGENT_IMAGE,
+              hostDir,
+              memory: config.containerMemory,
+              cpus: config.containerCpus,
+              authFile: spec.authFile,
+            },
+            undefined,
+            async (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: 10_000 }).health(),
+            onWarning,
+          )
+          shardServers.push({ baseUrl: started.baseUrl, directory: hostDir })
+          return started
+        },
+        stopContainer: async (name) => {
+          await removeContainer(name, onWarning)
+        },
+        onWarning,
+      })
+      const runner = new OpenCodeAgentRunner(
+        makeClientResolver(sandbox, server.client, (baseUrl) =>
+          new OpenCodeClient({ baseUrl, timeoutMs: config.agentTimeoutMs })),
+        sandbox,
+        { onSessionCreated: sessionHook },
+      )
+      return {
+        config, sandbox, provider, runner,
+        planFor: (agentIds) => sandbox.planFor(agentIds),
+        serverHandle: server, shardServers,
+        sessionMap, sessionHook, warnings,
+        capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
+        cleanup: async () => {
+          await (sandbox as DockerSandbox).disposeAll?.().catch(() => {}) as never
+          await server.stop().catch(() => {})
+        },
+      }
+    }
+
+    const sandbox = new LocalSandbox(workspaceRoot)
     return {
-      config, sandbox, provider, runner,
-      planFor: (agentIds) => sandbox.planFor(agentIds),
-      serverHandle: server, shardServers,
+      config, sandbox, provider,
+      runner: new OpenCodeAgentRunner(server.client, sandbox, { onSessionCreated: sessionHook }),
+      planFor: null,
+      serverHandle: server,
+      shardServers: [{ baseUrl: '', directory: workspaceRoot }],
       sessionMap, sessionHook, warnings,
-      capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
+      capacity: null,
       cleanup: async () => {
-        await (sandbox as DockerSandbox).disposeAll?.().catch(() => {}) as never
         await server.stop().catch(() => {})
       },
     }
-  }
-
-  const sandbox = new LocalSandbox(workspaceRoot)
-  return {
-    config, sandbox, provider,
-    runner: new OpenCodeAgentRunner(server.client, sandbox, { onSessionCreated: sessionHook }),
-    planFor: null,
-    serverHandle: server,
-    shardServers: [{ baseUrl: '', directory: workspaceRoot }],
-    sessionMap, sessionHook, warnings,
-    capacity: null,
-    cleanup: async () => {
-      await server.stop().catch(() => {})
-    },
+  } catch (e) {
+    // Anything that fails after the host server starts must not leak the
+    // process: stop it, then propagate so the caller can refuse the run.
+    await server.stop().catch(() => {})
+    throw e
   }
 }

@@ -129,10 +129,12 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const { id } = req.params as { id: string }
     const snapshot = buildRunSnapshot(deps.repos, id)
     if (!snapshot) return reply.code(404).send({ error: 'no such run' })
+    // Composed runs have their own manager/engine; the global one never sees them.
+    const mgr = deps.registry?.get(id)?.manager ?? deps.manager
     return {
       ...snapshot,
-      busy: deps.manager.isBusy(id),
-      lastError: deps.manager.lastError(id),
+      busy: mgr.isBusy(id),
+      lastError: mgr.lastError(id),
     }
   })
 
@@ -141,8 +143,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const body = (req.body ?? {}) as { goalMd?: string; criteriaMd?: string | null }
     if (!deps.repos.runs.get(id)) return reply.code(404).send({ error: 'no such run' })
     if (!body.goalMd) return reply.code(400).send({ error: 'goalMd is required' })
+    const mgr = deps.registry?.get(id)?.manager ?? deps.manager
     try {
-      deps.manager.startRound(id, { goalMd: body.goalMd, criteriaMd: body.criteriaMd ?? null })
+      mgr.startRound(id, { goalMd: body.goalMd, criteriaMd: body.criteriaMd ?? null })
     } catch (e) {
       return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) })
     }
@@ -153,7 +156,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const { id } = req.params as { id: string }
     const run = deps.repos.runs.get(id)
     if (!run) return reply.code(404).send({ error: 'no such run' })
-    if (deps.manager.isBusy(id)) return reply.code(409).send({ error: 'run is busy' })
+    const record = deps.registry?.get(id)
+    if ((record?.manager ?? deps.manager).isBusy(id)) return reply.code(409).send({ error: 'run is busy' })
     const patchSchema = z.object({
       roster: z.array(z.object({
         modelId: z.string().min(1),
@@ -191,7 +195,6 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       judge: { ...run.config.judge, ...patch.judge },
     }
     deps.repos.runs.updateConfig(id, next)
-    const record = deps.registry?.get(id)
     if (record) {
       if (patch.roster) record.spec.roster = patch.roster
       if (patch.budget) record.spec.budget = { ...record.spec.budget, ...patch.budget }

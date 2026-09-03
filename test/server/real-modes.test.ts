@@ -4,8 +4,9 @@ import { openDb } from '../../src/db/open.js'
 import { makeRepos } from '../../src/db/repos.js'
 import { buildApi } from '../../src/server/api.js'
 import { RunRegistry, disposeRunRecord } from '../../src/server/runs.js'
-import { composeRun } from '../../src/server/compose-run.js'
+import { composeRun, defaultSeams } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
+import { validateRosterModels } from '../../src/cli.js'
 
 describe('real-mode wiring', () => {
   test('a composed local run registers bridges and disposes them', async () => {
@@ -277,5 +278,82 @@ describe('real-mode wiring', () => {
     expect(cliSeams.sweepFn).toHaveBeenCalledTimes(1)
     const calls = cliSeams.sweepFn.mock.calls as unknown as { activeRunId: string }[][]
     expect(calls[0]?.[0]?.activeRunId).toMatch(/^pending-/)
+  })
+
+  test('POST /rounds for a registered run routes to the record manager, not the global one', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const globalStart = vi.fn()
+    const recordStart = vi.fn()
+    const registry = new RunRegistry()
+    const row = repos.runs.create({ name: 'r', config: DEFAULT_CONFIG, seedDir: null })
+    registry.set({
+      runId: row.id, spec: {} as never, engine: {} as never,
+      manager: { isBusy: () => false, lastError: () => null, startRound: recordStart } as never,
+      composed: { cleanup: async () => {} } as never,
+      bridges: [], warnings: [], capacity: null,
+    })
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: globalStart } as never,
+      createRun: (() => { throw new Error('nope') }) as never,
+      registry,
+    } as never)
+    const res = await app.inject({ method: 'POST', url: `/api/runs/${row.id}/rounds`, payload: { goalMd: 'g' } })
+    expect(res.statusCode).toBe(202)
+    expect(recordStart).toHaveBeenCalledTimes(1)
+    expect(globalStart).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/runs/:id reports busy and lastError from the record manager', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    const row = repos.runs.create({ name: 'r', config: DEFAULT_CONFIG, seedDir: null })
+    registry.set({
+      runId: row.id, spec: {} as never, engine: {} as never,
+      manager: {
+        isBusy: (id: string) => id === row.id,
+        lastError: () => 'record error',
+        startRound: () => {},
+      } as never,
+      composed: { cleanup: async () => {} } as never,
+      bridges: [], warnings: [], capacity: null,
+    })
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('nope') }) as never,
+      registry,
+    } as never)
+    const res = await app.inject({ method: 'GET', url: `/api/runs/${row.id}` })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body) as { busy: boolean; lastError: string | null }
+    expect(body.busy).toBe(true)
+    expect(body.lastError).toBe('record error')
+  })
+
+  test('defaultSeams carries the real preflight functions, not no-ops', () => {
+    expect(defaultSeams.validateModels).toBe(validateRosterModels)
+    expect(typeof defaultSeams.readCapacity).toBe('function')
+    expect(typeof defaultSeams.sweepFn).toBe('function')
+  })
+
+  test('a failing ensureImage stops the started host server', async () => {
+    const stop = vi.fn(async () => {})
+    const seams = {
+      startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop })),
+      attachHostServer: vi.fn(),
+      ensureImageFn: vi.fn(async () => { throw new Error('no docker daemon') }),
+      readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
+      sweepFn: vi.fn(async () => [] as string[]),
+      validateModels: vi.fn(async () => {}),
+    }
+    await expect(composeRun(parseRunSpec({
+      name: 'd', goal: 'g', sandbox: 'docker',
+      roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
+      workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
+    }), seams as never)).rejects.toThrow(/no docker daemon/)
+    expect(stop).toHaveBeenCalledTimes(1)
   })
 })

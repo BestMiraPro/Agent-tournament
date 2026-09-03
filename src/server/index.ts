@@ -25,6 +25,8 @@ const { values } = parseArgs({
     population: { type: 'string', default: '8' },
     'workspace-root': { type: 'string' },
     'auth-file': { type: 'string' },
+    // Under strict run-spec validation the body must already carry workspaceRoot/authFile,
+    // so only --server-url can fire as a fallback.
     'server-url': { type: 'string' },
   },
 })
