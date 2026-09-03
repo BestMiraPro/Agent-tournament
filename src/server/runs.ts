@@ -41,8 +41,9 @@ export class RunRegistry {
 
 /**
  * Tears a run down in dependency order: stop the event bridges first so no
- * more agent activity is relayed, then release sandbox/server resources, then
- * let the run manager dispose whatever round state remains. Never throws —
+ * more agent activity is relayed, then let the run manager dispose whatever
+ * round state remains (awaiting an in-flight round to finish against the still-
+ * alive sandbox/server), then release sandbox/server resources. Never throws —
  * shutdown must not break on one run.
  */
 export async function disposeRunRecord(record: RunRecord): Promise<void> {
@@ -53,6 +54,6 @@ export async function disposeRunRecord(record: RunRecord): Promise<void> {
       /* one stuck bridge must not strand the rest */
     }
   }
-  await record.composed.cleanup().catch(() => {})
   await record.manager.disposeAll().catch(() => {})
+  await record.composed.cleanup().catch(() => {})
 }

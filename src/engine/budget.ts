@@ -159,8 +159,9 @@ const money = (n: number): string => `$${n.toFixed(4)}`
 
 /** Tracks spend so a runaway tournament stops rather than billing without bound. */
 export class BudgetTracker {
-  private readonly limits: BudgetLimits
-  private readonly pricing: Record<string, ModelPrice>
+  // Mutable (not readonly): `updateConfig` replaces the caps in place between rounds.
+  private limits: BudgetLimits = {} as BudgetLimits
+  private pricing: Record<string, ModelPrice> = {}
 
   private _runTokens = 0
   private _roundTokens = 0
@@ -173,6 +174,27 @@ export class BudgetTracker {
   private _runBreached: BudgetBreach | null = null
 
   constructor(config: BudgetConfig) {
+    this.applyConfig(config, config.models)
+  }
+
+  /**
+   * Replaces the caps and pricing in place — the between-rounds effect of a PATCH.
+   *
+   * Accumulated spend is deliberately PRESERVED: tokens and dollars already committed
+   * are not wiped by reconfiguration, and the run-level breach is re-evaluated against
+   * the new caps (raising a cap above current spend clears the breach; lowering one
+   * below it trips it immediately). A config that fails validation leaves the tracker
+   * untouched, exactly as a failed construction leaves no tracker.
+   */
+  updateConfig(config: BudgetConfig, models?: readonly string[]): void {
+    this.applyConfig(config, models)
+    // Advisory only: pricingMissing derives from what `record` still sees, and the new
+    // table implies a fresh start for that question.
+    this._unpriced.clear()
+    this._runBreached = this.checkRun()
+  }
+
+  private applyConfig(config: BudgetConfig, models?: readonly string[]): void {
     if (typeof config !== 'object' || config === null) {
       throw new Error(`BudgetTracker requires a configuration object, got ${String(config)}`)
     }
@@ -194,18 +216,20 @@ export class BudgetTracker {
       // a type assertion is erased at compile time either way.
       limits[key] = assertLimit(key, (config as unknown as Record<string, unknown>)[key])
     }
-    this.limits = limits
 
     const pricing: Record<string, ModelPrice> = {}
     for (const [modelId, price] of Object.entries(config.pricing ?? {})) {
       pricing[modelId] = assertPrice(modelId, price)
     }
-    this.pricing = pricing
 
     // Preflight: refuse a run whose stated dollar ceiling could not be computed for a model
     // it already knows it will use, rather than discovering that only once money is spent.
-    if (this.hasUsdLimit && config.models) {
-      const missing = config.models.filter((m) => !(m in pricing))
+    const hasUsdLimit =
+      limits.maxRunUsd !== Infinity ||
+      limits.maxRoundUsd !== Infinity ||
+      limits.maxAgentUsd !== Infinity
+    if (hasUsdLimit && models) {
+      const missing = models.filter((m) => !(m in pricing))
       if (missing.length > 0) {
         throw new Error(
           `A USD budget was set but ${missing.length} roster model(s) have no pricing entry: ` +
@@ -214,6 +238,11 @@ export class BudgetTracker {
         )
       }
     }
+
+    // All-or-nothing: only swap the tables in once everything above has passed, so a
+    // rejected updateConfig cannot leave half-new caps on a tracker with old spend.
+    this.limits = limits
+    this.pricing = pricing
   }
 
   private get hasUsdLimit(): boolean {

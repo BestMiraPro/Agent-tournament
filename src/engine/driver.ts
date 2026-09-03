@@ -112,6 +112,31 @@ export class TournamentEngine {
     return run
   }
 
+  /**
+   * Reconfigures a run between rounds — the engine-side half of a PATCH. The next
+   * `runRound` reads `this.d.config`/`judge`/`reflector` fresh, so assigning them is
+   * enough; the budget tracker is updated in place, keeping its accumulated spend.
+   * Callers must guarantee no round is in flight (the API's busy guard does).
+   */
+  reconfigure(
+    runId: string,
+    d: { config: RunConfig; judge: Judge; reflector: Reflector },
+  ): void {
+    const budget = this.budgets.get(runId)
+    if (!budget) {
+      throw new Error(`no budget tracker registered for run ${runId} — call createRun first`)
+    }
+    // Updated before the deps are swapped: a rejected config (e.g. a cap the roster
+    // pricing cannot support) must leave the engine on its old, working pieces.
+    budget.updateConfig(
+      { ...d.config.budget, pricing: d.config.pricing },
+      d.config.roster.map((r) => r.modelId),
+    )
+    this.d.config = d.config
+    this.d.judge = d.judge
+    this.d.reflector = d.reflector
+  }
+
   async runRound(
     runId: string,
     input: { goalMd: string; criteriaMd: string | null },

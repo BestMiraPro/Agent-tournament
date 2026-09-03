@@ -169,7 +169,7 @@ describe('CLI orphan sweep', () => {
       { readCapacity: async () => roomyHost, sweep: async (o) => (seen.push(o), []) },
     )
     expect(seen).toHaveLength(1)
-    expect(seen[0]!.activeRunId).toBe('run-abc')
+    expect(seen[0]!.activeRunIds).toEqual(['run-abc'])
   })
 
   test('reports the containers it swept', async () => {

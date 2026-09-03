@@ -376,3 +376,46 @@ describe('BudgetTracker — concurrency', () => {
     expect(b.runTokens).toBe(2000)
   })
 })
+
+describe('BudgetTracker — updateConfig (between-rounds reconfiguration)', () => {
+  test('a new cap is enforced against spend accumulated before the update', () => {
+    const b = new BudgetTracker(cfg({ pricing: PRICED }))
+    b.record(usage({ tokensIn: 4000 })) // $4 at PRICED rates
+    b.updateConfig(cfg({ maxRunUsd: 3, pricing: PRICED }))
+    expect(b.exceeded()).toMatch(/run USD/i)
+  })
+
+  test('spend is carried over, and raising a cap above spend clears the breach', () => {
+    const b = new BudgetTracker(cfg({ maxRunUsd: 2, pricing: PRICED }))
+    b.record(usage({ tokensIn: 4000 }))
+    expect(b.exceeded()).toMatch(/run USD/i)
+    b.updateConfig(cfg({ maxRunUsd: 10, pricing: PRICED }))
+    expect(b.runSpend).toBeCloseTo(4)
+    expect(b.runTokens).toBe(4000)
+    expect(b.exceeded()).toBeNull()
+  })
+
+  test('lowering a token cap below accumulated spend trips a breach', () => {
+    const b = new BudgetTracker(cfg())
+    b.record(usage({ tokensIn: 900 }))
+    b.updateConfig(cfg({ maxRunTokens: 1000 }))
+    expect(b.exceeded()).toBeNull()
+    b.updateConfig(cfg({ maxRunTokens: 500 }))
+    expect(b.exceeded()).toMatch(/run token/i)
+  })
+
+  test('missing pricing under a USD limit throws and leaves the tracker untouched', () => {
+    const b = new BudgetTracker(cfg({ maxRunUsd: 10, pricing: PRICED, models: ['m1'] }))
+    expect(
+      () => b.updateConfig(cfg({ maxRunUsd: 5, pricing: PRICED }), ['m1', 'opencode/big-pickle']),
+    ).toThrow(/opencode\/big-pickle/)
+    // All-or-nothing: the old caps still apply, no spend was recorded.
+    expect(b.exceeded()).toBeNull()
+    expect(b.remainingRun).toBeCloseTo(10)
+  })
+
+  test('an unrecognised key throws, like the constructor', () => {
+    const b = new BudgetTracker(cfg())
+    expect(() => b.updateConfig({ ...cfg(), maxRunUSD: 10 } as unknown as BudgetConfig)).toThrow(/maxRunUSD/)
+  })
+})

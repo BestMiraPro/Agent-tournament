@@ -6,7 +6,7 @@ import { TournamentEngine } from '../engine/driver.js'
 import type { EventSink } from '../engine/events.js'
 import { Reflector } from '../evolution/reflect.js'
 import { Judge } from '../judge/judge.js'
-import type { ComposedRun, RunIdHolder } from './compose-run.js'
+import { runConfigFor, type ComposedRun, type RunIdHolder } from './compose-run.js'
 import { startEventBridge } from './event-bridge.js'
 import type { RunRecord, RunRegistry } from './runs.js'
 import { parseRunSpec, type RunSpec } from './run-spec.js'
@@ -27,7 +27,11 @@ export interface ApiDeps {
 /** Compose/create failures are client or contention problems, never 500s. */
 function specErrorCode(e: unknown): 400 | 409 {
   const message = e instanceof Error ? e.message : String(e)
-  return /EADDRINUSE|already in use|already running|conflict|busy/i.test(message) ? 409 : 400
+  // `docker sandbox: ` is thrown only by the capacity preflight (assertHostCapacity);
+  // spec section 3 maps capacity refusals to 409, not validation's 400.
+  return /EADDRINUSE|already in use|already running|conflict|busy|docker sandbox: /i.test(message)
+    ? 409
+    : 400
 }
 
 function specErrorMessage(e: unknown): string {
@@ -103,12 +107,12 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
-          directory: spec.workspaceRoot, runId, lookupAgent, emit,
+          runId, lookupAgent, emit,
         }))
       } else if (spec.sandbox === 'docker') {
         for (const shard of composed.shardServers) {
           record.bridges.push(startEventBridge({
-            baseUrl: shard.baseUrl, directory: shard.directory, runId, lookupAgent, emit,
+            baseUrl: shard.baseUrl, runId, lookupAgent, emit,
           }))
         }
       }
@@ -194,17 +198,55 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         })
       }
     }
-    const next = {
-      ...run.config,
-      roster: patch.roster ?? run.config.roster,
-      budget: { ...run.config.budget, ...patch.budget },
-      judge: { ...run.config.judge, ...patch.judge },
-    }
-    deps.repos.runs.updateConfig(id, next)
     if (record) {
-      if (patch.roster) record.spec.roster = patch.roster
-      if (patch.budget) record.spec.budget = { ...record.spec.budget, ...patch.budget }
-      if (patch.judge) record.spec.judge = { ...record.spec.judge, ...patch.judge }
+      // Spec section 2: a PATCH takes effect from the NEXT round, so the whole merged
+      // spec is re-validated (cross-field rules included) and the per-run engine is
+      // reconfigured in place — the busy guard above guarantees no round is in flight.
+      let newSpec: RunSpec
+      try {
+        newSpec = parseRunSpec({
+          ...record.spec,
+          roster: patch.roster ?? record.spec.roster,
+          budget: { ...record.spec.budget, ...patch.budget },
+          judge: { ...record.spec.judge, ...patch.judge },
+        })
+      } catch (e) {
+        return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
+      }
+      if (newSpec.population !== run.config.populationSize) {
+        return reply.code(400).send({
+          error: `roster counts sum to ${newSpec.population} but populationSize is ${run.config.populationSize}`,
+        })
+      }
+      try {
+        const newConfig = runConfigFor(newSpec)
+        // Prices are stable for a run's lifetime: a PATCH cannot set pricing, so the
+        // run's existing table keeps enforcing the USD side of any new cap.
+        newConfig.pricing = record.composed.config.pricing
+        // Mirrors the per-run engine construction above (same provider, same seed).
+        const judge = new Judge(record.composed.provider, newConfig.judge, 42)
+        const reflector = new Reflector(
+          record.composed.provider,
+          newConfig.reflect,
+          newConfig.roster.map((r) => r.modelId),
+        )
+        // Before the db write: a reconfigure failure (e.g. a new cap the roster
+        // pricing cannot support) must not leave the row updated anyway.
+        record.engine.reconfigure(id, { config: newConfig, judge, reflector })
+        record.spec = newSpec
+        record.composed.config = newConfig
+      } catch (e) {
+        return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
+      }
+      deps.repos.runs.updateConfig(id, record.composed.config)
+    } else {
+      const next = {
+        ...run.config,
+        roster: patch.roster ?? run.config.roster,
+        budget: { ...run.config.budget, ...patch.budget },
+        judge: { ...run.config.judge, ...patch.judge },
+      }
+      deps.repos.runs.updateConfig(id, next)
     }
     return { warnings: record?.warnings ?? [] }
   })

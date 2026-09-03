@@ -67,9 +67,9 @@ const composeWith = (spec: RunSpec, opts?: { runIdHolder?: RunIdHolder }): Promi
   composeRun(
     {
       ...spec,
-      workspaceRoot: values['workspace-root'] ?? spec.workspaceRoot,
-      authFile: values['auth-file'] ?? spec.authFile,
-      serverUrl: values['server-url'] ?? spec.serverUrl,
+      workspaceRoot: spec.workspaceRoot ?? values['workspace-root'] ?? null,
+      authFile: spec.authFile ?? values['auth-file'] ?? null,
+      serverUrl: spec.serverUrl ?? values['server-url'] ?? null,
     },
     defaultSeams,
     opts ?? {},
@@ -81,8 +81,15 @@ const app = buildApi({
   registry,
   composeWith,
   emit,
-  sweepWith: (config, runId, onWarning) =>
-    sweepOrphanContainers({ activeRunId: runId, onWarning }),
+  sweepWith: (config, runId, onWarning) => {
+    // Every registered docker run owns live containers; excluding only the new run would
+    // let its sweep destroy a concurrent run mid-tournament.
+    const activeRunIds = [
+      ...registry.list().filter((r) => r.composed.config.sandbox === 'docker').map((r) => r.runId),
+      runId,
+    ]
+    return sweepOrphanContainers({ activeRunIds, onWarning })
+  },
 })
 
 const server = app.server

@@ -56,4 +56,21 @@ describe('composeRun', () => {
     c.sessionHook('agent-1', 'ses_1')
     expect(c.sessionMap.get('ses_1')).toBe('agent-1')
   })
+
+  test('reportWarning receives each warning as it happens, for the CLI to print', async () => {
+    const seams = mockSeams()
+    seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
+    // Unreadable host → the capacity preflight warns and proceeds.
+    seams.readCapacity.mockRejectedValueOnce(new Error('docker info unavailable'))
+    const reported: string[] = []
+    const c = await composeRun(parseRunSpec({
+      name: 'd', goal: 'g', sandbox: 'docker',
+      roster: [{ modelId: 'w/m', count: 4, temperature: 0.7 }],
+      workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
+    }), seams as never, { reportWarning: (m) => reported.push(m) })
+    expect(reported).toHaveLength(1)
+    expect(reported[0]).toMatch(/preflight was skipped/i)
+    expect(c.warnings).toEqual(reported)
+    await c.cleanup()
+  })
 })

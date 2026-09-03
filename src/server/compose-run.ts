@@ -15,7 +15,7 @@ import { ensureImage } from '../runtime/docker/image.js'
 import { readHostCapacity } from '../runtime/docker/capacity.js'
 import { startShardContainer } from '../runtime/docker/container.js'
 import { removeContainer } from '../runtime/docker/cli.js'
-import { sweepOrphanContainers } from '../runtime/docker/sweep.js'
+import { sweepOrphanContainers, type SweepOptions } from '../runtime/docker/sweep.js'
 import { DockerSandbox } from '../runtime/docker/sandbox.js'
 import type { RunSpec } from './run-spec.js'
 
@@ -24,8 +24,13 @@ export interface ComposeSeams {
   attachHostServer: (url: string, timeoutMs: number) => Promise<ServerHandle>
   ensureImageFn: (image: string, contextDir: string, dockerfile: string) => Promise<void>
   readCapacity: Parameters<typeof assertHostCapacity>[1]
-  sweepFn: (opts: { activeRunId: string; onWarning: (m: string) => void }) => Promise<string[]>
-  validateModels: (client: OpenCodeClient, directory: string, config: RunConfig) => Promise<void>
+  sweepFn: (opts: SweepOptions) => Promise<string[]>
+  validateModels: (
+    client: OpenCodeClient,
+    directory: string,
+    config: RunConfig,
+    onWarning: (message: string) => void,
+  ) => Promise<void>
 }
 
 /**
@@ -40,7 +45,8 @@ export const defaultSeams: ComposeSeams = {
   ensureImageFn: (image, contextDir, dockerfile) => ensureImage(image, contextDir, dockerfile),
   readCapacity: readHostCapacity,
   sweepFn: sweepOrphanContainers,
-  validateModels: validateRosterModels,
+  validateModels: (client, directory, config, onWarning) =>
+    validateRosterModels(client, directory, config, { onWarning }),
 }
 
 export interface ComposedRun {
@@ -50,7 +56,7 @@ export interface ComposedRun {
   runner: AgentRunner
   planFor: ((agentIds: readonly string[]) => Promise<void>) | null
   serverHandle: ServerHandle | null
-  shardServers: { baseUrl: string; directory: string }[]
+  shardServers: { baseUrl: string }[]
   sessionMap: Map<string, string>
   sessionHook: (agentId: string, sessionId: string) => void
   warnings: string[]
@@ -68,7 +74,7 @@ export interface RunIdHolder {
   value: string
 }
 
-function runConfigFor(spec: RunSpec): RunConfig {
+export function runConfigFor(spec: RunSpec): RunConfig {
   return {
     ...DEFAULT_CONFIG,
     populationSize: spec.population,
@@ -90,12 +96,18 @@ function runConfigFor(spec: RunSpec): RunConfig {
 export async function composeRun(
   spec: RunSpec,
   seams: Partial<ComposeSeams> = {},
-  opts: { runIdHolder?: RunIdHolder } = {},
+  opts: { runIdHolder?: RunIdHolder; reportWarning?: (message: string) => void } = {},
 ): Promise<ComposedRun> {
   const s: ComposeSeams = { ...defaultSeams, ...seams }
   const config = runConfigFor(spec)
   const warnings: string[] = []
-  const onWarning = (m: string) => warnings.push(m)
+  // `reportWarning` (CLI) prints each warning as it happens, so container failures
+  // during rounds reach the console; the array still collects everything for the
+  // server path, where the record surfaces them via GET.
+  const onWarning = (m: string) => {
+    warnings.push(m)
+    opts.reportWarning?.(m)
+  }
   const sessionMap = new Map<string, string>()
   const sessionHook = (agentId: string, sessionId: string) => {
     sessionMap.set(sessionId, agentId)
@@ -127,17 +139,10 @@ export async function composeRun(
     const provider = new OpenCodeProvider(server.client, workspaceRoot, {
       timeoutMs: config.agentTimeoutMs,
     })
-    try {
-      const validate = s.validateModels ?? (async () => {})
-      await validate(server.client, workspaceRoot, config)
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e)
-      // Judge/reflect unusable is fatal (rethrown; the catch below stops the
-      // server); a worker failure is only a warning — agents on a bad model
-      // score 0, get culled, and are replaced by working clones.
-      if (/judge|reflect/i.test(message)) throw e
-      onWarning(message)
-    }
+    // validateRosterModels only throws on a fatal outcome (judge/reflect unusable,
+    // every worker unusable); partial worker failures come back through onWarning,
+    // so a throw here is the fatal case — let it stop the server via the catch below.
+    await s.validateModels(server.client, workspaceRoot, config, onWarning)
 
     if (spec.sandbox === 'docker') {
       // With a holder the caller is the dashboard: it sets the live run id right
@@ -152,7 +157,7 @@ export async function composeRun(
         }, onWarning).catch(() => [])
       }
       await s.ensureImageFn(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
-      const shardServers: { baseUrl: string; directory: string }[] = []
+      const shardServers: { baseUrl: string }[] = []
       const sandbox = new DockerSandbox({
         runId: `pending-${Date.now()}`,
         root: workspaceRoot,
@@ -180,7 +185,7 @@ export async function composeRun(
             async (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: 10_000 }).health(),
             onWarning,
           )
-          shardServers.push({ baseUrl: started.baseUrl, directory: hostDir })
+          shardServers.push({ baseUrl: started.baseUrl })
           return started
         },
         stopContainer: async (name) => {
@@ -213,7 +218,7 @@ export async function composeRun(
       runner: new OpenCodeAgentRunner(server.client, sandbox, { onSessionCreated: sessionHook }),
       planFor: null,
       serverHandle: server,
-      shardServers: [{ baseUrl: '', directory: workspaceRoot }],
+      shardServers: [{ baseUrl: '' }],
       sessionMap, sessionHook, warnings,
       capacity: null,
       cleanup: async () => {

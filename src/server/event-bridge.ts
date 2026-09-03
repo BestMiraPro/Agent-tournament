@@ -57,13 +57,23 @@ export interface BridgeHandle {
 /**
  * Subscribes to one OpenCode server's event stream and relays agent activity.
  *
- * `directory` is REQUIRED. Verified: subscribing without it yields only
- * `server.connected` and `server.heartbeat` — the connection succeeds and frames
- * arrive, so the failure is silent and a grid would show nothing forever.
+ * Uses `/global/event`, which streams EVERY event of the server without a directory
+ * filter. `/event?directory=D` filters by EXACT equality (`event.location?.directory ===
+ * instance.directory`, verified in opencode v1.18.21), and agent sessions live in
+ * per-agent subdirectories (`/work/<agentId>` under Docker, `<root>/<agentId>` locally),
+ * so no single parent-dir subscription ever receives them — a directory that does not
+ * match exactly degrades to the silent-heartbeat trap: the connection succeeds and
+ * `server.heartbeat` frames arrive, but a grid would show nothing forever. Each run owns
+ * its own server (per-run composition), so every frame on its stream belongs to that run
+ * and no client-side filtering is needed.
+ *
+ * Frame shape: `data: {"directory": "<agent workspace | 'global' | absent>",
+ * "payload": {"id", "type", "properties"}}`; heartbeats are `{"payload":
+ * {"type": "server.heartbeat"}}`. The payload (or, for legacy top-level frames, the frame
+ * itself) is the event `mapOpenCodeEvent` consumes.
  */
 export function startEventBridge(opts: {
   baseUrl: string
-  directory: string
   runId: string
   lookupAgent: (sessionId: string) => string | null
   emit: EventSink
@@ -73,8 +83,7 @@ export function startEventBridge(opts: {
 
   void (async () => {
     try {
-      const url = `${opts.baseUrl}/event?directory=${encodeURIComponent(opts.directory)}`
-      const res = await fetch(url, {
+      const res = await fetch(`${opts.baseUrl}/global/event`, {
         headers: { accept: 'text/event-stream' },
         signal: controller.signal,
       })
@@ -89,12 +98,15 @@ export function startEventBridge(opts: {
         const { frames, rest } = parseSseFrames(buffer)
         buffer = rest
         for (const frame of frames) {
-          let raw: RawEvent
+          let parsed: { payload?: RawEvent; type?: string; properties?: Record<string, unknown> }
           try {
-            raw = JSON.parse(frame)
+            parsed = JSON.parse(frame)
           } catch {
             continue
           }
+          // /global/event wraps each event as {directory, project, payload}; anything
+          // without a payload object is consumed at the top level instead.
+          const raw = parsed.payload ?? parsed
           const mapped = mapOpenCodeEvent(raw, opts.runId, opts.lookupAgent)
           if (mapped) opts.emit(mapped)
         }

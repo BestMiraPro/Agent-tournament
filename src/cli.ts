@@ -336,7 +336,7 @@ export async function sweepBeforeRun(
 ): Promise<string[]> {
   if (config.sandbox !== 'docker') return []
   try {
-    return await hooks.sweep({ activeRunId: runId, onWarning })
+    return await hooks.sweep({ activeRunIds: [runId], onWarning })
   } catch (e) {
     onWarning(`Orphan container sweep failed: ${(e as Error).message}`)
     return []
@@ -383,7 +383,8 @@ async function buildRealDeps(
   // - the orphan sweep stays in runTournamentCli below, after createRun hands us the
   //   live run id to exclude — so this passes a no-op sweep and the pending-id sweep
   //   inside composeRun cleans nothing.
-  // - warnings collected inside are replayed to the console, as before.
+  // - reportWarning prints each warning as it happens (capacity, container start/stop),
+  //   including ones that fire during rounds — a post-hoc replay would miss those.
   //
   // One known delta: container names. The old startContainer closure read
   // runIdHolder.value live, so containers were named arena-<liveRunId>-<shard>.
@@ -430,8 +431,8 @@ async function buildRealDeps(
       sweepFn: async () => [],
       validateModels: async () => {},
     },
+    { reportWarning: (m) => console.warn(m) },
   )
-  for (const w of composed.warnings) console.warn(w)
   if (!composed.serverHandle) {
     throw new Error('composeRun returned no server for a real-mode run')
   }

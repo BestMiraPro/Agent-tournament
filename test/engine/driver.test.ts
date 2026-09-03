@@ -1,6 +1,9 @@
 import { describe, expect, test, vi } from 'vitest'
 import { makeMockEngine, SABOTAGED_TEXT } from '../helpers/mock-engine.js'
 import { parseGenome } from '../../src/core/genome.js'
+import { Judge } from '../../src/judge/judge.js'
+import { Reflector } from '../../src/evolution/reflect.js'
+import { MockProvider } from '../../src/runtime/mock-provider.js'
 
 describe('TournamentEngine', () => {
   test('seeds the population from the roster', async () => {
@@ -120,17 +123,52 @@ describe('driver hardening', () => {
     // below would vacuously pass with zero iterations.
     expect(reflectSpy).toHaveBeenCalled()
 
-    for (const [req] of reflectSpy.mock.calls) {
+for (const [req] of reflectSpy.mock.calls) {
       // TopPerformer carries rank/strategy/excerpt/rationale but no agent id.
       // Ranks are unique within a round, so a call whose own rank shows up
       // inside its own topPerformers list was handed itself as a leader to
       // imitate. Key on rank, not strategy text: clone agents legitimately
-      // share identical strategy text, so a text comparison would produce
-      // false positives (or mask a real self-inclusion bug).
+      // share identical strategy text, and a text comparison would
+      // produce false positives (or mask a real self-inclusion bug).
       const selfRank = req.ownRank
       const sawSelf = req.topPerformers.some((tp) => tp.rank === selfRank)
       expect(sawSelf).toBe(false)
     }
+  })
+
+  test('reconfigure swaps in the new judge and new caps for the next round', async () => {
+    const { engine, config } = makeMockEngine({ seed: 1, populationSize: 2 })
+    const run = engine.createRun('t', 'goal')
+
+    // A different provider/judge plus a run-token cap a single round will blow.
+    const newProvider = new MockProvider(7)
+    const newConfig = {
+      ...config,
+      judge: { ...config.judge, modelId: 'new/judge' },
+      budget: { ...config.budget, maxRunTokens: 1000 },
+    }
+    const newJudge = new Judge(newProvider, newConfig.judge, 1)
+    const judgeSpy = vi.spyOn(newProvider, 'complete')
+    engine.reconfigure(run.id, {
+      config: newConfig,
+      judge: newJudge,
+      reflector: new Reflector(newProvider, config.reflect, ['mock/model']),
+    })
+
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    // The new judge is the one that ran (the old provider would never be spied).
+    expect(judgeSpy).toHaveBeenCalled()
+    // The new cap is what the budget enforced.
+    expect(round.budgetBreach).not.toBeNull()
+    expect(round.budgetBreach!.reason).toMatch(/run token/i)
+  })
+
+  test('reconfigure rejects a run that was never created', () => {
+    const { engine, config } = makeMockEngine({ seed: 1, populationSize: 2 })
+    expect(() =>
+      engine.reconfigure('nope', { config, judge: {} as never, reflector: {} as never }),
+    ).toThrow(/createRun first/)
   })
 })
 

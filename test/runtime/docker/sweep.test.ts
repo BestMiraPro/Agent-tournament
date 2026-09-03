@@ -71,15 +71,27 @@ describe('sweepOrphanContainers', () => {
   // a sweep, even though its containers are perfectly arena-shaped.
   test('never sweeps the live run', async () => {
     const d = fakeDocker(['arena-live-0', 'arena-live-1', 'arena-dead-0'])
-    const removed = await sweepOrphanContainers({ activeRunId: 'live' }, d.run)
+    const removed = await sweepOrphanContainers({ activeRunIds: ['live'] }, d.run)
     expect(removed).toEqual(['arena-dead-0'])
     expect(d.removeAttempts()).toEqual(['arena-dead-0'])
   })
 
   test('a run id that merely prefixes the live one is still swept', async () => {
     const d = fakeDocker(['arena-live-extra-0'])
-    const removed = await sweepOrphanContainers({ activeRunId: 'live' }, d.run)
+    const removed = await sweepOrphanContainers({ activeRunIds: ['live'] }, d.run)
     expect(removed).toEqual(['arena-live-extra-0'])
+  })
+
+  // The server path sweeps while other runs are still up: every live run in the
+  // set must survive, not only the one performing the sweep.
+  test('never sweeps any run in the active set, even concurrently', async () => {
+    const d = fakeDocker(['arena-a-0', 'arena-a-1', 'arena-b-2', 'arena-dead-0'])
+    const removed = await sweepOrphanContainers(
+      { activeRunIds: ['a', 'b'] },
+      d.run,
+    )
+    expect(removed).toEqual(['arena-dead-0'])
+    expect(d.removeAttempts()).toEqual(['arena-dead-0'])
   })
 
   test('warns and keeps going when one removal fails', async () => {

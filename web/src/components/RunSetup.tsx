@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { DEFAULT_CONFIG } from '../../../src/core/types.js'
 
 export interface RunSetupValue {
   name: string
@@ -42,6 +43,13 @@ export function RunSetup({ busy, error, onCreate }: {
       </select>
       <label htmlFor="setup-roster">Roster (one `model xN @temp` per line)</label>
       <textarea id="setup-roster" value={rosterText} rows={4} onChange={(e) => setRosterText(e.target.value)} disabled={busy} />
+      {/* Read-only budget display (spec section 2): the run always uses the config
+          defaults; there is no override control. */}
+      <p className="muted" id="setup-budget">
+        Budget: {DEFAULT_CONFIG.budget.maxRunTokens.toLocaleString()} tokens/run,{' '}
+        {DEFAULT_CONFIG.budget.maxRoundTokens.toLocaleString()}/round,{' '}
+        {DEFAULT_CONFIG.budget.maxAgentTokens.toLocaleString()}/agent
+      </p>
       {needsPaths && (
         <>
           <label htmlFor="setup-root">Workspace root</label>

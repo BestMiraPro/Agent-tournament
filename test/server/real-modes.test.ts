@@ -1,12 +1,50 @@
 import { describe, expect, test, vi } from 'vitest'
-import { DEFAULT_CONFIG } from '../../src/core/types.js'
+import { DEFAULT_CONFIG, type RunConfig } from '../../src/core/types.js'
 import { openDb } from '../../src/db/open.js'
 import { makeRepos } from '../../src/db/repos.js'
+import type { EngineEvent } from '../../src/engine/events.js'
+import { MockAgentRunner } from '../../src/runtime/agent-runner.js'
+import { MockProvider } from '../../src/runtime/mock-provider.js'
+import { MockSandbox } from '../../src/runtime/mock-sandbox.js'
+import type { Provider } from '../../src/runtime/provider.js'
+import { sweepOrphanContainers } from '../../src/runtime/docker/sweep.js'
+import type { OpenCodeClient, PromptBody, PromptResponse } from '../../src/runtime/opencode/client.js'
 import { buildApi } from '../../src/server/api.js'
 import { RunRegistry, disposeRunRecord } from '../../src/server/runs.js'
-import { composeRun, defaultSeams } from '../../src/server/compose-run.js'
+import { composeRun, defaultSeams, type ComposedRun } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
-import { validateRosterModels } from '../../src/cli.js'
+
+/** A fake OpenCodeClient that 404s `opencode/bad-worker` and succeeds for everything else. */
+function badWorkerClient(): OpenCodeClient {
+  return {
+    createSession: async () => ({ id: 'ses_1' }),
+    prompt: async (_sessionId: string, _directory: string, body: PromptBody): Promise<PromptResponse> => {
+      const modelId = `${body.model.providerID}/${body.model.modelID}`
+      if (modelId === 'opencode/bad-worker') {
+        return { info: { error: { name: 'APIError', data: { statusCode: 404, message: 'Not Found' } } }, parts: [] }
+      }
+      return body.format
+        ? {
+            info: {},
+            parts: [
+              { type: 'tool', tool: 'StructuredOutput', state: { input: { ok: 'ok' }, metadata: { valid: true } } },
+            ],
+          }
+        : { info: {}, parts: [{ type: 'text', text: 'ok' }] }
+    },
+  } as unknown as OpenCodeClient
+}
+
+/** A roster with one good and one bad worker model, for probe-severity tests. */
+function probeConfig(): RunConfig {
+  return {
+    ...DEFAULT_CONFIG,
+    roster: [
+      { modelId: 'opencode/big-pickle', count: 2, temperature: 0.7 },
+      { modelId: 'opencode/bad-worker', count: 2, temperature: 0.7 },
+    ],
+  }
+}
 
 describe('real-mode wiring', () => {
   test('a composed local run registers bridges and disposes them', async () => {
@@ -97,7 +135,7 @@ describe('real-mode wiring', () => {
   })
 
   test('docker starts one bridge per shard; mock starts none', async () => {
-    const mk = (shardServers: { baseUrl: string; directory: string }[], sandbox: string) => {
+    const mk = (shardServers: { baseUrl: string }[], sandbox: string) => {
       const db = openDb(':memory:')
       const repos = makeRepos(db)
       const registry = new RunRegistry()
@@ -120,7 +158,7 @@ describe('real-mode wiring', () => {
       return { app, registry }
     }
     const docker = mk(
-      [{ baseUrl: 'http://127.0.0.1:1', directory: '/tmp/a' }, { baseUrl: 'http://127.0.0.1:2', directory: '/tmp/b' }],
+      [{ baseUrl: 'http://127.0.0.1:1' }, { baseUrl: 'http://127.0.0.1:2' }],
       'docker',
     )
     const dres = await docker.app.inject({
@@ -163,7 +201,8 @@ describe('real-mode wiring', () => {
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
       },
     })
-    expect(bad.statusCode).toBe(400)
+    // Spec section 3: capacity refusal is 409 (contention), not 400 (validation).
+    expect(bad.statusCode).toBe(409)
     expect(JSON.parse(bad.body).error).toMatch(/docker sandbox/)
     const conflict = await mk(new Error('address already in use :::1234')).inject({
       method: 'POST', url: '/api/runs',
@@ -240,7 +279,7 @@ describe('real-mode wiring', () => {
     expect(seen!.value).toBe(runId)
   })
 
-  test('disposeRunRecord stops bridges, then cleanup, then disposeAll', async () => {
+  test('disposeRunRecord stops bridges, then awaits in-flight rounds, then cleans up', async () => {
     const stop = vi.fn()
     const cleanup = vi.fn(async () => {})
     const disposeAll = vi.fn(async () => {})
@@ -252,8 +291,8 @@ describe('real-mode wiring', () => {
     expect(stop).toHaveBeenCalledTimes(1)
     expect(cleanup).toHaveBeenCalledTimes(1)
     expect(disposeAll).toHaveBeenCalledTimes(1)
-    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(cleanup.mock.invocationCallOrder[0]!)
-    expect(cleanup.mock.invocationCallOrder[0]).toBeLessThan(disposeAll.mock.invocationCallOrder[0]!)
+    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(disposeAll.mock.invocationCallOrder[0]!)
+    expect(disposeAll.mock.invocationCallOrder[0]).toBeLessThan(cleanup.mock.invocationCallOrder[0]!)
   })
 
   test('a docker sweep runs with the live id on the server path, pending id on the CLI path', async () => {
@@ -276,8 +315,8 @@ describe('real-mode wiring', () => {
     const cliSeams = seams()
     await composeRun(dockerSpec(), cliSeams as never)
     expect(cliSeams.sweepFn).toHaveBeenCalledTimes(1)
-    const calls = cliSeams.sweepFn.mock.calls as unknown as { activeRunId: string }[][]
-    expect(calls[0]?.[0]?.activeRunId).toMatch(/^pending-/)
+    const calls = cliSeams.sweepFn.mock.calls as unknown as { activeRunIds: string[] }[][]
+    expect(calls[0]?.[0]?.activeRunIds).toEqual([expect.stringMatching(/^pending-/)])
   })
 
   test('POST /rounds for a registered run routes to the record manager, not the global one', async () => {
@@ -359,8 +398,14 @@ describe('real-mode wiring', () => {
     expect(body.capacity).toEqual({ committed: 2, maxContainers: 4 })
   })
 
-  test('defaultSeams carries the real preflight functions, not no-ops', () => {
-    expect(defaultSeams.validateModels).toBe(validateRosterModels)
+  test('defaultSeams carries the real preflight functions, not no-ops', async () => {
+    // validateModels now wraps validateRosterModels to thread onWarning through, so
+    // identity is gone; prove it still delegates (a no-op wrapper would not warn).
+    const warnings: string[] = []
+    await expect(
+      defaultSeams.validateModels(badWorkerClient(), '/workspace', probeConfig(), (m) => warnings.push(m)),
+    ).resolves.toBeUndefined()
+    expect(warnings).toHaveLength(1)
     expect(typeof defaultSeams.readCapacity).toBe('function')
     expect(typeof defaultSeams.sweepFn).toBe('function')
   })
@@ -381,5 +426,153 @@ describe('real-mode wiring', () => {
       workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     }), seams as never)).rejects.toThrow(/no docker daemon/)
     expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  test('a second run\'s sweep spares every registered docker run, not just itself', async () => {
+    // The exact derivation index.ts sweepWith performs: registered docker runs +
+    // the new run's live id.
+    const registry = new RunRegistry()
+    registry.set({
+      runId: 'run-a', spec: { sandbox: 'docker' } as never,
+      engine: {} as never, manager: { disposeAll: vi.fn() } as never,
+      composed: { config: { ...DEFAULT_CONFIG, sandbox: 'docker' } } as never,
+      bridges: [], warnings: [], capacity: null,
+    })
+    const activeRunIds = [
+      ...registry.list().filter((r) => r.composed.config.sandbox === 'docker').map((r) => r.runId),
+      'run-b',
+    ]
+    expect(activeRunIds).toEqual(['run-a', 'run-b'])
+
+    const calls: string[][] = []
+    const run = vi.fn(async (args: string[]) => {
+      calls.push(args)
+      if (args[0] === 'ps') return { stdout: 'arena-run-a-0\narena-run-a-1\narena-dead-0\n', stderr: '', code: 0 }
+      if (args[0] === 'rm') return { stdout: '', stderr: '', code: 0 }
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    const removed = await sweepOrphanContainers({ activeRunIds }, run)
+    expect(removed).toEqual(['arena-dead-0'])
+    expect(calls.filter((c) => c[0] === 'rm').map((c) => c[c.length - 1])).toEqual(['arena-dead-0'])
+  })
+
+  test('composeRun refuses when the probe is fatal even if the message names only workers', async () => {
+    // "Every worker model is unusable" contains no "judge"/"reflect" — the old
+    // regex misfiled this fatal as a warning and started a run with zero workers.
+    const stop = vi.fn(async () => {})
+    const seams = {
+      startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop })),
+      attachHostServer: vi.fn(),
+      ensureImageFn: vi.fn(async () => {}),
+      readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
+      sweepFn: vi.fn(async () => [] as string[]),
+      validateModels: vi.fn(async () => {
+        throw new Error('Model validation failed before the run started — no usable worker remains')
+      }),
+    }
+    await expect(composeRun(parseRunSpec({
+      name: 'w', goal: 'g', sandbox: 'local', workspaceRoot: '/tmp/w',
+      roster: [{ modelId: 'w/bad', count: 2, temperature: 0.7 }],
+    }), seams as never)).rejects.toThrow(/no usable worker/i)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  test('a partially unusable worker roster composes, with the warning on the record', async () => {
+    const warning = '1 worker model(s) unusable — agents assigned to them will fail and be culled'
+    const seams = {
+      startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+      attachHostServer: vi.fn(),
+      ensureImageFn: vi.fn(async () => {}),
+      readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
+      sweepFn: vi.fn(async () => [] as string[]),
+      validateModels: vi.fn(async (_c: unknown, _d: unknown, _cfg: unknown, onWarning: (m: string) => void) => {
+        onWarning(warning)
+      }),
+    }
+    const c = await composeRun(parseRunSpec({
+      name: 'w', goal: 'g', sandbox: 'local', workspaceRoot: '/tmp/w',
+      roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
+    }), seams as never)
+    expect(c.warnings).toEqual([warning])
+    await c.cleanup()
+  })
+
+  test('PATCH takes effect from the next round: new judge runs, new caps bind', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    const events: EngineEvent[] = []
+    const emit = (e: EngineEvent) => events.push(e)
+
+    // Spy provider: records (purpose, modelId) and delegates to a real MockProvider.
+    const inner = new MockProvider(42)
+    const calls: { purpose: string; modelId: string }[] = []
+    const provider: Provider = {
+      complete: async (req) => {
+        calls.push({ purpose: req.purpose, modelId: req.modelId })
+        return inner.complete(req)
+      },
+    }
+    const sandbox = new MockSandbox()
+    const composed: ComposedRun = {
+      config: {
+        ...DEFAULT_CONFIG,
+        populationSize: 2,
+        sandbox: 'mock',
+        roster: [{ modelId: 'mock/model', count: 2, temperature: 0.7 }],
+      },
+      sandbox,
+      provider,
+      runner: new MockAgentRunner(sandbox, 42),
+      planFor: null,
+      serverHandle: null,
+      shardServers: [],
+      sessionMap: new Map(),
+      sessionHook: () => {},
+      warnings: [],
+      capacity: null,
+      cleanup: async () => {},
+    }
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('must not be called for specs') }) as never,
+      registry,
+      composeWith: (async () => composed) as never,
+      emit,
+    })
+
+    const created = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: { name: 'p', goal: 'g', sandbox: 'mock', roster: [{ modelId: 'mock/model', count: 2, temperature: 0.7 }] },
+    })
+    expect(created.statusCode).toBe(201)
+    const runId = (JSON.parse(created.body) as { runId: string }).runId
+    const record = registry.get(runId)!
+
+    // Idle PATCH: a new judge model and a run-token cap one round will blow.
+    const patched = await app.inject({
+      method: 'PATCH', url: `/api/runs/${runId}/config`,
+      payload: { judge: { modelId: 'wandb/new-judge' }, budget: { maxRunTokens: 500 } },
+    })
+    expect(patched.statusCode).toBe(200)
+
+    const started = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'g' },
+    })
+    expect(started.statusCode).toBe(202)
+    await record.manager.waitForIdle(runId)
+
+    // The PATCHed judge is the one that ran; the original never did.
+    const judgeCalls = calls.filter((c) => c.purpose === 'judge' || c.purpose === 'criteria')
+    expect(judgeCalls.length).toBeGreaterThan(0)
+    expect(judgeCalls.every((c) => c.modelId === 'wandb/new-judge')).toBe(true)
+    expect(calls.some((c) => c.modelId === DEFAULT_CONFIG.judge.modelId)).toBe(false)
+
+    // The PATCHed cap is what the budget enforced: the round completed in breach.
+    const done = events.find((e) => e.type === 'round.complete')
+    expect(done).toBeDefined()
+    expect('budgetBreach' in (done as object) && (done as { budgetBreach?: string | null }).budgetBreach)
+      .toMatch(/run token/i)
   })
 })

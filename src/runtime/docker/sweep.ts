@@ -25,10 +25,12 @@ export function parseArenaName(name: string): ArenaName | null {
 
 export interface SweepOptions {
   /**
-   * The run that is starting or already running. Its containers are never removed.
+   * Runs that are starting or already running. Their containers are never removed.
    * Matched exactly, so a run whose id merely shares a prefix is still swept.
+   * A set, not a single id: on a host that runs several tournaments at once, every
+   * live run's containers must survive, not only the one performing the sweep.
    */
-  activeRunId?: string | null
+  activeRunIds?: string[]
   onWarning?: (message: string) => void
 }
 
@@ -46,14 +48,14 @@ export interface SweepOptions {
  *  1. A name is only ever removed if it parses as exactly `arena-<runId>-<shardIndex>`.
  *     Anything else — including a container that merely contains "arena" — is skipped
  *     without a removal even being attempted.
- *  2. Containers belonging to `activeRunId` are skipped, so a sweep at the start of a run
- *     can never destroy the run performing it.
+ *  2. Containers belonging to any run in `activeRunIds` are skipped, so a sweep at the
+ *     start of a run can never destroy that run — or any other live run on the host.
  *
  * Never throws: a sweep failure must not stop a run from starting.
  *
- * NOTE: containers of a *concurrent* orchestrator running a different run id are
- * indistinguishable from orphans, and will be swept. Call this at startup only, and only
- * when concurrent runs on the same host are not expected.
+ * NOTE: a run NOT passed in `activeRunIds` is indistinguishable from an orphan, and will
+ * be swept. The caller must therefore pass every live run id it knows about (the server
+ * path passes every registered docker run plus the run starting now).
  */
 export async function sweepOrphanContainers(
   opts: SweepOptions = {},
@@ -81,7 +83,7 @@ export async function sweepOrphanContainers(
     if (!name) continue
     const parsed = parseArenaName(name)
     if (!parsed) continue
-    if (opts.activeRunId != null && parsed.runId === opts.activeRunId) continue
+    if (opts.activeRunIds?.includes(parsed.runId)) continue
 
     try {
       const r = await run(['rm', '-f', name], 30_000)
