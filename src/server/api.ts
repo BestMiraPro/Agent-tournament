@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { RunConfig } from '../core/types.js'
+import type { AgentRow, RunConfig } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
 import { TournamentEngine } from '../engine/driver.js'
 import type { EventSink } from '../engine/events.js'
@@ -36,6 +36,62 @@ function specErrorCode(e: unknown): 400 | 409 {
 
 function specErrorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
+}
+
+/** Spec 3.1: the drawer's single fetch — agent, lineage to the seed, genomes, score+submission history. */
+function agentDetail(repos: Repos, runId: string, agentId: string) {
+  const agents = repos.agents.listAll(runId)
+  const agent = agents.find((a) => a.id === agentId)
+  if (!agent) return null
+  // Cap the walk at the run's agent count: the lineage is a tree written once,
+  // so this only ever fires on a corrupt parent-pointer cycle.
+  const lineage: { agentId: string; label: string; bornRound: number }[] = []
+  let cur: AgentRow | undefined = agent
+  for (let depth = 0; cur && depth < agents.length; depth++) {
+    lineage.push({ agentId: cur.id, label: cur.label, bornRound: cur.bornRound })
+    const parentId: string | null = cur.parentAgentId
+    cur = parentId ? agents.find((a) => a.id === parentId) : undefined
+  }
+  const genomes = repos.genomes.forAgent(agentId).map((g) => ({
+    roundIdx: g.roundIdx, strategyMd: g.strategyMd, notesMd: g.notesMd,
+    modelId: g.modelId, temperature: g.temperature, origin: g.origin,
+  }))
+  const history = repos.scores.forAgent(runId, agentId).map((s) => {
+    const sub = repos.submissions.forAgent(s.roundId, agentId)
+    let fileManifest: unknown = null
+    if (sub?.fileManifestJson) {
+      try {
+        fileManifest = JSON.parse(sub.fileManifestJson)
+      } catch {
+        // The manifest is always our own JSON; a parse failure means a
+        // half-written row — serve null rather than 500 the drawer.
+      }
+    }
+    return {
+      roundIdx: s.roundIdx, score: s.score, rank: s.rank, band: s.band, rationaleMd: s.rationaleMd,
+      submission: sub
+        ? {
+            status: sub.status,
+            errorText: sub.errorText,
+            submissionMd: sub.submissionMd,
+            fileManifest,
+            costUsd: sub.costUsd,
+            durationMs: sub.durationMs,
+            tokens: {
+              in: sub.tokensIn, out: sub.tokensOut,
+              cacheRead: sub.tokensCacheRead, cacheWrite: sub.tokensCacheWrite,
+            },
+          }
+        : null,
+    }
+  })
+  return {
+    agent: {
+      agentId: agent.id, label: agent.label, bornRound: agent.bornRound,
+      diedRound: agent.diedRound, status: agent.status, parentAgentId: agent.parentAgentId,
+    },
+    lineage, genomes, history,
+  }
 }
 
 export function buildApi(deps: ApiDeps): FastifyInstance {
@@ -146,6 +202,16 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       busy: mgr.isBusy(id),
       lastError: mgr.lastError(id),
     }
+  })
+
+  app.get('/api/runs/:runId/agents/:agentId', async (req, reply) => {
+    const { runId, agentId } = req.params as { runId: string; agentId: string }
+    if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
+    // Agent ids are globally unique, so the run-scoped lookup doubles as the
+    // membership check: a valid id from another run is 'no such agent' here.
+    const detail = agentDetail(deps.repos, runId, agentId)
+    if (!detail) return reply.code(404).send({ error: 'no such agent' })
+    return detail
   })
 
   app.post('/api/runs/:id/rounds', async (req, reply) => {

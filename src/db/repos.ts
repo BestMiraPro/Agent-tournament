@@ -162,6 +162,13 @@ export function makeRepos(db: Db) {
         db.prepare('UPDATE agents SET status = ?, died_round = ? WHERE id = ?')
           .run(status, roundIdx, agentId)
       },
+      listAll(runId: string): AgentRow[] {
+        const rows = db.prepare('SELECT * FROM agents WHERE run_id = ? ORDER BY rowid').all(runId) as any[]
+        return rows.map((r) => ({
+          id: r.id, runId: r.run_id, label: r.label, parentAgentId: r.parent_agent_id,
+          bornRound: r.born_round, diedRound: r.died_round, status: r.status,
+        }))
+      },
     },
 
     genomes: {
@@ -188,6 +195,14 @@ export function makeRepos(db: Db) {
           parentGenomeId: r.parent_genome_id, origin: r.origin, createdAt: r.created_at,
         }
       },
+      forAgent(agentId: string): GenomeRow[] {
+        const rows = db.prepare('SELECT * FROM genomes WHERE agent_id = ? ORDER BY round_idx').all(agentId) as any[]
+        return rows.map((r) => ({
+          id: r.id, agentId: r.agent_id, roundIdx: r.round_idx, strategyMd: r.strategy_md,
+          notesMd: r.notes_md, modelId: r.model_id, temperature: r.temperature,
+          parentGenomeId: r.parent_genome_id, origin: r.origin, createdAt: r.created_at,
+        }))
+      },
     },
 
     scores: {
@@ -212,6 +227,16 @@ export function makeRepos(db: Db) {
         return rows.map((r) => ({
           roundId: r.round_id, agentId: r.agent_id, rank: r.rank,
           score: r.score, rationaleMd: r.rationale_md, band: r.band,
+        }))
+      },
+      forAgent(runId: string, agentId: string): (ScoreRow & { roundIdx: number })[] {
+        const rows = db.prepare(
+          'SELECT s.*, r.idx AS round_idx FROM scores s JOIN rounds r ON r.id = s.round_id ' +
+            'WHERE s.agent_id = ? AND r.run_id = ? ORDER BY r.idx',
+        ).all(agentId, runId) as any[]
+        return rows.map((r) => ({
+          roundId: r.round_id, agentId: r.agent_id, rank: r.rank,
+          score: r.score, rationaleMd: r.rationale_md, band: r.band, roundIdx: r.round_idx,
         }))
       },
     },
@@ -244,6 +269,22 @@ export function makeRepos(db: Db) {
           tokensCacheRead: r.tokens_cache_read, tokensCacheWrite: r.tokens_cache_write,
           costUsd: r.cost_usd, durationMs: r.duration_ms,
         }))
+      },
+      forAgent(roundId: string, agentId: string) {
+        const r = db.prepare('SELECT * FROM submissions WHERE round_id = ? AND agent_id = ?')
+          .get(roundId, agentId) as any
+        if (!r) return null
+        // fileManifestJson stays raw (unlike forRound's parsed array): the
+        // agent-detail endpoint parses it with a guard and must keep a missing
+        // manifest distinct from an empty one.
+        return {
+          id: r.id, roundId: r.round_id, agentId: r.agent_id, genomeId: r.genome_id,
+          submissionMd: r.submission_md, fileManifestJson: r.file_manifest_json,
+          workspacePath: r.workspace_path, status: r.status, errorText: r.error_text,
+          tokensIn: r.tokens_in, tokensOut: r.tokens_out,
+          tokensCacheRead: r.tokens_cache_read, tokensCacheWrite: r.tokens_cache_write,
+          costUsd: r.cost_usd, durationMs: r.duration_ms,
+        }
       },
       totalCost(roundId: string): number {
         const r = db.prepare('SELECT SUM(cost_usd) AS c FROM submissions WHERE round_id = ?')
