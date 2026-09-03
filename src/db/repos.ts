@@ -71,6 +71,11 @@ export function makeRepos(db: Db) {
       updateConfig(runId: string, config: RunConfig): void {
         db.prepare('UPDATE runs SET config_json = ? WHERE id = ?').run(encodeConfig(config), runId)
       },
+      setStatus(runId: string, status: string): void {
+        // Loose string column ('active' at create); 'stopped' is the db-backed
+        // stop marker (spec 3.3) the POST /rounds + PATCH /config guards key off.
+        db.prepare('UPDATE runs SET status = ? WHERE id = ?').run(status, runId)
+      },
       list(): { id: string; name: string; createdAt: number }[] {
         const rows = db.prepare('SELECT id, name, created_at FROM runs ORDER BY created_at DESC').all() as any[]
         return rows.map((r) => ({ id: r.id, name: r.name, createdAt: r.created_at }))

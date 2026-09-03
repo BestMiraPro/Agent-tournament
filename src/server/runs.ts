@@ -26,6 +26,10 @@ export class RunRegistry {
     return this.records.get(runId) ?? null
   }
 
+  delete(runId: string): void {
+    this.records.delete(runId)
+  }
+
   has(runId: string): boolean {
     return this.records.has(runId)
   }

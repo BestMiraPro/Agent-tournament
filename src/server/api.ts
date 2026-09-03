@@ -8,7 +8,8 @@ import { Reflector } from '../evolution/reflect.js'
 import { Judge } from '../judge/judge.js'
 import { runConfigFor, type ComposedRun, type RunIdHolder } from './compose-run.js'
 import { startEventBridge } from './event-bridge.js'
-import type { RunRecord, RunRegistry } from './runs.js'
+import { disposeRunRecord, type RunRecord, type RunRegistry } from './runs.js'
+import { strategyDiversity } from '../core/analytics.js'
 import { parseRunSpec, type RunSpec } from './run-spec.js'
 import { buildRunSnapshot } from './state.js'
 import { RunManager } from './run-manager.js'
@@ -92,6 +93,50 @@ function agentDetail(repos: Repos, runId: string, agentId: string) {
     },
     lineage, genomes, history,
   }
+}
+
+/** Spec 3.2: one entry per round that HAS score rows — the chart is completed rounds only. */
+function roundStats(repos: Repos, runId: string) {
+  const agents = repos.agents.listAll(runId)
+  const out: {
+    idx: number
+    goalMd: string
+    costUsd: number
+    fitness: { mean: number; min: number; max: number }
+    modelShare: { modelId: string; count: number }[]
+    diversity: number
+  }[] = []
+  for (const round of repos.rounds.listForRun(runId)) {
+    const scores = repos.scores.forRound(round.id)
+    if (scores.length === 0) continue // in-flight (created, not judged) or failed before judging
+    const values = scores.map((s) => s.score)
+    const counts = new Map<string, number>()
+    const strategies: string[] = []
+    for (const a of agents) {
+      // The genome at this idx is the record of that round: later-born agents
+      // simply have no row, an agent culled after the round still counts.
+      const g = repos.genomes.forRound(a.id, round.idx)
+      if (!g) continue
+      counts.set(g.modelId, (counts.get(g.modelId) ?? 0) + 1)
+      strategies.push(g.strategyMd)
+    }
+    out.push({
+      idx: round.idx,
+      goalMd: round.goalMd,
+      costUsd: round.costUsd,
+      fitness: {
+        mean: values.reduce((sum, v) => sum + v, 0) / values.length,
+        min: Math.min(...values),
+        max: Math.max(...values),
+      },
+      // Sorted by modelId: deterministic regardless of agent insertion order.
+      modelShare: [...counts.entries()]
+        .sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
+        .map(([modelId, count]) => ({ modelId, count })),
+      diversity: strategyDiversity(strategies),
+    })
+  }
+  return out
 }
 
 export function buildApi(deps: ApiDeps): FastifyInstance {
@@ -214,10 +259,19 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     return detail
   })
 
+  app.get('/api/runs/:runId/rounds', async (req, reply) => {
+    const { runId } = req.params as { runId: string }
+    if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
+    return roundStats(deps.repos, runId)
+  })
+
   app.post('/api/runs/:id/rounds', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = (req.body ?? {}) as { goalMd?: string; criteriaMd?: string | null }
-    if (!deps.repos.runs.get(id)) return reply.code(404).send({ error: 'no such run' })
+    const run = deps.repos.runs.get(id)
+    if (!run) return reply.code(404).send({ error: 'no such run' })
+    // The db-backed stop marker, so a stopped run stays stopped across restarts.
+    if (run.status === 'stopped') return reply.code(409).send({ error: 'run is stopped' })
     if (!body.goalMd) return reply.code(400).send({ error: 'goalMd is required' })
     const mgr = deps.registry?.get(id)?.manager ?? deps.manager
     try {
@@ -232,6 +286,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const { id } = req.params as { id: string }
     const run = deps.repos.runs.get(id)
     if (!run) return reply.code(404).send({ error: 'no such run' })
+    if (run.status === 'stopped') return reply.code(409).send({ error: 'run is stopped' })
     const record = deps.registry?.get(id)
     if ((record?.manager ?? deps.manager).isBusy(id)) return reply.code(409).send({ error: 'run is busy' })
     const patchSchema = z.object({
@@ -315,6 +370,27 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       deps.repos.runs.updateConfig(id, next)
     }
     return { warnings: record?.warnings ?? [] }
+  })
+
+  app.delete('/api/runs/:id', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const registry = deps.registry
+    if (!deps.repos.runs.get(id)) return reply.code(404).send({ error: 'no such run' })
+    const record = registry?.get(id)
+    if (!record) {
+      // A legacy (3-arg server) run: the global manager is shared by all of them,
+      // so disposing it would kill every legacy run — only per-run records stop.
+      return reply.code(409).send({ error: 'run is not stoppable (created outside the dashboard)' })
+    }
+    // Mirrors disposeRunRecord's never-throw contract: a stop must not 500.
+    try {
+      await disposeRunRecord(record)
+      deps.repos.runs.setStatus(id, 'stopped')
+      registry?.delete(id)
+    } catch {
+      /* the run is torn down either way */
+    }
+    return { stopped: true }
   })
 
   return app

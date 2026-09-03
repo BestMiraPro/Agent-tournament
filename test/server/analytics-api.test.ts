@@ -6,10 +6,12 @@ import { makeRepos } from '../../src/db/repos.js'
 import { DEFAULT_CONFIG } from '../../src/core/types.js'
 
 /**
- * A 3-round run with a 3-deep lineage (alpha <- beta <- gamma): every agent
- * gets a distinct genome and a score in every round, plus submissions in
- * rounds 1-2 — except gamma's round 2 (an error submission) and round 3 (no
- * submission at all, which pins `submission: null`).
+ * A 3-round run with a 3-deep lineage (alpha <- beta <- gamma) plus delta,
+ * born in round 2 on alpha's model: every agent gets a distinct genome and a
+ * score in every round it is alive (delta: rounds 2-3 only, so modelShare
+ * counts differ across rounds), plus submissions in rounds 1-2 — except
+ * gamma's round 2 (an error submission) and round 3 (no submission at all,
+ * which pins `submission: null`).
  */
 function seed() {
   const db = openDb(':memory:')
@@ -18,19 +20,26 @@ function seed() {
   const alpha = repos.agents.create({ runId: run.id, label: 'alpha', parentAgentId: null, bornRound: 1 })
   const beta = repos.agents.create({ runId: run.id, label: 'beta', parentAgentId: alpha.id, bornRound: 2 })
   const gamma = repos.agents.create({ runId: run.id, label: 'gamma', parentAgentId: beta.id, bornRound: 3 })
+  const delta = repos.agents.create({ runId: run.id, label: 'delta', parentAgentId: alpha.id, bornRound: 2 })
   const origins = ['seed', 'mutation', 'elite'] as const
   const rounds = [1, 2, 3].map((idx) => {
     const r = repos.rounds.create({ runId: run.id, idx, goalMd: `goal ${idx}` })
     repos.rounds.setStatus(r.id, 'complete')
     return r
   })
-  const agents = [alpha, beta, gamma]
-  agents.forEach((a, ai) => {
+  const roster = [
+    { agent: alpha, ai: 0, modelId: 'model/1', fromRound: 1 },
+    { agent: beta, ai: 1, modelId: 'model/2', fromRound: 1 },
+    { agent: gamma, ai: 2, modelId: 'model/3', fromRound: 1 },
+    { agent: delta, ai: 3, modelId: 'model/1', fromRound: 2 },
+  ]
+  roster.forEach(({ agent: a, ai, modelId, fromRound }) => {
     rounds.forEach((r, ri) => {
+      if (r.idx < fromRound) return // not born yet: no genome/score for earlier rounds
       const genome = repos.genomes.create({
         agentId: a.id, roundIdx: r.idx,
         strategyMd: `strategy ${ai + 1} round ${r.idx}`, notesMd: `notes ${ai + 1} round ${r.idx}`,
-        modelId: `model/${ai + 1}`, temperature: 0.5 * (ai + 1) + 0.25 * ri,
+        modelId, temperature: 0.5 * (ai + 1) + 0.25 * ri,
         parentGenomeId: null, origin: origins[ri]!,
       })
       const rank = ((ai + ri) % 3) + 1
@@ -56,7 +65,7 @@ function seed() {
       }
     })
   })
-  return { repos, run, alpha, beta, gamma }
+  return { repos, run, alpha, beta, gamma, delta }
 }
 
 const setup = () => {
@@ -152,4 +161,55 @@ test('legacy 3-arg buildApi serves the agent-detail route on a repos-only run', 
   const res = await app.inject({ method: 'GET', url: `/api/runs/${seeded.run.id}/agents/${seeded.gamma.id}` })
   expect(res.statusCode).toBe(200)
   expect(JSON.parse(res.body).agent.agentId).toBe(seeded.gamma.id)
+})
+
+describe('GET /api/runs/:runId/rounds', () => {
+  test('200: one entry per scored round, asc — fitness, modelShare, diversity, goalMd', async () => {
+    const { app, run } = setup()
+    const res = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/rounds` })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body) as Array<{
+      idx: number; goalMd: string; costUsd: number
+      fitness: { mean: number; min: number; max: number }
+      modelShare: { modelId: string; count: number }[]
+      diversity: number
+    }>
+    // Round 1: only alpha/beta/gamma are alive; delta (born round 2, model/1) joins from round 2 on.
+    expect(body.map((r) => r.idx)).toEqual([1, 2, 3])
+    expect(body.map((r) => r.goalMd)).toEqual(['goal 1', 'goal 2', 'goal 3'])
+    expect(body.every((r) => r.costUsd === 0)).toBe(true)
+    // Hand-computed from the seed's score formula (100 − 30·rank):
+    // r1: 70+40+10, r2: 40+10+70+40, r3: 10+70+40+10.
+    expect(body.map((r) => r.fitness)).toEqual([
+      { mean: 40, min: 10, max: 70 },
+      { mean: 40, min: 10, max: 70 },
+      { mean: 32.5, min: 10, max: 70 },
+    ])
+    // modelShare is sorted by modelId; delta doubles the model/1 count from round 2.
+    expect(body.map((r) => r.modelShare)).toEqual([
+      [{ modelId: 'model/1', count: 1 }, { modelId: 'model/2', count: 1 }, { modelId: 'model/3', count: 1 }],
+      [{ modelId: 'model/1', count: 2 }, { modelId: 'model/2', count: 1 }, { modelId: 'model/3', count: 1 }],
+      [{ modelId: 'model/1', count: 2 }, { modelId: 'model/2', count: 1 }, { modelId: 'model/3', count: 1 }],
+    ])
+    // Distinct strategy texts per round: some diversity, bounded by construction.
+    for (const r of body) {
+      expect(r.diversity).toBeGreaterThan(0)
+      expect(r.diversity).toBeLessThanOrEqual(1)
+    }
+  })
+
+  test('a round without score rows (in-flight) is excluded', async () => {
+    const { app, repos, run } = setup()
+    repos.rounds.create({ runId: run.id, idx: 4, goalMd: 'goal 4' })
+    const res = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/rounds` })
+    expect(res.statusCode).toBe(200)
+    expect((JSON.parse(res.body) as Array<{ idx: number }>).map((r) => r.idx)).toEqual([1, 2, 3])
+  })
+
+  test('404 no such run', async () => {
+    const { app } = setup()
+    const res = await app.inject({ method: 'GET', url: '/api/runs/nope/rounds' })
+    expect(res.statusCode).toBe(404)
+    expect(JSON.parse(res.body)).toEqual({ error: 'no such run' })
+  })
 })

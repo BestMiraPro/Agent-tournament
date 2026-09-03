@@ -14,6 +14,13 @@ import { RunRegistry, disposeRunRecord } from '../../src/server/runs.js'
 import { composeRun, defaultSeams, type ComposedRun } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
 
+// Spy on disposeRunRecord for the stop-run tests without losing the real
+// teardown (the ordering test below still exercises the real implementation).
+vi.mock('../../src/server/runs.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../src/server/runs.js')>()
+  return { ...orig, disposeRunRecord: vi.fn(orig.disposeRunRecord) }
+})
+
 /** A fake OpenCodeClient that 404s `opencode/bad-worker` and succeeds for everything else. */
 function badWorkerClient(): OpenCodeClient {
   return {
@@ -574,5 +581,80 @@ describe('real-mode wiring', () => {
     expect(done).toBeDefined()
     expect('budgetBreach' in (done as object) && (done as { budgetBreach?: string | null }).budgetBreach)
       .toMatch(/run token/i)
+  })
+
+  test('DELETE /api/runs/:id disposes a registered run, marks it stopped, deregisters it', async () => {
+    vi.clearAllMocks()
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    const row = repos.runs.create({ name: 'r', config: DEFAULT_CONFIG, seedDir: null })
+    const record = {
+      runId: row.id, spec: {} as never, engine: {} as never,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {}, disposeAll: vi.fn(async () => {}) } as never,
+      composed: { cleanup: vi.fn(async () => {}) } as never,
+      bridges: [], warnings: [], capacity: null,
+    }
+    registry.set(record as never)
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('nope') }) as never,
+      registry,
+    } as never)
+    const res = await app.inject({ method: 'DELETE', url: `/api/runs/${row.id}` })
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ stopped: true })
+    expect(disposeRunRecord).toHaveBeenCalledTimes(1)
+    expect(disposeRunRecord).toHaveBeenCalledWith(record)
+    expect(registry.size).toBe(0)
+    expect(repos.runs.get(row.id)!.status).toBe('stopped')
+    // Stopped but still queryable: the snapshot is a db read and the run row remains.
+    const snap = await app.inject({ method: 'GET', url: `/api/runs/${row.id}` })
+    expect(snap.statusCode).toBe(200)
+    // The stopped guards: no new rounds, no config patches.
+    const post = await app.inject({ method: 'POST', url: `/api/runs/${row.id}/rounds`, payload: { goalMd: 'g' } })
+    expect(post.statusCode).toBe(409)
+    expect(JSON.parse(post.body)).toEqual({ error: 'run is stopped' })
+    const patch = await app.inject({ method: 'PATCH', url: `/api/runs/${row.id}/config`, payload: {} })
+    expect(patch.statusCode).toBe(409)
+    expect(JSON.parse(patch.body)).toEqual({ error: 'run is stopped' })
+  })
+
+  test('DELETE /api/runs/:id 404s for a run with no db row', async () => {
+    vi.clearAllMocks()
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('nope') }) as never,
+      registry: new RunRegistry(),
+    } as never)
+    const res = await app.inject({ method: 'DELETE', url: '/api/runs/nope' })
+    expect(res.statusCode).toBe(404)
+    expect(JSON.parse(res.body)).toEqual({ error: 'no such run' })
+    expect(disposeRunRecord).not.toHaveBeenCalled()
+  })
+
+  test('DELETE refuses a legacy run (db row, no registry record) and leaves it untouched', async () => {
+    vi.clearAllMocks()
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    const row = repos.runs.create({ name: 'legacy', config: DEFAULT_CONFIG, seedDir: null })
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('nope') }) as never,
+      registry,
+    } as never)
+    const res = await app.inject({ method: 'DELETE', url: `/api/runs/${row.id}` })
+    expect(res.statusCode).toBe(409)
+    expect(JSON.parse(res.body)).toEqual({ error: 'run is not stoppable (created outside the dashboard)' })
+    expect(disposeRunRecord).not.toHaveBeenCalled()
+    expect(repos.runs.get(row.id)!.status).toBe('active')
+    const snap = await app.inject({ method: 'GET', url: `/api/runs/${row.id}` })
+    expect(snap.statusCode).toBe(200)
   })
 })
