@@ -375,7 +375,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
   app.delete('/api/runs/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
     const registry = deps.registry
-    if (!deps.repos.runs.get(id)) return reply.code(404).send({ error: 'no such run' })
+    const run = deps.repos.runs.get(id)
+    if (!run) return reply.code(404).send({ error: 'no such run' })
+    if (run.status === 'stopped') return { stopped: true }
     const record = registry?.get(id)
     if (!record) {
       // A legacy (3-arg server) run: the global manager is shared by all of them,

@@ -30,7 +30,7 @@ function seed() {
   const roster = [
     { agent: alpha, ai: 0, modelId: 'model/1', fromRound: 1 },
     { agent: beta, ai: 1, modelId: 'model/2', fromRound: 1 },
-    { agent: gamma, ai: 2, modelId: 'model/3', fromRound: 1 },
+    { agent: gamma, ai: 2, modelId: 'model/3', fromRound: 1 }, // NOTE: gamma's pre-birth (rounds 1-2) rows are intentional seed data despite bornRound 3 — do not "fix"; the hand-computed fitness pins depend on them.
     { agent: delta, ai: 3, modelId: 'model/1', fromRound: 2 },
   ]
   roster.forEach(({ agent: a, ai, modelId, fromRound }) => {

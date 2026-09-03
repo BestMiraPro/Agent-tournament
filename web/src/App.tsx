@@ -104,7 +104,7 @@ export function App() {
   }, [lastRoundIdx])
 
   const handleStop = useCallback((runId: string) => {
-    if (!window.confirm('Stop this run? In-flight work is discarded.')) return
+    if (!window.confirm('Stop this run? It waits for the in-flight round to finish, then stops.')) return
     setStopping(true)
     setStopError(null)
     deleteRun(runId)

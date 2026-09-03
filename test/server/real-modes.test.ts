@@ -619,6 +619,11 @@ describe('real-mode wiring', () => {
     const patch = await app.inject({ method: 'PATCH', url: `/api/runs/${row.id}/config`, payload: {} })
     expect(patch.statusCode).toBe(409)
     expect(JSON.parse(patch.body)).toEqual({ error: 'run is stopped' })
+    // Idempotent re-stop: timeout retries and double-clicks succeed without re-disposing.
+    const again = await app.inject({ method: 'DELETE', url: `/api/runs/${row.id}` })
+    expect(again.statusCode).toBe(200)
+    expect(JSON.parse(again.body)).toEqual({ stopped: true })
+    expect(disposeRunRecord).toHaveBeenCalledTimes(1)
   })
 
   test('DELETE /api/runs/:id 404s for a run with no db row', async () => {

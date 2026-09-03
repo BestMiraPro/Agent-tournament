@@ -109,7 +109,7 @@ export function AgentDrawer({ runId, agentId, onClose }: {
                           <tr key={h.roundIdx}>
                             <td>{h.roundIdx}</td>
                             <td>#{h.rank}</td>
-                            <td>{h.score.toFixed(1)}</td>
+                            <td>{h.score.toFixed(2)}</td>
                             <td>{h.band ?? '—'}</td>
                           </tr>
                         ))}
