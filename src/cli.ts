@@ -9,25 +9,20 @@ import { Judge } from './judge/judge.js'
 import { MockAgentRunner, type AgentRunner } from './runtime/agent-runner.js'
 import { GOOD_KEYWORDS, MockProvider } from './runtime/mock-provider.js'
 import { MockSandbox } from './runtime/mock-sandbox.js'
-import { LocalSandbox } from './runtime/local-sandbox.js'
 import {
   planCapacity,
   readHostCapacity,
   type HostCapacity,
 } from './runtime/docker/capacity.js'
-import { removeContainer } from './runtime/docker/cli.js'
-import { startShardContainer } from './runtime/docker/container.js'
-import { ensureImage } from './runtime/docker/image.js'
-import { DockerSandbox } from './runtime/docker/sandbox.js'
 import { sweepOrphanContainers, type SweepOptions } from './runtime/docker/sweep.js'
 import type { Provider } from './runtime/provider.js'
 import { runPool } from './runtime/pool.js'
 import type { AgentHandle, Sandbox } from './runtime/sandbox.js'
-import { OpenCodeAgentRunner, type ClientResolver } from './runtime/opencode/agent-runner.js'
+import { type ClientResolver } from './runtime/opencode/agent-runner.js'
 import { validateModel, summarizeValidation, type ModelRole } from './runtime/opencode/capability.js'
 import { OpenCodeClient } from './runtime/opencode/client.js'
-import { OpenCodeProvider } from './runtime/opencode/provider.js'
-import { attachServer, startServer, type ServerHandle } from './runtime/opencode/server.js'
+import { type ServerHandle } from './runtime/opencode/server.js'
+import { composeRun } from './server/compose-run.js'
 
 export interface CliOptions {
   goal: string
@@ -380,96 +375,72 @@ async function buildRealDeps(
     throw new Error('real mode requires workspaceRoot')
   }
 
-  // First, before the opencode server is spawned and long before the image is built: a
-  // run that cannot fit on this host should be refused in seconds, with a message naming
-  // the number that is wrong, rather than after minutes of setup.
-  if (config.sandbox === 'docker') {
-    await assertHostCapacity(config, hooks.readCapacity)
+  // composeRun owns capacity/server/image/sandbox/runner composition now, so the CLI
+  // and the dashboard validate, cap, and warn identically. Seams are chosen for zero
+  // behavior change versus the inlined body this replaced:
+  // - validation stays in runTournamentCli below (real validateRosterModels, with the
+  //   caller's validateModels flag), so this passes a no-op to avoid probing twice;
+  // - the orphan sweep stays in runTournamentCli below, after createRun hands us the
+  //   live run id to exclude — so this passes a no-op sweep and the pending-id sweep
+  //   inside composeRun cleans nothing.
+  // - warnings collected inside are replayed to the console, as before.
+  //
+  // One known delta: container names. The old startContainer closure read
+  // runIdHolder.value live, so containers were named arena-<liveRunId>-<shard>.
+  // composeRun names them arena-pending-<timestamp>-<shard> (its DockerSandbox runId
+  // option itself is dead — never read, verified in sandbox.ts). Sweep safety holds
+  // either way: the live sweep runs before any container of ours exists, and
+  // parseArenaName accepts dashed run ids, so a later sweep still collects ours as
+  // orphans. runIdHolder is still set by the caller for a future runId seam.
+  void runIdHolder
+  if (config.sandbox === 'docker' && !opts.authFile) {
+    console.warn(
+      'docker sandbox: no --auth-file given, so agent containers start without provider ' +
+        'credentials and every agent will fail on its first model call.',
+    )
   }
-
-  const server = opts.serverUrl
-    ? await attachServer(opts.serverUrl, config.agentTimeoutMs)
-    : await startServer({ timeoutMs: config.agentTimeoutMs })
-
-  // Judging and reflection always run on the host server, in both sandbox modes: they are
-  // orchestrator work on collected text, not agent work, so they must never be exposed to
-  // an agent-controlled container.
-  const provider = new OpenCodeProvider(server.client, opts.workspaceRoot, {
-    timeoutMs: config.agentTimeoutMs,
-  })
-
-  if (config.sandbox === 'docker') {
-    const authFile = opts.authFile ?? null
-    if (!authFile) {
-      console.warn(
-        'docker sandbox: no --auth-file given, so agent containers start without provider ' +
-          'credentials and every agent will fail on its first model call.',
-      )
-    }
-
-    await ensureImage(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
-
-    // Every removal failure in this branch reaches the operator through one callback.
-    // A container that could not be removed is a leak, and a silent leak is exactly what
-    // the sweep above then has to clean up on the next run.
-    const onWarning = (message: string) => console.warn(message)
-
-    const sandbox = new DockerSandbox({
-      runId: runIdHolder.value,
-      root: opts.workspaceRoot,
-      maxContainers: config.maxContainers,
-      image: AGENT_IMAGE,
-      memory: config.containerMemory,
-      cpus: config.containerCpus,
-      authFile,
-      startContainer: (shardIndex, hostDir) =>
-        startShardContainer(
-          {
-            runId: runIdHolder.value,
-            shardIndex,
-            image: AGENT_IMAGE,
-            hostDir,
-            memory: config.containerMemory,
-            cpus: config.containerCpus,
-            authFile,
-          },
-          undefined,
-          // A container is up long before opencode is listening inside it; prompting a
-          // half-started server fails the agent for an infrastructure reason. The probe
-          // timeout is short and independent of agentTimeoutMs — health either answers
-          // in milliseconds or the container is broken.
-          async (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: 10_000 }).health(),
-          onWarning,
-        ),
-      stopContainer: async (name) => {
-        await removeContainer(name, onWarning)
+  const composed = await composeRun(
+    // Built literally from the caller's config, not via parseRunSpec: parseRunSpec
+    // REFUSES docker-without-authFile, but the CLI contract is warn-and-continue
+    // (test/cli.test.ts: 'the CLI refuses to start a docker run that would
+    // overcommit the host' runs docker with no authFile and expects the capacity
+    // refusal, not an auth refusal). Every field below is copied from config/opts,
+    // so the composed config cannot drift from the caller's.
+    {
+      name: 'cli',
+      goal: opts.goal,
+      sandbox: resolveSandboxMode('real', opts.sandbox),
+      roster: config.roster,
+      population: config.populationSize,
+      judge: { modelId: config.judge.modelId, mode: config.judge.mode },
+      reflect: { modelId: config.reflect.modelId, topK: config.reflect.topK },
+      budget: {
+        maxRunTokens: config.budget.maxRunTokens,
+        maxRoundTokens: config.budget.maxRoundTokens,
+        maxAgentTokens: config.budget.maxAgentTokens,
       },
-      onWarning,
-    })
-
-    return {
-      server,
-      sandbox,
-      provider,
-      runner: new OpenCodeAgentRunner(
-        makeClientResolver(
-          sandbox,
-          server.client,
-          (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: config.agentTimeoutMs }),
-        ),
-        sandbox,
-      ),
-      planFor: (agentIds) => sandbox.planFor(agentIds),
-    }
+      seedDir: config.seedDir,
+      workspaceRoot: opts.workspaceRoot,
+      authFile: opts.authFile ?? null,
+      serverUrl: opts.serverUrl ?? null,
+      criteria: opts.criteria,
+    },
+    {
+      readCapacity: hooks.readCapacity,
+      sweepFn: async () => [],
+      validateModels: async () => {},
+    },
+  )
+  for (const w of composed.warnings) console.warn(w)
+  if (!composed.serverHandle) {
+    throw new Error('composeRun returned no server for a real-mode run')
   }
-
-  const sandbox = new LocalSandbox(opts.workspaceRoot)
   return {
-    server,
-    sandbox,
-    provider,
-    runner: new OpenCodeAgentRunner(server.client, sandbox),
-    planFor: null,
+    server: composed.serverHandle,
+    sandbox: composed.sandbox,
+    provider: composed.provider,
+    runner: composed.runner,
+    planFor: composed.planFor,
   }
 }
 
