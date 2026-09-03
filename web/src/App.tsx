@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import './styles.css'
-import { createRunFull, getRun, startRound, type FullRunSpec, type RunSnapshot } from './api.js'
+import { createRunFull, getRun, serverError, startRound, type FullRunSpec, type RunSnapshot } from './api.js'
 import { useLiveRun } from './useLiveRun.js'
+import { AgentDrawer } from './components/AgentDrawer.js'
 import { AgentGrid } from './components/AgentGrid.js'
 import { Leaderboard } from './components/Leaderboard.js'
 import { RoundControls } from './components/RoundControls.js'
@@ -30,23 +31,12 @@ function parseRoster(text: string): FullRunSpec['roster'] {
   return roster
 }
 
-// The shared `json` helper throws `"<status> <body>"`; surface the server's error field.
-function serverError(e: unknown): string {
-  const s = e instanceof Error ? e.message : String(e)
-  try {
-    const parsed = JSON.parse(s.replace(/^\d+ /, '')) as { error?: string }
-    if (parsed.error) return parsed.error
-  } catch {
-    /* body is not json; show the raw message */
-  }
-  return s
-}
-
 export function App() {
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [setupError, setSetupError] = useState<string | null>(null)
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const live = useLiveRun(snapshot)
 
   const refresh = useCallback(async (runId: string) => {
@@ -120,7 +110,7 @@ export function App() {
       <h1>Agent Tournament — {snapshot.name}</h1>
       {snapshot.warnings.length > 0 && <p className="muted">{snapshot.warnings.join(' · ')}</p>}
       <div className="layout">
-        <AgentGrid agents={snapshot.agents} live={live} />
+        <AgentGrid agents={snapshot.agents} live={live} onSelect={setSelectedAgentId} />
         <aside>
           <RoundControls
             goal={snapshot.goalMd ?? 'Produce the best possible answer.'}
@@ -135,6 +125,13 @@ export function App() {
           {live.lastBreach && <p className="error">Budget: {live.lastBreach}</p>}
         </aside>
       </div>
+      {selectedAgentId && (
+        <AgentDrawer
+          runId={snapshot.runId}
+          agentId={selectedAgentId}
+          onClose={() => setSelectedAgentId(null)}
+        />
+      )}
     </>
   )
 }

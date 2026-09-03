@@ -31,9 +31,57 @@ export interface RunSnapshot {
   warnings: string[]
 }
 
+export interface AgentDetail {
+  agent: {
+    agentId: string
+    label: string
+    bornRound: number
+    diedRound: number | null
+    status: string
+    parentAgentId: string | null
+  }
+  lineage: { agentId: string; label: string; bornRound: number }[]
+  genomes: {
+    roundIdx: number
+    strategyMd: string
+    notesMd: string
+    modelId: string
+    temperature: number
+    origin: string
+  }[]
+  history: {
+    roundIdx: number
+    score: number
+    rank: number
+    band: string | null
+    rationaleMd: string
+    submission: {
+      status: string
+      errorText: string | null
+      submissionMd: string | null
+      fileManifest: unknown
+      costUsd: number
+      durationMs: number | null
+      tokens: { in: number; out: number; cacheRead: number; cacheWrite: number }
+    } | null
+  }[]
+}
+
 const json = async (res: Response) => {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
   return res.json()
+}
+
+// The shared `json` helper throws `"<status> <body>"`; surface the server's error field.
+export function serverError(e: unknown): string {
+  const s = e instanceof Error ? e.message : String(e)
+  try {
+    const parsed = JSON.parse(s.replace(/^\d+ /, '')) as { error?: string }
+    if (parsed.error) return parsed.error
+  } catch {
+    /* body is not json; show the raw message */
+  }
+  return s
 }
 
 export const createRun = (name: string, goal: string): Promise<{ runId: string }> =>
@@ -61,6 +109,9 @@ export const createRunFull = (spec: FullRunSpec): Promise<{ runId: string; warni
 
 export const getRun = (runId: string): Promise<RunSnapshot> =>
   fetch(`/api/runs/${runId}`).then(json)
+
+export const getAgentDetail = (runId: string, agentId: string): Promise<AgentDetail> =>
+  fetch(`/api/runs/${runId}/agents/${agentId}`).then(json)
 
 export const startRound = (runId: string, goalMd: string): Promise<unknown> =>
   fetch(`/api/runs/${runId}/rounds`, {
