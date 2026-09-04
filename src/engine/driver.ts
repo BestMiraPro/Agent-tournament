@@ -142,11 +142,15 @@ export class TournamentEngine {
 
   /**
    * Flags a run's in-flight round for cooperative abort: pools stop pulling NEW
-   * items and the phase gates below fail the round. In-flight agent calls run to
-   * completion — never killed mid-call, because agent timeouts already bound them.
+   * items and the phase gates below fail the round. Every tracked agent session is
+   * also aborted via the runner — queued work stops AND live sessions die, so only
+   * an in-flight JUDGE call still finishes (no provider-level abort exists for it).
+   * Async only for the session aborts; the flag itself is set synchronously, so a
+   * caller that cannot await still stops all future dispatches the instant it calls.
    */
-  abortRound(runId: string): void {
+  async abortRound(runId: string): Promise<void> {
     this.aborted.add(runId)
+    await this.d.runner.abortAll()
   }
 
   async runRound(

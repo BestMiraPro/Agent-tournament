@@ -82,6 +82,22 @@ export class OpenCodeAgentRunner implements AgentRunner {
     }
   }
 
+  /**
+   * Aborts every tracked session and clears them from the map; empty → no-op success.
+   *
+   * WHY this bounds the 4d-cooperative tail: the driver's flag stops queued agents and
+   * the phase gates fail the round, but neither reaches a live session — this does, by
+   * reusing `quiesce` per tracked agent (abort + grace-wait). No new wait primitive:
+   * unknown agents cannot occur (the loop reads the map's own keys), and a run that
+   * settled already removed itself, so only our own entry is deleted.
+   */
+  async abortAll(): Promise<void> {
+    for (const [agentId, tracked] of [...this.live]) {
+      await this.quiesce({ agentId, workspacePath: tracked.directory, baseUrl: '' })
+      if (this.live.get(agentId) === tracked) this.live.delete(agentId)
+    }
+  }
+
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
     const started = Date.now()
     const zero = { tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0 }

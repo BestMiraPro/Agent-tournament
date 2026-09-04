@@ -140,6 +140,50 @@ describe('cooperative abort', () => {
     expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
   })
 
+  test('abort mid-RUN: runner sessions are aborted, round fails, judge never called', async () => {
+    // Same concurrency-1 shape as the neighbouring test, but the abort is awaited so the
+    // session abort has landed before the round settles — making "sessions aborted"
+    // a fact rather than a race with the round's own failure.
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4, hugeTokensFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const orig = MockAgentRunner.prototype.run
+    let calls = 0
+    let inner: MockAgentRunner | undefined
+    const runSpy = vi
+      .spyOn(MockAgentRunner.prototype, 'run')
+      .mockImplementation(async function (this: unknown, handle: AgentHandle, ctx: AgentRunContext) {
+        calls++
+        inner = this as MockAgentRunner
+        if (calls === 1) {
+          // Start the real run FIRST so this agent is genuinely in flight when the
+          // abort lands — aborting before it starts would record nothing and prove
+          // nothing. The mock tracks itself synchronously on entry, so no race.
+          const running = orig.call(this, handle, ctx)
+          await engine.abortRound(run.id)
+          return running
+        }
+        return orig.call(this, handle, ctx)
+      })
+    const abortSpy = vi.spyOn(MockAgentRunner.prototype, 'abortAll')
+    const scoreSpy = vi.spyOn(Judge.prototype, 'score')
+    try {
+      await expect(
+        engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null }),
+      ).rejects.toThrow(/round aborted/)
+      expect(calls).toBe(1)
+      // The session abort ran to completion inside the abort above, through the
+      // HugeTokensRunner wrapper down to the mock, which recorded the live agent.
+      expect(abortSpy).toHaveBeenCalledTimes(1)
+      expect(inner!.abortedIds).toHaveLength(1)
+      expect(scoreSpy).not.toHaveBeenCalled()
+      expect(repos.rounds.listForRun(run.id)[0]!.status).toBe('failed')
+    } finally {
+      runSpy.mockRestore()
+      abortSpy.mockRestore()
+      scoreSpy.mockRestore()
+    }
+  })
+
   test('abort mid-RUN: queued agents stop while the in-flight one completes', async () => {
     // hugeTokensFor forces concurrency 1, so flipping the flag inside the first
     // runner call guarantees agents 2-4 are still queued — a fact, not a race.

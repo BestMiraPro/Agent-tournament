@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { OpenCodeAgentRunner, buildAgentPrompt } from '../../../src/runtime/opencode/agent-runner.js'
+import { OpenCodeAgentRunner, QUIESCE_GRACE_MS, buildAgentPrompt } from '../../../src/runtime/opencode/agent-runner.js'
 import { MockSandbox } from '../../../src/runtime/mock-sandbox.js'
 import type { PromptBody, PromptResponse } from '../../../src/runtime/opencode/client.js'
 
@@ -104,6 +104,85 @@ describe('OpenCodeAgentRunner', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('abortAll', () => {
+  // Sessions need distinct ids and a prompt that stays in flight until the test
+  // says otherwise — otherwise there is nothing tracked for abortAll to abort.
+  class DeferredClient {
+    sessions = 0
+    abortedIds: string[] = []
+    private release: ((v: PromptResponse) => void)[] = []
+    async createSession() {
+      this.sessions++
+      return { id: `ses_${this.sessions}` }
+    }
+    async prompt(): Promise<PromptResponse> {
+      return new Promise<PromptResponse>((resolve) => {
+        this.release.push(resolve)
+      })
+    }
+    async abort(sessionId: string) {
+      this.abortedIds.push(sessionId)
+    }
+    resolveAll(r: PromptResponse) {
+      this.release.splice(0).forEach((f) => f(r))
+    }
+  }
+
+  const ctxFor = (agentId: string) => ({
+    agentId,
+    genome: { strategyMd: 's', notesMd: '', modelId: 'opencode/big-pickle', temperature: 0.7 },
+    goalMd: 'write something good',
+    timeoutMs: 60_000,
+  })
+
+  test('aborts every tracked session, clears the map, and no-ops after', async () => {
+    // Fake timers: quiesce waits QUIESCE_GRACE_MS for a hung run to settle, and two
+    // sequential graces would cost 20s of wall clock. The runs' own race timers sit
+    // at 60s, so advancing just past the grace trips nothing else.
+    vi.useFakeTimers()
+    try {
+      const sb = new MockSandbox()
+      const h1 = await sb.provision('a1', {})
+      const h2 = await sb.provision('a2', {})
+      await sb.writeFile(h1, 'SUBMISSION.md', 'one')
+      await sb.writeFile(h2, 'SUBMISSION.md', 'two')
+      const c = new DeferredClient()
+      const runner = new OpenCodeAgentRunner(c as never, sb)
+      const p1 = runner.run(h1, ctxFor('a1'))
+      const p2 = runner.run(h2, ctxFor('a2'))
+      // Sessions are registered after a microtask hop; without this the map holds
+      // entries with null sessionIds and quiesce would (correctly) abort nothing.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(c.sessions).toBe(2)
+
+      const abortP = runner.abortAll()
+      // Two agents abort sequentially, so two graces elapse back to back.
+      await vi.advanceTimersByTimeAsync(2 * QUIESCE_GRACE_MS + 100)
+      await abortP
+      // Both tracked sessions aborted via the client spy, in map order. Runs never
+      // settled, so both entries were still tracked when their turn came.
+      expect(c.abortedIds).toEqual(['ses_1', 'ses_2'])
+
+      c.resolveAll(okResponse)
+      expect((await p1).status).toBe('ok')
+      expect((await p2).status).toBe('ok')
+
+      // The map was cleared: a second call aborts nothing further.
+      await runner.abortAll()
+      expect(c.abortedIds).toEqual(['ses_1', 'ses_2'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('empty map is a no-op success', async () => {
+    const sb = new MockSandbox()
+    const c = new DeferredClient()
+    await new OpenCodeAgentRunner(c as never, sb).abortAll()
+    expect(c.abortedIds).toEqual([])
   })
 })
 

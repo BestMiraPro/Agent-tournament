@@ -24,6 +24,14 @@ export interface AgentRunResult {
 export interface AgentRunner {
   run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult>
   /**
+   * Aborts every tracked session and clears them from tracking; empty → no-op success.
+   *
+   * WHY session-level abort exists: it bounds the 4d-cooperative tail — queued agents
+   * stop, live sessions abort here, and only an in-flight JUDGE call still finishes
+   * (no provider-level abort primitive exists for it).
+   */
+  abortAll(): Promise<void>
+  /**
    * Stop this agent and resolve once it is confirmed to have stopped executing.
    *
    * Optional so a runner without it still works, but the driver may not certify a
@@ -40,15 +48,38 @@ export interface AgentRunner {
  */
 export class MockAgentRunner implements AgentRunner {
   constructor(private sandbox: Sandbox, private seed: number) {}
+  /** In-flight agent ids, so `abortAll` can name what it stopped. */
+  private inFlight = new Set<string>()
+  /** Every in-flight id `abortAll` has stopped, in order — for tests to assert on. */
+  readonly abortedIds: string[] = []
 
   /** Everything this runner does is awaited inside `run`, so it is already stopped. */
   async quiesce(): Promise<QuiesceStatus> {
     return 'stopped'
   }
 
+  async abortAll(): Promise<void> {
+    // The mock holds no real sessions: aborting is recording who was live, then
+    // forgetting them — the same observable contract as the OpenCode runner.
+    this.abortedIds.push(...this.inFlight)
+    this.inFlight.clear()
+  }
+
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
     const started = Date.now()
+    this.inFlight.add(ctx.agentId)
+    try {
+      return await this.execute(handle, ctx, started)
+    } finally {
+      this.inFlight.delete(ctx.agentId)
+    }
+  }
 
+  private async execute(
+    handle: AgentHandle,
+    ctx: AgentRunContext,
+    started: number,
+  ): Promise<AgentRunResult> {
     if (ctx.genome.strategyMd.includes('__FAIL__')) {
       return {
         status: 'error',

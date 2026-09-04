@@ -54,6 +54,11 @@ class MischiefRunner implements AgentRunner {
     if (quiesceable) this.quiesce = async () => 'stopped'
   }
 
+  // Sessions are the inner mock's business; aborting delegates to it.
+  async abortAll(): Promise<void> {
+    await this.inner.abortAll()
+  }
+
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
     const res = await this.inner.run(handle, ctx)
 
@@ -88,6 +93,10 @@ class HugeTokensRunner implements AgentRunner {
 
   constructor(private inner: AgentRunner) {
     if (inner.quiesce) this.quiesce = (h) => this.inner.quiesce!(h)
+  }
+
+  async abortAll(): Promise<void> {
+    await this.inner.abortAll()
   }
 
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
@@ -160,6 +169,9 @@ class HangingRunner implements AgentRunner {
   async run(): Promise<never> {
     return new Promise(() => {})
   }
+
+  // Tracks nothing, so there is nothing to abort — the driver's own timeout ends these.
+  async abortAll(): Promise<void> {}
 }
 
 /**

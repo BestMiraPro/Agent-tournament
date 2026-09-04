@@ -216,7 +216,7 @@ export function App() {
                 .catch((e) => ({ ok: false as const, message: serverError(e) }))}
             onAbort={() =>
               abortRound(snapshot.runId, snapshot.lastRoundIdx)
-                .then(() => 'Abort requested. Queued agents stop; in-flight agents finish.')
+                .then(() => 'Abort requested. Running agents are stopped; the round is marked failed.')
                 .catch((e) => serverError(e))}
           />
           <h2 style={{ fontSize: '.9rem' }}>Leaderboard</h2>

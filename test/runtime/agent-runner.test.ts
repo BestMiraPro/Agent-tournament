@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { MockAgentRunner } from '../../src/runtime/agent-runner.js'
 import { MockSandbox } from '../../src/runtime/mock-sandbox.js'
 
@@ -53,6 +53,51 @@ describe('MockAgentRunner', () => {
     const res = await new MockAgentRunner(sb, 1).run(h, ctx('__FAIL__'))
     expect(res.status).toBe('error')
     expect(await sb.readFile(h, 'SUBMISSION.md')).toBeNull()
+  })
+
+  test('abortAll records the in-flight agent, clears tracking, and no-ops after', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    // Hold the run inside its submission write so it is still in flight when
+    // abortAll lands — otherwise the mock settles before there is anything to stop.
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    let reachedWrite = false
+    const origWrite = sb.writeFile.bind(sb)
+    const writeSpy = vi.spyOn(sb, 'writeFile').mockImplementation(async (hh, path, content) => {
+      if (path === 'SUBMISSION.md') {
+        reachedWrite = true
+        await gate
+      }
+      return origWrite(hh, path, content)
+    })
+    try {
+      const runner = new MockAgentRunner(sb, 1)
+      const pending = runner.run(h, ctx('verify'))
+      for (let i = 0; i < 100 && !reachedWrite; i++) await new Promise((r) => setTimeout(r, 0))
+      expect(reachedWrite).toBe(true)
+
+      await runner.abortAll()
+      expect(runner.abortedIds).toEqual(['a1'])
+
+      release()
+      expect((await pending).status).toBe('ok')
+
+      // Tracking was cleared: nothing further to abort.
+      await runner.abortAll()
+      expect(runner.abortedIds).toEqual(['a1'])
+    } finally {
+      writeSpy.mockRestore()
+    }
+  })
+
+  test('abortAll on an idle runner is a no-op success', async () => {
+    const sb = new MockSandbox()
+    const runner = new MockAgentRunner(sb, 1)
+    await runner.abortAll()
+    expect(runner.abortedIds).toEqual([])
   })
 })
 
