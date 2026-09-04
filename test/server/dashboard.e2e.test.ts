@@ -502,4 +502,91 @@ describe('dashboard end to end', () => {
 
     await app.close()
   }, 60_000)
+
+  test('phase4g guard: round detail serves header + rank-ordered entries with rationales', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const population = 4
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      populationSize: population,
+      sandbox: 'mock',
+      roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
+    }
+    const broadcaster = new EventBroadcaster()
+    const emit = (e: EngineEvent) => broadcaster.broadcast(e)
+    const provider = new MockProvider(42)
+    const sandbox = new MockSandbox()
+    const engine = new TournamentEngine({
+      repos, config, sandbox,
+      runner: new MockAgentRunner(sandbox, 42),
+      judge: new Judge(provider, config.judge, 42),
+      reflector: new Reflector(provider, config.reflect, ['mock/model']),
+      seedStrategy: (i) => `attempt the goal, variant ${i}`,
+      onEvent: emit,
+    })
+    const manager = new RunManager(engine, emit)
+    const app = buildApi({ repos, manager, createRun: (name) => engine.createRun(name, '').id })
+
+    const created = JSON.parse(
+      (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'e2e-g', goal: 'g' } })).body,
+    )
+    const runId: string = created.runId
+    const started = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'write a good answer' },
+    })
+    expect(started.statusCode).toBe(202)
+    await manager.waitForIdle(runId)
+
+    const res = await app.inject({ method: 'GET', url: `/api/runs/${runId}/rounds/1` })
+    expect(res.statusCode).toBe(200)
+    const detail = JSON.parse(res.body)
+    // Header presence, not exact text: the mock flow passes or generates criteria.
+    expect(typeof detail.goalMd).toBe('string')
+    expect(detail.criteriaMd).not.toBeNull()
+    expect(['user', 'generated']).toContain(detail.criteriaSource)
+    expect('metaDigest' in detail).toBe(true)
+    expect(typeof detail.costUsd).toBe('number')
+    expect(typeof detail.judgeMode).toBe('string')
+    // Entries rank-ordered: array order matches the explicit rank sequence.
+    expect(detail.entries).toHaveLength(population)
+    const ranks = detail.entries.map((e: { rank: number }) => e.rank)
+    expect(ranks).toEqual([1, 2, 3, 4])
+    expect([...ranks].sort((a: number, b: number) => a - b)).toEqual(ranks)
+    // At least one rationale non-empty (mock judge writes rationale text).
+    expect(detail.entries.some(
+      (e: { rationaleMd: string }) => typeof e.rationaleMd === 'string' && e.rationaleMd.length > 0,
+    )).toBe(true)
+
+    await app.close()
+  }, 60_000)
+
+  test('phase4g guard: POST accepts judge/reflect model fields', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    // Mock sandbox composes with no daemon — acceptance only (201, no 400);
+    // derivation is pinned by Task 4's runConfigFor unit test, not here.
+    const app = buildApi({
+      repos,
+      registry,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (name: string) => repos.runs.create({ name, config: DEFAULT_CONFIG, seedDir: null }).id,
+      composeWith: (spec, opts) => composeRun(spec, {}, opts),
+    })
+
+    const created = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: {
+        name: 'e2e-models', goal: 'g',
+        sandbox: 'mock',
+        roster: [{ modelId: 'mock/model', count: 4, temperature: 0.7 }],
+        judge: { modelId: 'mock/model', mode: 'auto' },
+        reflect: { modelId: 'mock/model' },
+      },
+    })
+    expect(created.statusCode).toBe(201)
+
+    await app.close()
+  }, 60_000)
 })

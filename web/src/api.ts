@@ -100,8 +100,8 @@ export interface FullRunSpec {
   // optional-only (unlike workspaceRoot's z.nullable) — an explicit null
   // 400s, so App omits blank model ids (undefined drops out of the JSON
   // body) and the server partials default-fill them.
-  judge: { modelId?: string | null; mode: 'auto' | 'single_call' | 'batched_finals' }
-  reflect: { modelId?: string | null }
+  judge: { modelId?: string; mode: 'auto' | 'single_call' | 'batched_finals' }
+  reflect: { modelId?: string }
   workspaceRoot: string | null
   authFile: string | null
   criteria: string | null
