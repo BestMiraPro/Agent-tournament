@@ -222,4 +222,83 @@ describe('dashboard end to end', () => {
 
     await app.close()
   }, 60_000)
+
+  test('phase4d guards: population edits, criteria pin, abort pin, round fields', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const population = 4
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      populationSize: population,
+      sandbox: 'mock',
+      roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
+    }
+    const broadcaster = new EventBroadcaster()
+    const emit = (e: EngineEvent) => broadcaster.broadcast(e)
+    const provider = new MockProvider(42)
+    const sandbox = new MockSandbox()
+    const engine = new TournamentEngine({
+      repos, config, sandbox,
+      runner: new MockAgentRunner(sandbox, 42),
+      judge: new Judge(provider, config.judge, 42),
+      reflector: new Reflector(provider, config.reflect, ['mock/model']),
+      seedStrategy: (i) => `attempt the goal, variant ${i}`,
+      onEvent: emit,
+    })
+    const manager = new RunManager(engine, emit)
+    const app = buildApi({ repos, manager, createRun: (name) => engine.createRun(name, '').id })
+
+    const created = JSON.parse(
+      (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'e2e', goal: 'g' } })).body,
+    )
+    const runId: string = created.runId
+    const started = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'write a good answer' },
+    })
+    expect(started.statusCode).toBe(202)
+    await manager.waitForIdle(runId)
+
+    // Population edits: pasted add is deterministic (no LLM involved).
+    const pasted = 'my pasted strategy for e2e'
+    const added = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/agents`,
+      payload: { modelId: 'mock/model', temperature: 0.7, strategy: { mode: 'pasted', strategyMd: pasted } },
+    })
+    expect(added.statusCode).toBe(201)
+    const agentId: string = JSON.parse(added.body).agentId
+
+    const fresh = await app.inject({ method: 'GET', url: `/api/runs/${runId}/agents/${agentId}` })
+    expect(fresh.statusCode).toBe(200)
+    expect(JSON.parse(fresh.body).genomes.map((g: { strategyMd: string }) => g.strategyMd)).toContain(pasted)
+
+    const retired = await app.inject({ method: 'DELETE', url: `/api/runs/${runId}/agents/${agentId}` })
+    expect(retired.statusCode).toBe(200)
+    const retiredAgain = await app.inject({ method: 'DELETE', url: `/api/runs/${runId}/agents/${agentId}` })
+    expect(retiredAgain.statusCode).toBe(409)
+    const afterRetire = await app.inject({ method: 'GET', url: `/api/runs/${runId}/agents/${agentId}` })
+    expect(afterRetire.statusCode).toBe(200)
+    expect(JSON.parse(afterRetire.body).agent.status).toBe('retired')
+
+    // The mock round finished fast, so only the scored pin is deterministic here;
+    // the success path is pinned by the Task 5 inject + driver tests.
+    const override = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds/1/criteria`, payload: { criteriaMd: 'late text' },
+    })
+    expect(override.statusCode).toBe(409)
+
+    // Idle mock run: nothing in flight.
+    const abort = await app.inject({ method: 'POST', url: `/api/runs/${runId}/rounds/1/abort` })
+    expect(abort.statusCode).toBe(409)
+    expect(JSON.parse(abort.body).error).toMatch('no round in flight')
+
+    // GET-rounds §6 fields: presence + nullability, not exact text.
+    const roundsRes = await app.inject({ method: 'GET', url: `/api/runs/${runId}/rounds` })
+    expect(roundsRes.statusCode).toBe(200)
+    const [only] = JSON.parse(roundsRes.body)
+    expect(only.criteriaMd).not.toBeNull()
+    expect(['user', 'generated']).toContain(only.criteriaSource)
+    expect('metaDigest' in only).toBe(true)
+
+    await app.close()
+  }, 60_000)
 })
