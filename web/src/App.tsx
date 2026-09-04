@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import './styles.css'
 import { abortRound, createAgent, createRunFull, deleteRun, getRoundStats, getRun, overrideCriteria, serverError, startRound, type FullRunSpec, type RoundStats, type RunSnapshot } from './api.js'
 import { parsePricing } from './lib/pricing.js'
@@ -34,6 +34,7 @@ export function App() {
   // criteria after that, so a reload before round 1 loses it (no persistence).
   const [pendingCriteria, setPendingCriteria] = useState<string | null>(null)
   const live = useLiveRun(snapshot)
+  const gridRef = useRef<HTMLDivElement>(null)
 
   const refresh = useCallback(async (runId: string) => {
     try {
@@ -180,9 +181,10 @@ export function App() {
       {stopped && <p className="muted">Run stopped.</p>}
       {stopError && <p className="error">{stopError}</p>}
       {snapshot.warnings.length > 0 && <p className="muted">{snapshot.warnings.join(' · ')}</p>}
+      {live.wsStatus === 'reconnecting' && <p className="muted reconnect-banner">Reconnecting…</p>}
       <RunSummary snapshot={snapshot} busy={busy} roundStats={roundStats} />
       {!busy && snapshot.lastRoundIdx === 0 && <p className="muted">No rounds yet — set a goal and run round 1.</p>}
-      <div className="layout">
+      <div className="layout" ref={gridRef} tabIndex={-1}>
         <AgentGrid agents={snapshot.agents} live={live} onSelect={setSelectedAgentId} />
         <aside>
           <RoundControls
@@ -237,7 +239,7 @@ export function App() {
         <AgentDrawer
           runId={snapshot.runId}
           agentId={selectedAgentId}
-          onClose={() => setSelectedAgentId(null)}
+          onClose={() => { setSelectedAgentId(null); gridRef.current?.focus() }}
           onRetired={() => { setSelectedAgentId(null); void refresh(snapshot.runId) }}
         />
       )}
