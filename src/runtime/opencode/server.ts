@@ -49,7 +49,11 @@ export async function startServer(opts: StartServerOptions = {}): Promise<Server
 
   const resolvedPort = await new Promise<number>((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error('startServer: timed out waiting for the startup banner')),
+      () => {
+        // Timeout is the only path that leaks: error/exit mean the child is already dead/dying.
+        child.kill()
+        reject(new Error('startServer: timed out waiting for the startup banner'))
+      },
       startupTimeoutMs,
     )
     const onData = (buf: Buffer) => {
