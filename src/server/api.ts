@@ -259,6 +259,109 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     return detail
   })
 
+  app.post('/api/runs/:runId/agents', async (req, reply) => {
+    const { runId } = req.params as { runId: string }
+    const run = deps.repos.runs.get(runId)
+    if (!run) return reply.code(404).send({ error: 'no such run' })
+    if (run.status === 'stopped') return reply.code(409).send({ error: 'run is stopped' })
+    const record = deps.registry?.get(runId)
+    if ((record?.manager ?? deps.manager).isBusy(runId)) return reply.code(409).send({ error: 'run is busy' })
+    const addSchema = z.object({
+      modelId: z.string().min(1),
+      temperature: z.number().min(0).max(2),
+      strategy: z.discriminatedUnion('mode', [
+        z.object({ mode: z.literal('blank') }),
+        z.object({ mode: z.literal('pasted'), strategyMd: z.string().min(1) }),
+        z.object({ mode: z.literal('clone'), agentId: z.string().min(1) }),
+      ]),
+    })
+    let body: z.infer<typeof addSchema>
+    try {
+      body = addSchema.parse(req.body ?? {})
+    } catch (e) {
+      return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
+    }
+    // Clone source: the run-scoped lookup doubles as the membership check (see
+    // the agent-detail route) — a valid id from another run is 'no such agent'.
+    let parentAgentId: string | null = null
+    let parentGenomeId: string | null = null
+    let strategyMd = ''
+    let notesMd = ''
+    if (body.strategy.mode === 'clone') {
+      const cloneId = body.strategy.agentId
+      const source = deps.repos.agents.listAll(runId).find((a) => a.id === cloneId)
+      if (!source) return reply.code(404).send({ error: 'no such agent' })
+      // forAgent is roundIdx-asc, so the last row is the latest genome.
+      const genomes = deps.repos.genomes.forAgent(source.id)
+      const latest = genomes.length > 0 ? genomes[genomes.length - 1]! : null
+      if (!latest) return reply.code(400).send({ error: 'clone source has no genome yet' })
+      parentAgentId = source.id
+      parentGenomeId = latest.id
+      strategyMd = latest.strategyMd
+      notesMd = latest.notesMd
+    } else if (body.strategy.mode === 'pasted') {
+      strategyMd = body.strategy.strategyMd
+    }
+    // WHY blank stays empty: the agent's first reflection fills it in; the judge
+    // scores its submission, not its strategy.
+    // USD preflight mirrors the driver createRun refusal (budget.ts): a capped run
+    // cannot gain a model with no price entry. The repo-decoded config already
+    // restores the Infinity sentinel, so a plain !== Infinity check is exact.
+    const budget = run.config.budget
+    const hasUsdLimit =
+      budget.maxRunUsd !== Infinity || budget.maxRoundUsd !== Infinity || budget.maxAgentUsd !== Infinity
+    if (hasUsdLimit && !((run.config.pricing ?? {})[body.modelId])) {
+      return reply.code(400).send({
+        error:
+          `A USD budget was set but 1 roster model(s) have no pricing entry: ` +
+          `${body.modelId}. Add pricing for them, or set the USD limits to Infinity and ` +
+          `budget in tokens instead.`,
+      })
+    }
+    const nextIdx = deps.repos.rounds.lastIdx(runId) + 1
+    const all = deps.repos.agents.listAll(runId)
+    const labels = new Set(all.map((a) => a.label))
+    // WHY length+1 with a collision loop: agents are never deleted, so length+1 is
+    // unique absent races; the loop covers concurrent adds landing on the same n.
+    let n = all.length + 1
+    let label = `competitor-r${nextIdx}-manual-${n}`
+    for (let guard = 0; labels.has(label) && guard < all.length + 100; guard++) {
+      n += 1
+      label = `competitor-r${nextIdx}-manual-${n}`
+    }
+    const agent = deps.repos.agents.create({ runId, label, parentAgentId, bornRound: nextIdx })
+    // NO provisioning: PREPARE provisions every active agent each round, so a
+    // between-rounds add needs no immediate sandbox work.
+    deps.repos.genomes.create({
+      agentId: agent.id, roundIdx: nextIdx, strategyMd, notesMd,
+      modelId: body.modelId, temperature: body.temperature,
+      parentGenomeId, origin: 'manual',
+    })
+    return reply.code(201).send({ agentId: agent.id, label })
+  })
+
+  app.delete('/api/runs/:runId/agents/:agentId', async (req, reply) => {
+    const { runId, agentId } = req.params as { runId: string; agentId: string }
+    const run = deps.repos.runs.get(runId)
+    if (!run) return reply.code(404).send({ error: 'no such run' })
+    const all = deps.repos.agents.listAll(runId)
+    const agent = all.find((a) => a.id === agentId)
+    if (!agent) return reply.code(404).send({ error: 'no such agent' })
+    if (run.status === 'stopped') return reply.code(409).send({ error: 'run is stopped' })
+    const record = deps.registry?.get(runId)
+    if ((record?.manager ?? deps.manager).isBusy(runId)) return reply.code(409).send({ error: 'run is busy' })
+    if (agent.status !== 'active') return reply.code(409).send({ error: 'agent is not active' })
+    // WHY fail loud: an empty population breaks the next round's judge.
+    if (all.filter((a) => a.status === 'active').length <= 1) {
+      return reply.code(409).send({ error: 'cannot retire the last active agent' })
+    }
+    // NO per-agent teardown: shard containers are shared per-run (no per-agent
+    // container exists to tear down) and workspace dirs are submission evidence
+    // referenced by db rows (workspace_path) and must survive.
+    deps.repos.agents.retire(agentId, deps.repos.rounds.lastIdx(runId), 'retired')
+    return { retired: true }
+  })
+
   app.get('/api/runs/:runId/rounds', async (req, reply) => {
     const { runId } = req.params as { runId: string }
     if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
