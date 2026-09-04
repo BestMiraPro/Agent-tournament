@@ -589,4 +589,45 @@ describe('dashboard end to end', () => {
 
     await app.close()
   }, 60_000)
+
+  test('phase4h guard: 30-agent run returns snapshot with >24 agents (pagination precondition)', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const population = 30
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      populationSize: population,
+      sandbox: 'mock',
+      roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
+    }
+    const broadcaster = new EventBroadcaster()
+    const emit = (e: EngineEvent) => broadcaster.broadcast(e)
+    const provider = new MockProvider(42)
+    const sandbox = new MockSandbox()
+    const engine = new TournamentEngine({
+      repos, config, sandbox,
+      runner: new MockAgentRunner(sandbox, 42),
+      judge: new Judge(provider, config.judge, 42),
+      reflector: new Reflector(provider, config.reflect, ['mock/model']),
+      seedStrategy: (i) => `attempt the goal, variant ${i}`,
+      onEvent: emit,
+    })
+    const manager = new RunManager(engine, emit)
+    const app = buildApi({ repos, manager, createRun: (name) => engine.createRun(name, '').id })
+
+    const created = JSON.parse(
+      (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'e2e-4h', goal: 'g' } })).body,
+    )
+    const runId: string = created.runId
+    await app.inject({ method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'write a good answer' } })
+    await manager.waitForIdle(runId)
+
+    const res = await app.inject({ method: 'GET', url: `/api/runs/${runId}` })
+    expect(res.statusCode).toBe(200)
+    const snap = JSON.parse(res.body)
+    expect(snap.agents).toHaveLength(30)
+    expect(snap.agents.length).toBeGreaterThan(24)
+
+    await app.close()
+  }, 60_000)
 })
