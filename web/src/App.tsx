@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import './styles.css'
 import { abortRound, createAgent, createRunFull, deleteRun, getRoundStats, getRun, overrideCriteria, serverError, startRound, type FullRunSpec, type RunSnapshot } from './api.js'
+import { parsePricing } from './lib/pricing.js'
 import { useLiveRun } from './useLiveRun.js'
 import { AgentDrawer } from './components/AgentDrawer.js'
 import { AnalyticsPanel } from './components/AnalyticsPanel.js'
@@ -46,6 +47,9 @@ export function App() {
     criteriaSource: 'user' | 'generated' | null
     metaDigest: string | null
   } | null>(null)
+  // Setup criteria is a single-session default for round 1 only — rounds own
+  // criteria after that, so a reload before round 1 loses it (no persistence).
+  const [pendingCriteria, setPendingCriteria] = useState<string | null>(null)
   const live = useLiveRun(snapshot)
 
   const refresh = useCallback(async (runId: string) => {
@@ -58,9 +62,25 @@ export function App() {
 
   const handleCreate = useCallback(async (value: RunSetupValue) => {
     let roster: FullRunSpec['roster']
+    let pricing: FullRunSpec['pricing']
     try {
       roster = parseRoster(value.rosterText)
       if (roster.length === 0) throw new Error('Roster is empty - add at least one line.')
+      // Client checks are immediacy only; the RunSpec zod schema + cross-field
+      // rule are the authority and their 400 surfaces via this same path.
+      const { selection, concurrency } = value
+      if (!Number.isInteger(selection.eliteCount) || selection.eliteCount < 0) {
+        throw new Error(`Elite count must be an integer >= 0: ${selection.eliteCount}`)
+      }
+      for (const [label, pct] of [['Top pct', selection.topPct], ['Bottom pct', selection.bottomPct], ['Crossover pct', selection.crossoverPct]] as const) {
+        if (!Number.isFinite(pct) || pct < 0 || pct > 1) throw new Error(`${label} must be a number in [0, 1]: ${pct}`)
+      }
+      if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) {
+        throw new Error(`Concurrency must be an integer in [1, 64]: ${concurrency}`)
+      }
+      const parsed = parsePricing(value.pricingText)
+      if (parsed.error) throw new Error(parsed.error)
+      pricing = parsed.pricing ?? {}
     } catch (e) {
       setSetupError(serverError(e))
       return
@@ -76,12 +96,17 @@ export function App() {
         roster,
         workspaceRoot: value.workspaceRoot.trim() || null,
         authFile: value.authFile.trim() || null,
+        criteria: value.criteria,
+        selection: value.selection,
+        concurrency: value.concurrency,
+        pricing,
       }))
     } catch (e) {
       setSetupError(serverError(e))
       setCreating(false)
       return
     }
+    setPendingCriteria(value.criteria)
     try {
       setSnapshot(await getRun(runId))
     } catch {
@@ -169,7 +194,13 @@ export function App() {
             busy={busy}
             roundIdx={snapshot.lastRoundIdx}
             onRun={(goalMd, criteriaMd) => {
-              void startRound(snapshot.runId, goalMd, criteriaMd).catch((e) => setError(serverError(e)))
+              // First round after a setup-created run carries the setup
+              // criteria (blank = null = auto-generate); an explicit
+              // RoundControls entry always wins, and later rounds fall back to
+              // null/auto — the RoundControls path below is untouched.
+              const first = pendingCriteria?.trim() ? pendingCriteria : null
+              setPendingCriteria(null)
+              void startRound(snapshot.runId, goalMd, criteriaMd ?? first).catch((e) => setError(serverError(e)))
             }}
             criteria={lastRound?.criteriaMd ?? null}
             criteriaSource={lastRound?.criteriaSource ?? null}

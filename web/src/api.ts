@@ -98,6 +98,10 @@ export interface FullRunSpec {
   roster: { modelId: string; count: number; temperature: number }[]
   workspaceRoot: string | null
   authFile: string | null
+  criteria: string | null
+  selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
+  concurrency: number
+  pricing: Record<string, { inPerM: number; outPerM: number; cacheReadPerM: number; cacheWritePerM: number }>
 }
 
 export const createRunFull = (spec: FullRunSpec): Promise<{ runId: string; warnings?: string[] }> =>
@@ -109,6 +113,18 @@ export const createRunFull = (spec: FullRunSpec): Promise<{ runId: string; warni
 
 export const getRun = (runId: string): Promise<RunSnapshot> =>
   fetch(`/api/runs/${runId}`).then(json)
+
+// Throws the server's 502 message verbatim (via the shared serverError
+// unwrap); callers treat any failure as "no known-models list".
+export const listModels = async (): Promise<string[]> => {
+  let body: { models: string[] }
+  try {
+    body = (await fetch('/api/models').then(json)) as { models: string[] }
+  } catch (e) {
+    throw new Error(serverError(e))
+  }
+  return body.models
+}
 
 export const getAgentDetail = (runId: string, agentId: string): Promise<AgentDetail> =>
   fetch(`/api/runs/${runId}/agents/${agentId}`).then(json)
