@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { AgentRow, RunConfig } from '../core/types.js'
+import { DEFAULT_CONFIG, type AgentRow, type RunConfig } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
 import { TournamentEngine } from '../engine/driver.js'
 import type { EventSink } from '../engine/events.js'
@@ -525,7 +525,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         roster: patch.roster ?? run.config.roster,
         budget: { ...run.config.budget, ...patch.budget },
         judge: { ...run.config.judge, ...patch.judge },
-        selection: { ...run.config.selection, ...patch.selection },
+        selection: { ...DEFAULT_CONFIG.selection, ...run.config.selection, ...patch.selection },
       }
       deps.repos.runs.updateConfig(id, next)
     }

@@ -182,11 +182,11 @@ export function App() {
                 .catch((e) => serverError(e))}
             onAddAgent={(input) =>
               createAgent(snapshot.runId, input)
-                .then((r) => ({ ok: true as const, message: `Added ${r.label}.` }))
+                .then((r) => { void refresh(snapshot.runId); return { ok: true as const, message: `Added ${r.label}.` } })
                 .catch((e) => ({ ok: false as const, message: serverError(e) }))}
             onAbort={() =>
               abortRound(snapshot.runId, snapshot.lastRoundIdx)
-                .then(() => 'Abort requested. In-flight agents finish; the round will be marked failed.')
+                .then(() => 'Abort requested. Queued agents stop; in-flight agents finish.')
                 .catch((e) => serverError(e))}
           />
           <h2 style={{ fontSize: '.9rem' }}>Leaderboard</h2>

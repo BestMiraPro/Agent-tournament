@@ -15,7 +15,7 @@ export function Leaderboard({ agents, live }: { agents: SnapshotAgent[]; live: L
           <tr key={s.agentId}>
             <td>{s.rank}</td>
             <td>{labelOf.get(s.agentId) ?? s.agentId.slice(0, 8)}</td>
-            <td>{s.score.toFixed(1)}</td>
+            <td>{s.score.toFixed(2)}</td>
           </tr>
         ))}
       </tbody>

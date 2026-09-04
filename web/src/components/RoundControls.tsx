@@ -145,7 +145,7 @@ export function RoundControls({
             className="danger"
             disabled={aborting}
             onClick={() => {
-              if (!window.confirm('Abort the running round? Queued agents stop; in-flight agents finish; the round is marked failed.')) return
+              if (!window.confirm('Abort the running round? Queued agents stop; in-flight agents finish.')) return
               setAborting(true)
               setAbortMsg(null)
               void onAbort().then((m) => setAbortMsg(m))

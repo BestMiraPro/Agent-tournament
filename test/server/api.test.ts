@@ -135,3 +135,18 @@ test('PATCH /api/runs/:id/config carries selection.crossoverPct into the stored 
   })
   expect(bad.statusCode).toBe(400)
 })
+
+test('PATCH legacy branch default-fills selection for pre-4d rows without a selection key', async () => {
+  const { app, repos } = setup()
+  const created = JSON.parse(
+    (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body,
+  )
+  const cfg = repos.runs.get(created.runId)!.config as unknown as Record<string, unknown>
+  delete cfg.selection
+  repos.runs.updateConfig(created.runId, cfg as never)
+  const res = await app.inject({
+    method: 'PATCH', url: `/api/runs/${created.runId}/config`, payload: { budget: { maxAgentTokens: 10 } },
+  })
+  expect(res.statusCode).toBe(200)
+  expect(repos.runs.get(created.runId)!.config.selection.crossoverPct).toBe(0)
+})
