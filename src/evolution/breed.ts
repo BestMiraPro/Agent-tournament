@@ -77,4 +77,39 @@ export async function breed(input: BreedInput): Promise<void> {
       origin: 'clone',
     })
   }
+
+  if (plan.crossovers.length > 0) {
+    // ponytail: naive line-split merge — deterministic and free; upgrade path is
+    // LLM-recombine if crossover proves load-bearing.
+    const labelOf = new Map(repos.agents.listAll(runId).map((a) => [a.id, a.label]))
+    for (const x of plan.crossovers) {
+      const genomeA = repos.genomes.forRound(x.parentAId, prevIdx)
+      const genomeB = repos.genomes.forRound(x.parentBId, prevIdx)
+      if (!genomeA || !genomeB) continue
+      childIndex++
+      const child = repos.agents.create({
+        runId,
+        label: `competitor-r${nextRoundIdx}-${childIndex}`,
+        parentAgentId: x.parentAId,
+        bornRound: nextRoundIdx,
+      })
+      const linesA = genomeA.strategyMd.split('\n')
+      const linesB = genomeB.strategyMd.split('\n')
+      // Odd-line rule: the extra line goes to A, the primary parent.
+      const strategyMd = [
+        ...linesA.slice(0, Math.ceil(linesA.length / 2)),
+        ...linesB.slice(linesB.length - Math.floor(linesB.length / 2)),
+      ].join('\n')
+      repos.genomes.create({
+        agentId: child.id,
+        roundIdx: nextRoundIdx,
+        strategyMd,
+        notesMd: `Crossover of ${labelOf.get(x.parentAId) ?? x.parentAId} × ${labelOf.get(x.parentBId) ?? x.parentBId}.\n` + genomeA.notesMd,
+        modelId: genomeA.modelId,
+        temperature: genomeA.temperature,
+        parentGenomeId: genomeA.id,
+        origin: 'crossover',
+      })
+    }
+  }
 }

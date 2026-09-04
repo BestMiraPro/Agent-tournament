@@ -82,6 +82,7 @@ export function runConfigFor(spec: RunSpec): RunConfig {
     roster: spec.roster,
     judge: { ...DEFAULT_CONFIG.judge, modelId: spec.judge.modelId, mode: spec.judge.mode },
     reflect: { ...DEFAULT_CONFIG.reflect, modelId: spec.reflect.modelId, topK: spec.reflect.topK },
+    selection: { ...DEFAULT_CONFIG.selection, ...spec.selection },
     budget: { ...DEFAULT_CONFIG.budget, ...spec.budget },
     seedDir: spec.seedDir,
   }

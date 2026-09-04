@@ -119,3 +119,19 @@ test('PATCH /api/runs/:id/config rejects unknown runs', async () => {
   const res = await app.inject({ method: 'PATCH', url: '/api/runs/nope/config', payload: { budget: { maxAgentTokens: 10 } } })
   expect(res.statusCode).toBe(404)
 })
+
+test('PATCH /api/runs/:id/config carries selection.crossoverPct into the stored config', async () => {
+  const { app, repos } = setup()
+  const created = JSON.parse(
+    (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body,
+  )
+  const res = await app.inject({
+    method: 'PATCH', url: `/api/runs/${created.runId}/config`, payload: { selection: { crossoverPct: 0.5 } },
+  })
+  expect(res.statusCode).toBe(200)
+  expect(repos.runs.get(created.runId)!.config.selection.crossoverPct).toBe(0.5)
+  const bad = await app.inject({
+    method: 'PATCH', url: `/api/runs/${created.runId}/config`, payload: { selection: { crossoverPct: 1.5 } },
+  })
+  expect(bad.statusCode).toBe(400)
+})

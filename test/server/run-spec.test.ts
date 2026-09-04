@@ -59,4 +59,17 @@ describe('parseRunSpec', () => {
     expect(s.judge.modelId).toBeTruthy()
     expect(s.budget.maxAgentTokens).toBeGreaterThan(0)
   })
+
+  test('selection.crossoverPct defaults to 0', () => {
+    expect(parseRunSpec(base).selection.crossoverPct).toBe(0)
+  })
+
+  test('accepts selection.crossoverPct in range', () => {
+    expect(parseRunSpec({ ...base, selection: { crossoverPct: 0.5 } }).selection.crossoverPct).toBe(0.5)
+  })
+
+  test('rejects an out-of-range selection.crossoverPct', () => {
+    expect(() => parseRunSpec({ ...base, selection: { crossoverPct: 1.5 } })).toThrow()
+    expect(() => parseRunSpec({ ...base, selection: { crossoverPct: -0.1 } })).toThrow()
+  })
 })

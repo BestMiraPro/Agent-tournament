@@ -31,6 +31,10 @@ const schema = z.object({
     })
     .partial()
     .default({}),
+  selection: z
+    .object({ crossoverPct: z.number().min(0).max(1) })
+    .partial()
+    .optional(),
   seedDir: z.string().nullable().default(null),
   workspaceRoot: z.string().nullable().default(null),
   authFile: z.string().nullable().default(null),
@@ -49,6 +53,7 @@ export interface RunSpec {
   judge: { modelId: string; mode: 'auto' | 'single_call' | 'batched_finals' }
   reflect: { modelId: string; topK: number }
   budget: { maxRunTokens: number; maxRoundTokens: number; maxAgentTokens: number }
+  selection: { crossoverPct: number }
   seedDir: string | null
   workspaceRoot: string | null
   authFile: string | null
@@ -94,6 +99,9 @@ export function parseRunSpec(input: unknown): RunSpec {
       maxRunTokens: p.budget.maxRunTokens ?? DEFAULT_CONFIG.budget.maxRunTokens,
       maxRoundTokens: p.budget.maxRoundTokens ?? DEFAULT_CONFIG.budget.maxRoundTokens,
       maxAgentTokens: p.budget.maxAgentTokens ?? DEFAULT_CONFIG.budget.maxAgentTokens,
+    },
+    selection: {
+      crossoverPct: p.selection?.crossoverPct ?? DEFAULT_CONFIG.selection.crossoverPct,
     },
     seedDir: p.seedDir,
     workspaceRoot: p.workspaceRoot,

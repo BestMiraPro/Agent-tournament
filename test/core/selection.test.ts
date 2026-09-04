@@ -84,7 +84,7 @@ describe('planSelection', () => {
 
   test('returns an empty plan for an empty population', () => {
     const p = planSelection([], cfg)
-    expect(p).toEqual({ elite: [], survivors: [], culled: [], clones: [] })
+    expect(p).toEqual({ elite: [], survivors: [], culled: [], clones: [], crossovers: [] })
   })
 
   test('throws when eliteCount is negative', () => {
@@ -93,5 +93,49 @@ describe('planSelection', () => {
 
   test('throws when topPct is NaN', () => {
     expect(() => planSelection(ranked(20), { ...cfg, topPct: NaN })).toThrow(/topPct|finite/i)
+  })
+})
+
+describe('planSelection crossover', () => {
+  test('pct 0 yields no crossovers and clones identical to today', () => {
+    const p = planSelection(ranked(20), cfg)
+    expect(p.crossovers).toEqual([])
+    expect(p.clones.map((c) => c.parentAgentId)).toEqual(['a1', 'a2', 'a3', 'a4'])
+  })
+
+  test('pct 0.5 turns the first culled slots into crossovers', () => {
+    const p = planSelection(ranked(20), { ...cfg, crossoverPct: 0.5 })
+    expect(p.crossovers).toEqual([
+      { parentAId: 'a1', parentBId: 'a2', replacesAgentId: 'a17' },
+      { parentAId: 'a3', parentBId: 'a4', replacesAgentId: 'a18' },
+    ])
+    expect(p.clones.map((c) => c.replacesAgentId)).toEqual(['a19', 'a20'])
+    // Population invariant: replacements still equal the culled count.
+    expect(p.crossovers.length + p.clones.length).toBe(p.culled.length)
+    const top = new Set(['a1', 'a2', 'a3', 'a4'])
+    for (const x of p.crossovers) {
+      expect(x.parentAId).not.toBe(x.parentBId)
+      expect(top.has(x.parentAId)).toBe(true)
+      expect(top.has(x.parentBId)).toBe(true)
+    }
+  })
+
+  test('pct 1 turns every culled slot into a crossover', () => {
+    const p = planSelection(ranked(20), { ...cfg, crossoverPct: 1 })
+    expect(p.crossovers).toHaveLength(4)
+    expect(p.clones).toEqual([])
+  })
+
+  test('a single-entry top band forces all clones', () => {
+    const p = planSelection(ranked(4), { eliteCount: 1, topPct: 0.2, bottomPct: 0.5, crossoverPct: 1 })
+    expect(p.culled).toHaveLength(2)
+    expect(p.crossovers).toEqual([])
+    expect(p.clones).toHaveLength(2)
+  })
+
+  test('throws for a non-finite or out-of-range crossoverPct', () => {
+    for (const crossoverPct of [NaN, 1.5, -0.1]) {
+      expect(() => planSelection(ranked(20), { ...cfg, crossoverPct })).toThrow(/crossoverPct/i)
+    }
   })
 })

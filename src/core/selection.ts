@@ -16,11 +16,18 @@ export interface CloneAssignment {
   replacesAgentId: string
 }
 
+export interface CrossoverAssignment {
+  parentAId: string
+  parentBId: string
+  replacesAgentId: string
+}
+
 export interface SelectionPlan {
   elite: string[]
   survivors: string[]
   culled: string[]
   clones: CloneAssignment[]
+  crossovers: CrossoverAssignment[]
 }
 
 /**
@@ -35,13 +42,18 @@ export function planSelection(
   cfg: SelectionConfig,
 ): SelectionPlan {
   const n = ranked.length
-  if (n === 0) return { elite: [], survivors: [], culled: [], clones: [] }
+  if (n === 0) return { elite: [], survivors: [], culled: [], clones: [], crossovers: [] }
 
   if (!Number.isInteger(cfg.eliteCount) || cfg.eliteCount < 0) {
     throw new Error(`eliteCount must be a non-negative integer, got ${cfg.eliteCount}`)
   }
   if (!Number.isFinite(cfg.topPct) || !Number.isFinite(cfg.bottomPct)) {
     throw new Error('topPct and bottomPct must be finite numbers')
+  }
+  // WHY stricter than the sibling pcts: crossoverPct indexes parent pairs, so a
+  // non-finite or out-of-range value corrupts pairing rather than just sizing.
+  if (!Number.isFinite(cfg.crossoverPct) || cfg.crossoverPct < 0 || cfg.crossoverPct > 1) {
+    throw new Error(`crossoverPct must be a finite number in [0, 1], got ${cfg.crossoverPct}`)
   }
 
   const sorted = [...ranked].sort((a, b) => a.rank - b.rank)
@@ -72,5 +84,18 @@ export function planSelection(
     replacesAgentId,
   }))
 
-  return { elite, survivors, culled, clones }
+  // WHY forced to 0 for a singleton top band: single-parent crossover is a clone
+  // with extra steps. Consecutive indices mod L are always distinct when L > 1,
+  // so no extra distinctness check is needed. The FIRST numCrossover culled slots
+  // become crossovers; the rest stay clones with their original parents.
+  const numCrossover = topBand.length < 2
+    ? 0
+    : Math.min(culled.length, Math.floor(culled.length * cfg.crossoverPct))
+  const crossovers: CrossoverAssignment[] = culled.slice(0, numCrossover).map((replacesAgentId, i) => ({
+    parentAId: topBand[(2 * i) % topBand.length]!,
+    parentBId: topBand[(2 * i + 1) % topBand.length]!,
+    replacesAgentId,
+  }))
+
+  return { elite, survivors, culled, clones: clones.slice(numCrossover), crossovers }
 }

@@ -415,6 +415,7 @@ async function buildRealDeps(
       population: config.populationSize,
       judge: { modelId: config.judge.modelId, mode: config.judge.mode },
       reflect: { modelId: config.reflect.modelId, topK: config.reflect.topK },
+      selection: { crossoverPct: config.selection.crossoverPct },
       budget: {
         maxRunTokens: config.budget.maxRunTokens,
         maxRoundTokens: config.budget.maxRoundTokens,

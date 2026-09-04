@@ -77,4 +77,21 @@ describe('selection mechanics through the driver', () => {
       for (const id of actual) expect(topBand.has(id)).toBe(false)
     }
   })
+
+  test('a round with crossoverPct > 0 writes crossover genomes', async () => {
+    // bred through the real driver (not planSelection in isolation): the config
+    // flows into the plan, the plan into breed. Four agents need a wide top band
+    // (L >= 2 parents) and a non-empty cull set: topPct 0.5 -> top band of 2,
+    // bottomPct 0.5 -> 2 culled, crossoverPct 1 -> both slots crossover.
+    const ctx = makeMockEngine({ seed: 42, populationSize: 4 })
+    ctx.config.selection = { eliteCount: 1, topPct: 0.5, bottomPct: 0.5, crossoverPct: 1 }
+    const run = ctx.engine.createRun('crossover', GOAL)
+    await ctx.engine.runRound(run.id, { goalMd: GOAL, criteriaMd: null })
+    const rows = ctx.db
+      .prepare("SELECT * FROM genomes WHERE origin = 'crossover'")
+      .all() as unknown[]
+    expect(rows).toHaveLength(2)
+    // Population stays constant: 2 culled out, 2 crossover children in.
+    expect(ctx.repos.agents.listActive(run.id)).toHaveLength(4)
+  })
 })

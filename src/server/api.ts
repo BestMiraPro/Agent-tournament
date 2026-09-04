@@ -304,6 +304,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         modelId: z.string().min(1),
         mode: z.enum(['auto', 'single_call', 'batched_finals']),
       }).partial().optional(),
+      selection: z.object({
+        crossoverPct: z.number().min(0).max(1),
+      }).partial().optional(),
     })
     let patch: z.infer<typeof patchSchema>
     try {
@@ -330,6 +333,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           roster: patch.roster ?? record.spec.roster,
           budget: { ...record.spec.budget, ...patch.budget },
           judge: { ...record.spec.judge, ...patch.judge },
+          selection: { ...record.spec.selection, ...patch.selection },
         })
       } catch (e) {
         return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
@@ -366,6 +370,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         roster: patch.roster ?? run.config.roster,
         budget: { ...run.config.budget, ...patch.budget },
         judge: { ...run.config.judge, ...patch.judge },
+        selection: { ...run.config.selection, ...patch.selection },
       }
       deps.repos.runs.updateConfig(id, next)
     }
