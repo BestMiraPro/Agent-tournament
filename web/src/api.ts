@@ -120,6 +120,39 @@ export const createRunFull = (spec: FullRunSpec): Promise<{ runId: string; warni
 export const getRun = (runId: string): Promise<RunSnapshot> =>
   fetch(`/api/runs/${runId}`).then(json)
 
+// Minimal RunConfig mirror — only the fields compare.ts diffs. Permissive on
+// purpose: the export endpoint serves the full server RunConfig; we only type
+// what CompareRuns reads. Update alongside src/core/types.ts if the diff set
+// grows.
+export interface RunConfig {
+  sandbox: string
+  concurrency: number
+  roster: { modelId: string; count: number; temperature: number }[]
+  judge: { modelId: string; mode: string }
+  reflect: { modelId: string }
+  selection: { topPct: number; bottomPct: number; eliteCount: number; crossoverPct: number }
+  budget: { maxRunTokens: number; maxRoundTokens: number; maxAgentTokens: number }
+}
+
+// Mirrors buildJsonDump in src/server/export.ts — only the fields CompareRuns
+// renders. The endpoint returns more (full RunRow/RoundRow/AgentRow/GenomeRow
+// + submission joins); this permissive shape is what the diff consumes.
+export interface RunExport {
+  run: { id: string; name: string; createdAt: number; status: string }
+  config: RunConfig
+  rounds: {
+    idx: number
+    goalMd: string
+    costUsd: number
+    entries: { agentId: string; label: string; modelId: string; score: number; rank: number }[]
+  }[]
+  agents: { id: string; label: string }[]
+  genomes: { id: string; agentId: string; roundIdx: number; modelId: string }[]
+}
+
+export const getExport = (runId: string): Promise<RunExport> =>
+  fetch(`/api/runs/${runId}/export?format=json`).then(json)
+
 export interface RunListItem {
   id: string
   name: string

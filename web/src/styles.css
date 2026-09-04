@@ -148,3 +148,10 @@ circle.chart-line--min { fill: #ef4444; }
 .runbrowser__row:hover { background: #8881; }
 .runbrowser__row:focus-visible { outline: 2px solid #3b82f6; outline-offset: -2px; }
 .runbrowser__create { margin-bottom: 1rem; }
+
+.compare { width: 100%; border-collapse: collapse; font-size: .85rem; margin-bottom: 1.5rem; }
+.compare th, .compare td { text-align: left; padding: .4rem; border-bottom: 1px solid #8882; vertical-align: top; }
+.compare tbody th { font-weight: 600; white-space: nowrap; }
+.compare__goal { white-space: pre-wrap; word-break: break-word; max-width: 30rem; }
+.diff--changed td { font-weight: 600; background: #f59e0b1a; }
+.diff--same td:not(:first-child) { opacity: .55; }

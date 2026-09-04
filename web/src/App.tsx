@@ -13,10 +13,12 @@ import { Leaderboard } from './components/Leaderboard.js'
 import { RoundControls } from './components/RoundControls.js'
 import { RunSetup, type RunSetupValue } from './components/RunSetup.js'
 import { RunBrowser } from './components/RunBrowser.js'
+import { CompareRuns } from './components/CompareRuns.js'
 
 export function App() {
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null)
-  const [view, setView] = useState<'browser' | 'setup' | 'run'>('browser')
+  const [view, setView] = useState<'browser' | 'setup' | 'run' | 'compare'>('browser')
+  const [compareIds, setCompareIds] = useState<[string, string] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [setupError, setSetupError] = useState<string | null>(null)
@@ -165,10 +167,16 @@ export function App() {
         <RunBrowser
           onOpen={(id) => { setError(null); void refresh(id).then(() => setView('run')) }}
           onCreate={() => setView('setup')}
+          onCompare={(a, b) => { setCompareIds([a, b]); setView('compare') }}
         />
       </>
     )
   }
+
+  if (view === 'compare' && compareIds) {
+    return <CompareRuns a={compareIds[0]} b={compareIds[1]} onBack={() => setView('browser')} />
+  }
+
 
   if (view === 'setup') {
     return (
