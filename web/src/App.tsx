@@ -12,9 +12,11 @@ import { AgentGrid } from './components/AgentGrid.js'
 import { Leaderboard } from './components/Leaderboard.js'
 import { RoundControls } from './components/RoundControls.js'
 import { RunSetup, type RunSetupValue } from './components/RunSetup.js'
+import { RunBrowser } from './components/RunBrowser.js'
 
 export function App() {
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null)
+  const [view, setView] = useState<'browser' | 'setup' | 'run'>('browser')
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [setupError, setSetupError] = useState<string | null>(null)
@@ -103,6 +105,7 @@ export function App() {
     setPendingCriteria(value.criteria)
     try {
       setSnapshot(await getRun(runId))
+      setView('run')
     } catch {
       // The run exists on the server; a failed first read should not look like a clean form.
       setSetupError(`Run created, but loading it failed - reload the page.`)
@@ -155,15 +158,31 @@ export function App() {
       .finally(() => setStopping(false))
   }, [])
 
-  if (!snapshot) {
+  if (view === 'browser') {
     return (
       <>
-        <h1>Agent Tournament — new run</h1>
+        <h1>Agent Tournament — runs</h1>
+        <RunBrowser
+          onOpen={(id) => { setError(null); void refresh(id).then(() => setView('run')) }}
+          onCreate={() => setView('setup')}
+        />
+      </>
+    )
+  }
+
+  if (view === 'setup') {
+    return (
+      <>
+        <div className="arena-head">
+          <h1>Agent Tournament — new run</h1>
+          <button onClick={() => setView('browser')}>Browse runs</button>
+        </div>
         <RunSetup busy={creating} error={setupError} onCreate={handleCreate} />
       </>
     )
   }
 
+  if (!snapshot) return <p className="error">{error ?? 'Loading run…'}</p>
   if (error) return <p className="error">{error}</p>
 
   const busy = live.busy || snapshot.busy
@@ -172,6 +191,7 @@ export function App() {
     <>
       <div className="arena-head">
         <h1>Agent Tournament — {snapshot.name}</h1>
+        <button onClick={() => setView('browser')}>Back to runs</button>
         {!stopped && (
           <button className="stop" disabled={stopping} onClick={() => handleStop(snapshot.runId)}>
             {stopping ? 'Stopping…' : 'Stop run'}

@@ -286,9 +286,22 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     return reply.code(201).send({ runId })
   })
 
-  app.get('/api/runs', async () => ({
-    runs: deps.repos.runs.list?.() ?? [],
-  }))
+  app.get('/api/runs', async () => {
+    const runs = deps.repos.runs.list?.() ?? []
+    const summarized = runs.map((r) => {
+      const rs = deps.repos.rounds.listForRun(r.id)
+      let bestScore: number | null = null
+      let costUsd = 0
+      for (const round of rs) {
+        costUsd += round.costUsd
+        for (const s of deps.repos.scores.forRound(round.id)) {
+          if (bestScore === null || s.score > bestScore) bestScore = s.score
+        }
+      }
+      return { ...r, rounds: rs.length, bestScore, costUsd }
+    })
+    return { runs: summarized }
+  })
 
   app.get('/api/models', async (_req, reply) => {
     if (modelsCache && Date.now() - modelsCache.at < 60_000) {

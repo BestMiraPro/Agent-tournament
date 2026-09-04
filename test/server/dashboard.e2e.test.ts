@@ -677,4 +677,47 @@ describe('dashboard end to end', () => {
 
     await app.close()
   }, 60_000)
+
+  test('phase4j guard: GET /api/runs serves per-run summary (rounds, bestScore, costUsd)', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (name: string) => repos.runs.create({ name, config: DEFAULT_CONFIG, seedDir: null }).id,
+    })
+
+    // Run A: 1 agent, 1 scored round (cost 0.05), best score 80.
+    const aId = repos.runs.create({ name: 'summary-a', config: DEFAULT_CONFIG, seedDir: null }).id
+    const a1 = repos.agents.create({ runId: aId, label: 'a1', parentAgentId: null, bornRound: 1 })
+    const r1 = repos.rounds.create({ runId: aId, idx: 1, goalMd: 'goal' })
+    repos.genomes.create({
+      agentId: a1.id, roundIdx: 1, strategyMd: 's', notesMd: '',
+      modelId: 'mock/model', temperature: 0.7, parentGenomeId: null, origin: 'seed',
+    })
+    repos.scores.insertMany(r1.id, [
+      { roundId: r1.id, agentId: a1.id, rank: 1, score: 80, rationaleMd: 'r', band: 'elite' },
+    ])
+    repos.rounds.markEnded(r1.id, 0.05)
+
+    // Run B: no rounds.
+    repos.runs.create({ name: 'summary-b', config: DEFAULT_CONFIG, seedDir: null })
+
+    const res = await app.inject({ method: 'GET', url: '/api/runs' })
+    expect(res.statusCode).toBe(200)
+    const { runs } = JSON.parse(res.body)
+    expect(runs).toHaveLength(2)
+    const a = runs.find((r: { name: string }) => r.name === 'summary-a')
+    const b = runs.find((r: { name: string }) => r.name === 'summary-b')
+    expect(a).toBeDefined()
+    expect(a.rounds).toBe(1)
+    expect(a.bestScore).toBe(80)
+    expect(a.costUsd).toBeCloseTo(0.05)
+    expect(b).toBeDefined()
+    expect(b.rounds).toBe(0)
+    expect(b.bestScore).toBeNull()
+    expect(b.costUsd).toBe(0)
+
+    await app.close()
+  }, 60_000)
 })

@@ -120,6 +120,18 @@ export const createRunFull = (spec: FullRunSpec): Promise<{ runId: string; warni
 export const getRun = (runId: string): Promise<RunSnapshot> =>
   fetch(`/api/runs/${runId}`).then(json)
 
+export interface RunListItem {
+  id: string
+  name: string
+  createdAt: number
+  rounds: number
+  bestScore: number | null
+  costUsd: number
+}
+
+export const getRuns = (): Promise<{ runs: RunListItem[] }> =>
+  fetch('/api/runs').then(json)
+
 // Throws the server's 502 message verbatim (via the shared serverError
 // unwrap); callers treat any failure as "no known-models list".
 export const listModels = async (): Promise<string[]> => {
