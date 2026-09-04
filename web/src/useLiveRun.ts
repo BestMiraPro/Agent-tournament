@@ -16,6 +16,7 @@ export interface LiveState {
   roundIdx: number
   busy: boolean
   lastBreach: string | null
+  wsStatus: 'connected' | 'reconnecting'
 }
 
 export const initialLiveState: LiveState = {
@@ -25,6 +26,7 @@ export const initialLiveState: LiveState = {
   roundIdx: 0,
   busy: false,
   lastBreach: null,
+  wsStatus: 'connected',
 }
 
 const blank: LiveAgent = { status: 'pending', activity: '', tokensIn: 0, tokensOut: 0, costUsd: 0 }
@@ -77,25 +79,55 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
       }
     case 'round.complete':
       return { ...state, busy: false, lastBreach: (event.budgetBreach as string | null) ?? null }
+    case 'ws.status':
+      return { ...state, wsStatus: event.status as LiveState['wsStatus'] }
     default:
       return state
   }
+}
+
+/** Exponential backoff in ms: 1s -> 2s -> 4s -> ... capped at 30s. Pure so it can be tested without a socket. */
+export function nextDelay(attempt: number): number {
+  const ms = 1000 * 2 ** attempt
+  return Math.min(ms, 30000)
 }
 
 export function useLiveRun(snapshot: RunSnapshot | null): LiveState {
   const [state, dispatch] = useReducer(liveReducer, initialLiveState)
 
   useEffect(() => {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const socket = new WebSocket(`${proto}://${location.host}/ws`)
-    socket.onmessage = (m) => {
-      try {
-        dispatch(JSON.parse(m.data as string))
-      } catch {
-        /* ignore malformed frames rather than killing the stream */
+    let socket: WebSocket | null = null
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let attempt = 0
+    let closed = false
+
+    const open = () => {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+      socket = new WebSocket(`${proto}://${location.host}/ws`)
+      socket.onopen = () => {
+        attempt = 0
+        dispatch({ type: 'ws.status', status: 'connected' })
+      }
+      socket.onmessage = (m) => {
+        try {
+          dispatch(JSON.parse(m.data as string))
+        } catch {
+          /* ignore malformed frames rather than killing the stream */
+        }
+      }
+      socket.onclose = () => {
+        if (closed) return
+        dispatch({ type: 'ws.status', status: 'reconnecting' })
+        timer = setTimeout(() => { attempt++; open() }, nextDelay(attempt))
       }
     }
-    return () => socket.close()
+    open()
+
+    return () => {
+      closed = true
+      if (timer) clearTimeout(timer)
+      socket?.close()
+    }
   }, [])
 
   void snapshot

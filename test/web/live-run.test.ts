@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { liveReducer, initialLiveState } from '../../web/src/useLiveRun.js'
+import { nextDelay } from '../../web/src/useLiveRun.js'
 
 describe('liveReducer', () => {
   test('marks an agent running', () => {
@@ -44,4 +45,32 @@ describe('liveReducer', () => {
     s = liveReducer(s, { type: 'round.status', runId: 'r', roundIdx: 2, status: 'preparing' })
     expect(s.agents['a']?.status).toBe('pending')
   })
+})
+
+describe('nextDelay', () => {
+  test('attempt 0 waits 1s', () => {
+    expect(nextDelay(0)).toBe(1000)
+  })
+  test('attempt 1 waits 2s', () => {
+    expect(nextDelay(1)).toBe(2000)
+  })
+  test('attempt 4 waits 16s', () => {
+    expect(nextDelay(4)).toBe(16000)
+  })
+  test('attempt 5+ caps at 30s', () => {
+    expect(nextDelay(5)).toBe(30000)
+    expect(nextDelay(100)).toBe(30000)
+  })
+  test('never returns 0 or negative', () => {
+    for (let i = 0; i < 10; i++) {
+      expect(nextDelay(i)).toBeGreaterThan(0)
+    }
+  })
+})
+
+test('ws.status updates wsStatus', () => {
+  const s = liveReducer(initialLiveState, { type: 'ws.status', status: 'reconnecting' })
+  expect(s.wsStatus).toBe('reconnecting')
+  const s2 = liveReducer(s, { type: 'ws.status', status: 'connected' })
+  expect(s2.wsStatus).toBe('connected')
 })
