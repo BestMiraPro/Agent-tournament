@@ -23,6 +23,9 @@ button:disabled { opacity: .5; cursor: default; }
 .setup { display: grid; gap: .5rem; max-width: 34rem; }
 .setup label { font-weight: 600; font-size: .85rem; }
 .setup input, .setup select { font: inherit; padding: .4rem; }
+.roster-row { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .6rem; }
+.roster-row input[type='text'] { flex: 1; min-width: 10rem; }
+.roster-row input[type='number'] { width: 4.5rem; }
 .cell--selectable { cursor: pointer; }
 .cell--selectable:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
 .drawer-backdrop { position: fixed; inset: 0; background: #0006; z-index: 10; }

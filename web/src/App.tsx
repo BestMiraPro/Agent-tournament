@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import './styles.css'
 import { abortRound, createAgent, createRunFull, deleteRun, getRoundStats, getRun, overrideCriteria, serverError, startRound, type FullRunSpec, type RoundStats, type RunSnapshot } from './api.js'
 import { parsePricing } from './lib/pricing.js'
+import { summarizeRoster } from './lib/roster.js'
 import { useLiveRun } from './useLiveRun.js'
 import { AgentDrawer } from './components/AgentDrawer.js'
 import { AnalyticsPanel } from './components/AnalyticsPanel.js'
@@ -11,29 +12,6 @@ import { AgentGrid } from './components/AgentGrid.js'
 import { Leaderboard } from './components/Leaderboard.js'
 import { RoundControls } from './components/RoundControls.js'
 import { RunSetup, type RunSetupValue } from './components/RunSetup.js'
-
-// One `modelId x<count> @<temperature>` per line; the temperature is optional
-// and defaults to 0.7 (the codebase-wide default temperature).
-const ROSTER_LINE = /^(.+?)\s+x(\d+)(?:\s*@(\d+(?:\.\d+)?))?$/
-
-function parseRoster(text: string): FullRunSpec['roster'] {
-  const roster: FullRunSpec['roster'] = []
-  const lines = text.split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]?.trim() ?? ''
-    if (!line) continue
-    const m = ROSTER_LINE.exec(line)
-    if (!m || !m[1] || !m[2]) {
-      throw new Error(`Roster line ${i + 1} must look like \`model xN @temp\`: ${line}`)
-    }
-    roster.push({
-      modelId: m[1].trim(),
-      count: Number(m[2]),
-      temperature: m[3] === undefined ? 0.7 : Number(m[3]),
-    })
-  }
-  return roster
-}
 
 export function App() {
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null)
@@ -69,7 +47,11 @@ export function App() {
     let roster: FullRunSpec['roster']
     let pricing: FullRunSpec['pricing']
     try {
-      roster = parseRoster(value.rosterText)
+      roster = value.roster
+      // First validation error throws (same behavior as the old line parser);
+      // the builder already shows all errors inline, this guards submit.
+      const summary = summarizeRoster(roster)
+      if (summary.errors.length > 0) throw new Error(summary.errors[0])
       if (roster.length === 0) throw new Error('Roster is empty - add at least one line.')
       // Client checks are immediacy only; the RunSpec zod schema + cross-field
       // rule are the authority and their 400 surfaces via this same path.

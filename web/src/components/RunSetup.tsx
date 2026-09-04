@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import { DEFAULT_CONFIG } from '../../../src/core/types.js'
 import { listModels } from '../api.js'
+import type { RosterEntry } from '../lib/roster.js'
+import { RosterBuilder } from './RosterBuilder.js'
 
 export interface RunSetupValue {
   name: string
   goal: string
   sandbox: 'mock' | 'local' | 'docker'
-  rosterText: string
+  roster: RosterEntry[]
   workspaceRoot: string
   authFile: string
   criteria: string | null
@@ -23,7 +25,7 @@ export function RunSetup({ busy, error, onCreate }: {
   const [name, setName] = useState('arena')
   const [goal, setGoal] = useState('Produce the best possible answer.')
   const [sandbox, setSandbox] = useState<RunSetupValue['sandbox']>('mock')
-  const [rosterText, setRosterText] = useState('mock/model x4 @0.7')
+  const [roster, setRoster] = useState<RosterEntry[]>([{ modelId: 'mock/model', count: 4, temperature: 0.7 }])
   const [workspaceRoot, setWorkspaceRoot] = useState('')
   const [authFile, setAuthFile] = useState('')
   const [criteria, setCriteria] = useState('')
@@ -66,16 +68,10 @@ export function RunSetup({ busy, error, onCreate }: {
         <option value="local">local (real agents on this host)</option>
         <option value="docker">docker (isolated containers)</option>
       </select>
-      <label htmlFor="setup-roster">Roster (one `model xN @temp` per line)</label>
-      <textarea id="setup-roster" value={rosterText} rows={4} onChange={(e) => setRosterText(e.target.value)} disabled={busy} />
-      {models !== null && models.length > 0 && (
-        <details>
-          <summary>Known models ({models.length})</summary>
-          <ul>
-            {models.map((m) => <li key={m}><code>{m}</code></li>)}
-          </ul>
-        </details>
-      )}
+      <label htmlFor="setup-roster">Roster</label>
+      <div id="setup-roster">
+        <RosterBuilder value={roster} onChange={setRoster} models={models ?? []} disabled={busy} />
+      </div>
       <label htmlFor="setup-criteria">Judging criteria (optional)</label>
       <textarea id="setup-criteria" value={criteria} rows={3} placeholder="auto-generate from goal" onChange={(e) => setCriteria(e.target.value)} disabled={busy} />
       <label htmlFor="setup-elite">Elite count</label>
@@ -113,7 +109,7 @@ export function RunSetup({ busy, error, onCreate }: {
       <button
         disabled={busy || name.trim().length === 0 || goal.trim().length === 0}
         onClick={() => onCreate({
-          name, goal, sandbox, rosterText, workspaceRoot, authFile,
+          name, goal, sandbox, roster, workspaceRoot, authFile,
           criteria: criteria.trim() === '' ? null : criteria,
           selection: {
             eliteCount: Number(eliteCount),
