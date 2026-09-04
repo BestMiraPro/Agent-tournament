@@ -160,6 +160,20 @@ test('PATCH legacy branch default-fills selection for pre-4d rows without a sele
   expect(repos.runs.get(created.runId)!.config.selection.crossoverPct).toBe(0)
 })
 
+test('PATCH legacy branch rejects an eliteCount violating the cross-field rule', async () => {
+  const { app } = setup()
+  const created = JSON.parse(
+    (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body,
+  )
+  // DEFAULT config: pop 20, topPct 0.2 → top band 4; elite 999 exceeds it.
+  const res = await app.inject({
+    method: 'PATCH', url: `/api/runs/${created.runId}/config`,
+    payload: { selection: { eliteCount: 999 } },
+  })
+  expect(res.statusCode).toBe(400)
+  expect(JSON.parse(res.body).error).toMatch(/top band size/)
+})
+
 test('PATCH legacy branch carries the new setup knobs into the stored config', async () => {
   const { app, repos } = setup()
   const created = JSON.parse(
@@ -170,7 +184,7 @@ test('PATCH legacy branch carries the new setup knobs into the stored config', a
     payload: {
       selection: { eliteCount: 2, topPct: 0.3, bottomPct: 0.1 },
       concurrency: 4,
-      pricing: { 'm/m': { inPerM: 1, outPerM: 2 } },
+      pricing: { 'm/m': { inPerM: 1, outPerM: 2, cacheReadPerM: 0.5, cacheWritePerM: 0.5 } },
     },
   })
   expect(res.statusCode).toBe(200)
@@ -179,7 +193,7 @@ test('PATCH legacy branch carries the new setup knobs into the stored config', a
   expect(cfg.selection.topPct).toBe(0.3)
   expect(cfg.selection.bottomPct).toBe(0.1)
   expect(cfg.concurrency).toBe(4)
-  expect(cfg.pricing['m/m']).toEqual({ inPerM: 1, outPerM: 2 })
+  expect(cfg.pricing['m/m']).toEqual({ inPerM: 1, outPerM: 2, cacheReadPerM: 0.5, cacheWritePerM: 0.5 })
 })
 
 // Composed-run setup: the record branch re-validates via merge→parseRunSpec,
@@ -205,9 +219,8 @@ const setupComposed = () => {
 }
 
 // Composed-run setup with a REAL engine: the record branch re-validates via
-// merge→parseRunSpec (cross-field free) and reconfigures the engine (pricing
-// preflight free) — a fake reconfigure would hide both. Roster sums to 20 =
-// DEFAULT populationSize.
+// merge→parseRunSpec (cross-field free) and reconfigures the engine — a fake
+// reconfigure would hide both. Roster sums to 20 = DEFAULT populationSize.
 const seedRecord = (repos: ReturnType<typeof makeRepos>, registry: RunRegistry) => {
   const spec = parseRunSpec({
     name: 'composed', goal: 'g', sandbox: 'mock',
@@ -248,17 +261,25 @@ test('PATCH record branch stores selection/concurrency via reconfigure', async (
   expect(cfg.concurrency).toBe(4)
 })
 
-test('PATCH record branch surfaces the engine pricing preflight (cache rates required)', async () => {
+test('PATCH record branch rejects 2-key pricing at the schema, stores 4-key', async () => {
   const { app, repos, registry } = setupComposed()
   const runId = seedRecord(repos, registry)
-  // Light 2-key shape passes the API schema; the engine fail-closed preflight
-  // (assertPrice) refuses it — deep validation stays at the engine per spec §4.2.
-  const res = await app.inject({
+  // Cache rates are required (the engine fail-closes without them), so the schema
+  // demands all four keys — a 2-key entry 400s here with a zod message, not at the engine.
+  const bad = await app.inject({
     method: 'PATCH', url: `/api/runs/${runId}/config`,
     payload: { pricing: { 'm/m': { inPerM: 1, outPerM: 2 } } },
   })
-  expect(res.statusCode).toBe(400)
-  expect(JSON.parse(res.body).error).toMatch(/cacheReadPerM/)
+  expect(bad.statusCode).toBe(400)
+  expect(JSON.parse(bad.body).error).toMatch(/cacheReadPerM/)
+  const good = await app.inject({
+    method: 'PATCH', url: `/api/runs/${runId}/config`,
+    payload: { pricing: { 'm/m': { inPerM: 1, outPerM: 2, cacheReadPerM: 0.5, cacheWritePerM: 0.5 } } },
+  })
+  expect(good.statusCode).toBe(200)
+  expect(repos.runs.get(runId)!.config.pricing['m/m']).toEqual(
+    { inPerM: 1, outPerM: 2, cacheReadPerM: 0.5, cacheWritePerM: 0.5 },
+  )
 })
 
 test('PATCH record branch rejects an eliteCount violating the cross-field rule', async () => {

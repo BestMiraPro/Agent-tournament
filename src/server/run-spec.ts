@@ -42,7 +42,10 @@ const schema = z.object({
     .optional(),
   // Upper bound is a typo-guard, not tuning — the provider rate-limits real parallelism anyway.
   concurrency: z.number().int().min(1).max(64).optional(),
-  pricing: z.record(z.string().min(1), z.object({ inPerM: z.number().nonnegative(), outPerM: z.number().nonnegative() })).optional(),
+  // Four keys, not two: the engine preflight (BudgetTracker assertPrice) fail-closes
+  // on cache-less entries (omitting them prices the bulk of a run at zero), so a
+  // 2-key shape would pass the API and die at createRun — accept the full shape here.
+  pricing: z.record(z.string().min(1), z.object({ inPerM: z.number().nonnegative(), outPerM: z.number().nonnegative(), cacheReadPerM: z.number().nonnegative(), cacheWritePerM: z.number().nonnegative() })).optional(),
   seedDir: z.string().nullable().default(null),
   workspaceRoot: z.string().nullable().default(null),
   authFile: z.string().nullable().default(null),
@@ -63,7 +66,7 @@ export interface RunSpec {
   budget: { maxRunTokens: number; maxRoundTokens: number; maxAgentTokens: number }
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number
-  pricing: Record<string, { inPerM: number; outPerM: number }>
+  pricing: Record<string, { inPerM: number; outPerM: number; cacheReadPerM: number; cacheWritePerM: number }>
   seedDir: string | null
   workspaceRoot: string | null
   authFile: string | null

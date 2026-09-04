@@ -503,7 +503,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         bottomPct: z.number().finite().min(0).max(1),
       }).partial().optional(),
       concurrency: z.number().int().min(1).max(64).optional(),
-      pricing: z.record(z.string().min(1), z.object({ inPerM: z.number().nonnegative(), outPerM: z.number().nonnegative() })).optional(),
+      pricing: z.record(z.string().min(1), z.object({ inPerM: z.number().nonnegative(), outPerM: z.number().nonnegative(), cacheReadPerM: z.number().nonnegative(), cacheWritePerM: z.number().nonnegative() })).optional(),
     })
     let patch: z.infer<typeof patchSchema>
     try {
@@ -565,16 +565,21 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     } else {
       // No engine code: concurrency/selection/pricing are all re-read per
       // round through the 4b reconfigure swap on the record branch.
+      const selection = { ...DEFAULT_CONFIG.selection, ...run.config.selection, ...patch.selection }
+      // No parseRunSpec on this branch, so the elite-vs-top rule is checked here
+      // directly on the merged values — same words as parseRunSpec.
+      const topCount = Math.max(1, Math.floor(run.config.populationSize * selection.topPct))
+      if (selection.eliteCount > topCount) {
+        return reply.code(400).send({ error: `eliteCount (${selection.eliteCount}) cannot exceed the top band size (${topCount})` })
+      }
       const next = {
         ...run.config,
         roster: patch.roster ?? run.config.roster,
         budget: { ...run.config.budget, ...patch.budget },
         judge: { ...run.config.judge, ...patch.judge },
-        selection: { ...DEFAULT_CONFIG.selection, ...run.config.selection, ...patch.selection },
+        selection,
         concurrency: patch.concurrency ?? run.config.concurrency,
-        // Same light-shape cast as runConfigFor: legacy rows have no engine to
-        // preflight, so the entry stores as-is and fails closed at next contact.
-        pricing: { ...run.config.pricing, ...patch.pricing } as RunConfig['pricing'],
+        pricing: { ...run.config.pricing, ...patch.pricing },
       }
       deps.repos.runs.updateConfig(id, next)
     }

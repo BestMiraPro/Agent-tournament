@@ -93,8 +93,15 @@ describe('parseRunSpec', () => {
 
   test('rejects negative pricing rates', () => {
     expect(() =>
-      parseRunSpec({ ...base, pricing: { 'a/m': { inPerM: -1, outPerM: 0 } } }),
+      parseRunSpec({ ...base, pricing: { 'a/m': { inPerM: -1, outPerM: 0, cacheReadPerM: 0, cacheWritePerM: 0 } } }),
     ).toThrow()
+  })
+
+  test('accepts full 4-key pricing entries (nothing stripped)', () => {
+    const s = parseRunSpec({
+      ...base, pricing: { 'a/m': { inPerM: 1, outPerM: 2, cacheReadPerM: 3, cacheWritePerM: 4 } },
+    })
+    expect(s.pricing['a/m']).toEqual({ inPerM: 1, outPerM: 2, cacheReadPerM: 3, cacheWritePerM: 4 })
   })
 
   test('eliteCount beyond the top band throws', () => {
