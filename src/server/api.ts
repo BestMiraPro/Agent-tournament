@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { DEFAULT_CONFIG, type AgentRow, type FileEntry, type RunConfig } from '../core/types.js'
 import type { Repos, RoundRow } from '../db/repos.js'
 import { TournamentEngine } from '../engine/driver.js'
+import { defaultSeedStrategy } from '../engine/seed-strategy.js'
 import type { EventSink } from '../engine/events.js'
 import { Reflector } from '../evolution/reflect.js'
 import { Judge, type JudgeInput, type JudgeOutput } from '../judge/judge.js'
@@ -240,7 +241,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           composed.config.reflect,
           composed.config.roster.map((r) => r.modelId),
         ),
-        seedStrategy: (i) => `attempt the goal, variant ${i}`,
+        seedStrategy: defaultSeedStrategy,
         onEvent: emit,
       })
       let runId: string

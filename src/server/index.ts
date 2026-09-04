@@ -5,6 +5,7 @@ import { openDb } from '../db/open.js'
 import { makeRepos } from '../db/repos.js'
 import { recoverIncompleteRounds } from '../db/recover.js'
 import { TournamentEngine } from '../engine/driver.js'
+import { defaultSeedStrategy } from '../engine/seed-strategy.js'
 import type { EngineEvent } from '../engine/events.js'
 import { Judge } from '../judge/judge.js'
 import { Reflector } from '../evolution/reflect.js'
@@ -57,7 +58,7 @@ const engine = new TournamentEngine({
   runner: new MockAgentRunner(sandbox, 42),
   judge: new Judge(provider, config.judge, 42),
   reflector: new Reflector(provider, config.reflect, config.roster.map((r) => r.modelId)),
-  seedStrategy: (i) => `attempt the goal, variant ${i}`,
+  seedStrategy: defaultSeedStrategy,
   onEvent: emit,
 })
 

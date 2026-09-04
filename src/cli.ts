@@ -5,6 +5,7 @@ import { openDb } from './db/open.js'
 import { makeRepos } from './db/repos.js'
 import { recoverIncompleteRounds } from './db/recover.js'
 import { TournamentEngine } from './engine/driver.js'
+import { defaultSeedStrategy } from './engine/seed-strategy.js'
 import { Reflector } from './evolution/reflect.js'
 import { Judge } from './judge/judge.js'
 import { MockAgentRunner, type AgentRunner } from './runtime/agent-runner.js'
@@ -533,8 +534,7 @@ export async function runTournamentCli(
       reflector: new Reflector(provider, config.reflect, config.roster.map((r) => r.modelId)),
       // Each agent starts from a different keyword so imitation has something real to
       // transfer. Uniform seeds leave nothing to imitate and the curve stays flat.
-      seedStrategy: (i) =>
-        `attempt the goal, variant ${i}, focus on ${GOOD_KEYWORDS[i % GOOD_KEYWORDS.length]}`,
+      seedStrategy: defaultSeedStrategy,
     })
 
     const run = engine.createRun('cli', opts.goal)
