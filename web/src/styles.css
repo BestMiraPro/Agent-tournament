@@ -23,6 +23,13 @@ button:disabled { opacity: .5; cursor: default; }
 .setup { display: grid; gap: .5rem; max-width: 34rem; }
 .setup label { font-weight: 600; font-size: .85rem; }
 .setup input, .setup select { font: inherit; padding: .4rem; }
+.setup section { display: grid; gap: .5rem; }
+.setup h2 { font-size: .95rem; margin: .5rem 0 0; }
+.setup .help { opacity: .6; font-size: .8rem; margin: 0; }
+.setup fieldset { border: 1px solid #8882; border-radius: .5rem; padding: .6rem; margin: 0; display: grid; gap: .5rem; }
+.setup fieldset legend { font-weight: 600; font-size: .85rem; padding: 0 .3rem; }
+.setup details { display: grid; gap: .5rem; }
+.setup details summary { cursor: pointer; font-weight: 600; font-size: .85rem; }
 .roster-row { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .6rem; }
 .roster-row input[type='text'] { flex: 1; min-width: 10rem; }
 .roster-row input[type='number'] { width: 4.5rem; }

@@ -96,6 +96,12 @@ export interface FullRunSpec {
   goal: string
   sandbox: 'mock' | 'local' | 'docker'
   roster: { modelId: string; count: number; temperature: number }[]
+  // WHY optional + never-null: the server judge/reflect partials are
+  // optional-only (unlike workspaceRoot's z.nullable) — an explicit null
+  // 400s, so App omits blank model ids (undefined drops out of the JSON
+  // body) and the server partials default-fill them.
+  judge: { modelId?: string | null; mode: 'auto' | 'single_call' | 'batched_finals' }
+  reflect: { modelId?: string | null }
   workspaceRoot: string | null
   authFile: string | null
   criteria: string | null

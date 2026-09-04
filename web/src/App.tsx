@@ -72,6 +72,10 @@ export function App() {
       setSetupError(serverError(e))
       return
     }
+    // Blank model ids are omitted (undefined drops out of the JSON body) so
+    // the server partials default-fill them — an explicit null would 400.
+    const judgeModel = value.judgeModel.trim()
+    const reflectModel = value.reflectModel.trim()
     setCreating(true)
     setSetupError(null)
     let runId: string
@@ -81,6 +85,8 @@ export function App() {
         goal: value.goal.trim(),
         sandbox: value.sandbox,
         roster,
+        judge: { modelId: judgeModel === '' ? undefined : judgeModel, mode: value.judgeMode },
+        reflect: { modelId: reflectModel === '' ? undefined : reflectModel },
         workspaceRoot: value.workspaceRoot.trim() || null,
         authFile: value.authFile.trim() || null,
         criteria: value.criteria,

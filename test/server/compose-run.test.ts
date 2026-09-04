@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { composeRun } from '../../src/server/compose-run.js'
+import { composeRun, runConfigFor } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
 
 const mockSeams = () => ({
@@ -94,6 +94,21 @@ describe('composeRun', () => {
     } finally {
       rmSync(top, { recursive: true, force: true })
     }
+  })
+
+  test('runConfigFor carries the spec judge/reflect models into the config', () => {
+    // Provenance pin (phase 4g §7 decision): the web sends judge/reflect
+    // model ids on create and this pure merge is where they land — no e2e.
+    const spec = parseRunSpec({
+      name: 'm', goal: 'g', sandbox: 'mock',
+      roster: [{ modelId: 'mock/model', count: 1, temperature: 0.7 }],
+      judge: { modelId: 'judge/model', mode: 'batched_finals' },
+      reflect: { modelId: 'reflect/model' },
+    })
+    const config = runConfigFor(spec)
+    expect(config.judge.modelId).toBe('judge/model')
+    expect(config.judge.mode).toBe('batched_finals')
+    expect(config.reflect.modelId).toBe('reflect/model')
   })
 
   test('a file in the way of the workspace root fails before any server starts', async () => {

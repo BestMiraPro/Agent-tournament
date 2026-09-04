@@ -59,7 +59,10 @@ export function RosterBuilder({ value, onChange, models, disabled }: {
       >
         Add row
       </button>
-      <p className="muted">Total agents: {total}</p>
+      {/* WHY display-only guard: a cleared count input surfaces NaN, which
+          poisons the summed total — validation errors already cover it, the
+          footer just must not render "Total agents: NaN". */}
+      <p className="muted">Total agents: {Number.isFinite(total) ? total : '—'}</p>
       {errors.map((e) => <p key={e} className="error">{e}</p>)}
     </div>
   )
