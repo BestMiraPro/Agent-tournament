@@ -29,7 +29,7 @@ function Submission({ sub }: { sub: NonNullable<RoundDetailData['entries'][numbe
         : <p className="muted">No submission file.</p>}
       {manifestFiles && manifestFiles.length > 0 && (
         <ul className="drawer__files">
-          {manifestFiles.map((f, i) => <li key={i}>{fileName(f)}</li>)}
+          {manifestFiles.map((f) => <li key={fileName(f)}>{fileName(f)}</li>)}
         </ul>
       )}
       <p className="muted">

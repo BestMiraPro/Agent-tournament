@@ -181,6 +181,7 @@ export function App() {
       {stopError && <p className="error">{stopError}</p>}
       {snapshot.warnings.length > 0 && <p className="muted">{snapshot.warnings.join(' · ')}</p>}
       <RunSummary snapshot={snapshot} busy={busy} roundStats={roundStats} />
+      {!busy && snapshot.lastRoundIdx === 0 && <p className="muted">No rounds yet — set a goal and run round 1.</p>}
       <div className="layout">
         <AgentGrid agents={snapshot.agents} live={live} onSelect={setSelectedAgentId} />
         <aside>
