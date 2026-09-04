@@ -41,17 +41,19 @@ function Submission({ sub }: { sub: NonNullable<RoundDetailData['entries'][numbe
   )
 }
 
-export function RoundDetail({ runId, rounds, busy, refreshKey }: {
+export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
   runId: string
   rounds: { idx: number }[]
   busy: boolean
+  lastRoundIdx: number
   refreshKey: unknown
 }) {
-  // `rounds` is round-stats = completed rounds only; the in-flight idx is one
-  // past the max (round idxs are sequential from 1) and exists as a row the
-  // detail endpoint serves with entries [] while scoring runs.
+  // `rounds` is round-stats = scored rounds only, so the in-flight idx cannot
+  // be derived from it (a score-less failed round would shift it). lastRoundIdx
+  // is the in-flight row's idx by construction — created at startRound before
+  // any scores exist — and the detail endpoint serves it with entries [].
   const completed = rounds.map((r) => r.idx).sort((a, b) => a - b)
-  const inFlight = busy ? (completed.length > 0 ? completed[completed.length - 1]! + 1 : 1) : null
+  const inFlight = busy ? lastRoundIdx : null
   const options = inFlight !== null && !completed.includes(inFlight) ? [...completed, inFlight] : completed
 
   const [selected, setSelected] = useState<number | null>(null)

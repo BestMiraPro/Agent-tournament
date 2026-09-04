@@ -241,6 +241,7 @@ export function App() {
         runId={snapshot.runId}
         rounds={roundStats}
         busy={busy}
+        lastRoundIdx={snapshot.lastRoundIdx}
         refreshKey={snapshot.lastRoundIdx}
       />
       {selectedAgentId && (
