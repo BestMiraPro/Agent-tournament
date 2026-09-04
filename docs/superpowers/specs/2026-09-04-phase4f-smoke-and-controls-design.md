@@ -120,7 +120,9 @@ Out of scope (stay out):
 ## 5. Session-level abort (driver + runner + manager)
 
 Boundary (honest, documented in code + UI copy): aborts IN-FLIGHT AGENT SESSIONS;
-an in-flight JUDGE call finishes (seconds); queued phases still gate-skip per 4d §8.
+an in-flight JUDGE call finishes (seconds); in-flight JUDGE/REFLECT/recombine LLM
+calls finish; aborts landing after the EVOLVE gate complete the round; queued
+phases still gate-skip per 4d §8.
 
 - Runner: track `sessionId` per in-flight agent (the `LiveRun` map already holds
   `sessionId` — reuse it); new `abortAgent(agentId): Promise<void>` — abort the

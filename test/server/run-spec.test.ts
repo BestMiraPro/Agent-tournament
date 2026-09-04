@@ -50,6 +50,11 @@ describe('parseRunSpec', () => {
     expect(() => parseRunSpec({ ...base, sandbox: 'local' })).toThrow(/workspaceRoot/i)
   })
 
+  test('relative workspaceRoot is rejected, absolute passes', () => {
+    expect(() => parseRunSpec({ ...base, workspaceRoot: '../../evil' })).toThrow(/absolute path/)
+    expect(parseRunSpec({ ...base, workspaceRoot: '/tmp/w' }).workspaceRoot).toBe('/tmp/w')
+  })
+
   test('unknown sandbox is rejected', () => {
     expect(() => parseRunSpec({ ...base, sandbox: 'lxc' })).toThrow(/sandbox/i)
   })

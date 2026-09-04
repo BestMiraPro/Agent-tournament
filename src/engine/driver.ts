@@ -145,7 +145,8 @@ export class TournamentEngine {
    * items and the phase gates below fail the round. Every tracked agent session is
    * also aborted via the runner — queued work stops AND live sessions die, so only
    * an in-flight JUDGE call still finishes (no provider-level abort exists for it).
-   * Async only for the session aborts; the flag itself is set synchronously, so a
+   * In-flight JUDGE/REFLECT/recombine LLM calls finish; aborts landing after the
+   * EVOLVE gate complete the round. Async only for the session aborts; the flag itself is set synchronously, so a
    * caller that cannot await still stops all future dispatches the instant it calls.
    */
   async abortRound(runId: string): Promise<void> {
@@ -347,7 +348,7 @@ export class TournamentEngine {
           }
         }
       }, {
-        // Cooperative abort: queued agents stop; in-flight runs complete/timeout.
+        // Cooperative abort: queued agents stop; in-flight sessions are aborted via the runner (mocks run out);
         shouldStop: () => this.aborted.has(runId),
       })
 

@@ -89,7 +89,9 @@ export class OpenCodeAgentRunner implements AgentRunner {
    * the phase gates fail the round, but neither reaches a live session — this does, by
    * reusing `quiesce` per tracked agent (abort + grace-wait). No new wait primitive:
    * unknown agents cannot occur (the loop reads the map's own keys), and a run that
-   * settled already removed itself, so only our own entry is deleted.
+   * settled already removed itself, so only our own entry is deleted. Best-effort
+   * bound: a worker pulled pre-abort that registers after the snapshot is never
+   * aborted; the round still fails at the JUDGE gate.
    */
   async abortAll(): Promise<void> {
     for (const [agentId, tracked] of [...this.live]) {

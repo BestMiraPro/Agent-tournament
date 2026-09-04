@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { z } from 'zod'
 import { DEFAULT_CONFIG } from '../core/types.js'
 
@@ -93,6 +94,9 @@ export function parseRunSpec(input: unknown): RunSpec {
   }
   if (p.sandbox === 'local' && !p.workspaceRoot) {
     throw new Error('local sandbox requires workspaceRoot')
+  }
+  if (p.workspaceRoot && !path.isAbsolute(p.workspaceRoot)) {
+    throw new Error('workspaceRoot must be an absolute path')
   }
   const population = p.roster.reduce((n, r) => n + r.count, 0)
   // Same words as the engine guard (selection.ts): computed from merged spec
