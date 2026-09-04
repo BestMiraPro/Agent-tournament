@@ -79,6 +79,21 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
       }
     case 'round.complete':
       return { ...state, busy: false, lastBreach: (event.budgetBreach as string | null) ?? null }
+    /**
+     * Seed standings from the HTTP snapshot.
+     *
+     * Scores previously arrived only over the websocket, so opening an existing run —
+     * or simply reloading the page — showed a grid with no ranks and an empty
+     * leaderboard until another round happened to run, even though the server had
+     * every score. Live events still win once they arrive; this only fills the gap
+     * before the first one.
+     */
+    case 'hydrate':
+      return {
+        ...state,
+        scores: [...(event.scores as LiveState['scores'])].sort((a, b) => a.rank - b.rank),
+        roundIdx: (event.roundIdx as number) ?? state.roundIdx,
+      }
     case 'ws.status':
       return { ...state, wsStatus: event.status as LiveState['wsStatus'] }
     default:
@@ -130,6 +145,17 @@ export function useLiveRun(snapshot: RunSnapshot | null): LiveState {
     }
   }, [])
 
-  void snapshot
+  // Hydrate from the snapshot whenever it moves to a run/round the live state has
+  // not seen. Guarded on roundIdx so an in-flight round's fresher websocket scores
+  // are never overwritten by the older snapshot the arena polls alongside it.
+  const snapRunId = snapshot?.runId ?? null
+  const snapRoundIdx = snapshot?.lastRoundIdx ?? 0
+  useEffect(() => {
+    if (!snapshot) return
+    if (snapshot.scores.length === 0) return
+    dispatch({ type: 'hydrate', scores: snapshot.scores, roundIdx: snapshot.lastRoundIdx })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapRunId, snapRoundIdx])
+
   return state
 }

@@ -3,7 +3,22 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <title>Agent Tournament</title>
+    <!--
+      IBM Plex was drawn for technical interfaces, which is what this is. Loaded
+      async and non-blocking: this dashboard runs on localhost and must stay
+      usable offline, so the stylesheet's fallback stacks carry it if the fetch
+      never lands.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+    />
   </head>
   <body>
     <div id="root"></div>

@@ -47,7 +47,11 @@ export function AgentGrid({ agents, live, onSelect }: {
             >
               <div className="cell__head">
                 <span className="cell__label">{a.label}</span>
-                {rank !== undefined && <span className="cell__rank">#{rank}</span>}
+                {/* data-rank lets the leader be styled distinctly; rank is the one
+                    number on this cell a spectator is actually looking for. */}
+                {rank !== undefined && (
+                  <span className="cell__rank" data-rank={rank}>#{rank}</span>
+                )}
               </div>
               <div className="cell__model" title={a.modelId}>{a.modelId}</div>
               <div className="cell__status">{STATUS_LABEL[status] ?? status}</div>

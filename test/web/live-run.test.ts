@@ -74,3 +74,41 @@ test('ws.status updates wsStatus', () => {
   const s2 = liveReducer(s, { type: 'ws.status', status: 'connected' })
   expect(s2.wsStatus).toBe('connected')
 })
+
+describe('hydrate from snapshot', () => {
+  test('fills standings that arrived over HTTP rather than the websocket', () => {
+    // Reloading the page or opening an existing run previously showed a grid with
+    // no ranks until another round ran, even though the server had every score.
+    const s = liveReducer(initialLiveState, {
+      type: 'hydrate',
+      scores: [
+        { agentId: 'b', rank: 2, score: 40 },
+        { agentId: 'a', rank: 1, score: 90 },
+      ],
+      roundIdx: 6,
+    })
+    expect(s.scores.map((x) => x.agentId)).toEqual(['a', 'b'])
+    expect(s.roundIdx).toBe(6)
+  })
+
+  test('a later round.scored still wins over hydrated scores', () => {
+    let s = liveReducer(initialLiveState, {
+      type: 'hydrate',
+      scores: [{ agentId: 'a', rank: 1, score: 10 }],
+      roundIdx: 1,
+    })
+    s = liveReducer(s, {
+      type: 'round.scored', runId: 'r', roundIdx: 2,
+      scores: [{ agentId: 'b', rank: 1, score: 99 }],
+    })
+    expect(s.scores).toEqual([{ agentId: 'b', rank: 1, score: 99 }])
+  })
+
+  test('hydrate leaves agent live state untouched', () => {
+    let s = liveReducer(initialLiveState, {
+      type: 'agent.status', runId: 'r', agentId: 'a', status: 'running',
+    })
+    s = liveReducer(s, { type: 'hydrate', scores: [{ agentId: 'a', rank: 1, score: 5 }], roundIdx: 1 })
+    expect(s.agents['a']?.status).toBe('running')
+  })
+})
