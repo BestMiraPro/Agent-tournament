@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import { openDb } from '../db/open.js'
 import { makeRepos } from '../db/repos.js'
+import { recoverIncompleteRounds } from '../db/recover.js'
 import { TournamentEngine } from '../engine/driver.js'
 import type { EngineEvent } from '../engine/events.js'
 import { Judge } from '../judge/judge.js'
@@ -34,6 +35,8 @@ const { values } = parseArgs({
 const port = Number(values.port)
 const db = openDb(values.db!)
 const repos = makeRepos(db)
+const recovered = recoverIncompleteRounds(db)
+if (recovered > 0) console.log(`recovered ${recovered} interrupted round(s)`)
 
 const config: RunConfig = {
   ...DEFAULT_CONFIG,

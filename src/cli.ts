@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url'
 import { DEFAULT_CONFIG, type RosterEntry, type RunConfig } from './core/types.js'
 import { openDb } from './db/open.js'
 import { makeRepos } from './db/repos.js'
+import { recoverIncompleteRounds } from './db/recover.js'
 import { TournamentEngine } from './engine/driver.js'
 import { Reflector } from './evolution/reflect.js'
 import { Judge } from './judge/judge.js'
@@ -452,6 +453,8 @@ export async function runTournamentCli(
 ): Promise<CliOutput> {
   const db = openDb(opts.dbPath)
   const repos = makeRepos(db)
+  const recovered = recoverIncompleteRounds(db)
+  if (recovered > 0) console.warn(`recovered ${recovered} interrupted round(s)`)
   const mode = opts.mode ?? 'mock'
 
   // Stops whatever server buildRealDeps started/attached to. Undefined in mock mode,
