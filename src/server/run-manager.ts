@@ -47,8 +47,9 @@ export class RunManager {
     this.inFlight.set(runId, task)
   }
 
-  /** Cooperative abort: flags the in-flight round so queued agents stop and the
-   *  driver fails the round at its next gate. False when idle — sets nothing. */
+  /** Cooperative abort: flags the in-flight round so queued agents stop, tracked
+   *  sessions are aborted, and the driver fails the round at its next gate.
+   *  False when idle — sets nothing. */
   abortRound(runId: string): boolean {
     if (!this.inFlight.has(runId)) return false
     this.engine.abortRound(runId)

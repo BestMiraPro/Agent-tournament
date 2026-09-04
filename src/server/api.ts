@@ -451,8 +451,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     if (Number(idx) !== deps.repos.rounds.lastIdx(runId) || !mgr.isBusy(runId)) {
       return reply.code(409).send({ error: 'no round in flight' })
     }
-    // Honest cooperative semantics: queued agents stop; in-flight agents run to
-    // completion/timeout; completed phases keep their rows and the round ends failed.
+    // Honest cooperative semantics: queued agents stop; in-flight sessions are
+    // aborted; completed phases keep their rows and the round ends failed.
     mgr.abortRound(runId)
     return reply.code(202).send({ aborted: true })
   })
