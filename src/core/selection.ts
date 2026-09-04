@@ -47,8 +47,9 @@ export type StrategyTexts = Map<string, string> | Record<string, string>
  * diversityFloor (default off — byte-identical when false): rescues the single
  * culled agent with the highest mean pairwise strategy distance to the rest of
  * the population. `strategies` is ignored entirely when the floor is off. When
- * on, a culled agent with no strategy text scores 0 (fail-safe toward culling,
- * never rescue-by-default); pairs against agents with no text are skipped.
+ * on, a culled agent with no strategy text is skipped — never rescued
+ * (fail-safe toward culling, never rescue-by-default); pairs against agents
+ * with no text are skipped.
  */
 export function planSelection(
   ranked: readonly RankedAgent[],

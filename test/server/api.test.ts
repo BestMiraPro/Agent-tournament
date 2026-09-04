@@ -157,10 +157,6 @@ test('PATCH /api/runs/:id/config carries selection.diversityFloor into the store
   expect(res.statusCode).toBe(200)
   expect(repos.runs.get(created.runId)!.config.selection.diversityFloor).toBe(true)
 })
-  const { app, repos } = setup()
-  const created = JSON.parse(
-    (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body,
-  )
 test('PATCH legacy branch default-fills selection for pre-4d rows without a selection key', async () => {
   const { app, repos } = setup()
   const created = JSON.parse(
