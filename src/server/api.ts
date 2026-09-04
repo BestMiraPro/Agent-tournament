@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { DEFAULT_CONFIG, type AgentRow, type RunConfig } from '../core/types.js'
-import type { Repos } from '../db/repos.js'
+import type { Repos, RoundRow } from '../db/repos.js'
 import { TournamentEngine } from '../engine/driver.js'
 import type { EventSink } from '../engine/events.js'
 import { Reflector } from '../evolution/reflect.js'
@@ -52,6 +52,32 @@ function specErrorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
+/** Shared submission join: the agent-detail `history` and the round-detail
+ * `entries` serve the identical submission shape (spec §3) — one parser, one
+ * guard, so the two views cannot drift apart. */
+function submissionView(sub: NonNullable<ReturnType<Repos['submissions']['forAgent']>>) {
+  let fileManifest: unknown = null
+  if (sub.fileManifestJson) {
+    try {
+      fileManifest = JSON.parse(sub.fileManifestJson)
+    } catch {
+      // The manifest is always our own JSON; a parse failure means a
+      // half-written row — serve null rather than 500 the caller.
+    }
+  }
+  return {
+    status: sub.status,
+    errorText: sub.errorText,
+    submissionMd: sub.submissionMd,
+    fileManifest,
+    costUsd: sub.costUsd,
+    durationMs: sub.durationMs,
+    tokens: {
+      in: sub.tokensIn, out: sub.tokensOut,
+      cacheRead: sub.tokensCacheRead, cacheWrite: sub.tokensCacheWrite,
+    },
+  }
+}
 /** Spec 3.1: the drawer's single fetch — agent, lineage to the seed, genomes, score+submission history. */
 function agentDetail(repos: Repos, runId: string, agentId: string) {
   const agents = repos.agents.listAll(runId)
@@ -72,31 +98,9 @@ function agentDetail(repos: Repos, runId: string, agentId: string) {
   }))
   const history = repos.scores.forAgent(runId, agentId).map((s) => {
     const sub = repos.submissions.forAgent(s.roundId, agentId)
-    let fileManifest: unknown = null
-    if (sub?.fileManifestJson) {
-      try {
-        fileManifest = JSON.parse(sub.fileManifestJson)
-      } catch {
-        // The manifest is always our own JSON; a parse failure means a
-        // half-written row — serve null rather than 500 the drawer.
-      }
-    }
     return {
       roundIdx: s.roundIdx, score: s.score, rank: s.rank, band: s.band, rationaleMd: s.rationaleMd,
-      submission: sub
-        ? {
-            status: sub.status,
-            errorText: sub.errorText,
-            submissionMd: sub.submissionMd,
-            fileManifest,
-            costUsd: sub.costUsd,
-            durationMs: sub.durationMs,
-            tokens: {
-              in: sub.tokensIn, out: sub.tokensOut,
-              cacheRead: sub.tokensCacheRead, cacheWrite: sub.tokensCacheWrite,
-            },
-          }
-        : null,
+      submission: sub ? submissionView(sub) : null,
     }
   })
   return {
@@ -157,6 +161,41 @@ function roundStats(repos: Repos, runId: string) {
     })
   }
   return out
+}
+
+/** Spec §3: round header + entries ASC by rank (scores.forRound is rank-ordered).
+ * Entries join the agent label, the round-idx genome's model, and the
+ * submission-or-null via the shared submissionView above. */
+function roundDetail(repos: Repos, round: RoundRow) {
+  const byId = new Map(repos.agents.listAll(round.runId).map((a) => [a.id, a]))
+  const entries = repos.scores.forRound(round.id).map((s) => {
+    const sub = repos.submissions.forAgent(round.id, s.agentId)
+    return {
+      agentId: s.agentId,
+      // Agents are never deleted, so the lookup cannot miss on a real row.
+      label: byId.get(s.agentId)?.label ?? '',
+      // Every scored agent ran the round, so a genome row exists; the fallback
+      // only covers a half-written row (same spirit as the manifest guard).
+      modelId: repos.genomes.forRound(s.agentId, round.idx)?.modelId ?? '',
+      score: s.score, rank: s.rank, band: s.band, rationaleMd: s.rationaleMd,
+      submission: sub ? submissionView(sub) : null,
+    }
+  })
+  return {
+    idx: round.idx,
+    goalMd: round.goalMd,
+    criteriaMd: round.criteriaMd,
+    criteriaSource: round.criteriaSource === 'user' ? 'user' : 'generated',
+    metaDigest: round.metaDigest,
+    costUsd: round.costUsd,
+    status: round.status,
+    // WHY no judge model here (spec §1 honesty rule): PATCH can change the
+    // judge model mid-run and rounds don't store it — reporting the CURRENT
+    // config's model per round would mislead. judgeMode is on the row; the
+    // model column is a future migration.
+    judgeMode: round.judgeMode,
+    entries,
+  }
 }
 
 export function buildApi(deps: ApiDeps): FastifyInstance {
@@ -410,6 +449,18 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const { runId } = req.params as { runId: string }
     if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
     return roundStats(deps.repos, runId)
+  })
+
+  app.get('/api/runs/:runId/rounds/:idx', async (req, reply) => {
+    const { runId, idx } = req.params as { runId: string; idx: string }
+    if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
+    // The list is small; no dedicated repo getter for a single (runId, idx) —
+    // and scoping the lookup to this run's rows keeps a foreign run's idx a 404.
+    const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
+    if (!round) return reply.code(404).send({ error: 'no such round' })
+    // Unscored rounds (row exists, no scores yet) fall through with entries []
+    // — the UI shows them as in-flight rather than missing.
+    return roundDetail(deps.repos, round)
   })
 
   app.post('/api/runs/:runId/rounds/:idx/criteria', async (req, reply) => {
