@@ -89,6 +89,18 @@ describe('GET /api/models', () => {
     expect(start).toHaveBeenCalledTimes(2)
   })
 
+  test('discovery failures are never cached (two failing calls start twice)', async () => {
+    const start = vi.fn(async () => ({
+      baseUrl: 'http://127.0.0.1:9',
+      client: { providers: async () => { throw new Error('providers blew up') } },
+      stop: async () => {},
+    }) as never)
+    const { app } = setup(start)
+    expect((await app.inject({ method: 'GET', url: '/api/models' })).statusCode).toBe(502)
+    expect((await app.inject({ method: 'GET', url: '/api/models' })).statusCode).toBe(502)
+    expect(start).toHaveBeenCalledTimes(2)
+  })
+
   test('stop runs after a successful discovery (finally)', async () => {
     const stop = vi.fn(async () => {})
     const { app } = setup(async () => ({

@@ -199,8 +199,7 @@ export function App() {
               // RoundControls entry always wins, and later rounds fall back to
               // null/auto — the RoundControls path below is untouched.
               const first = pendingCriteria?.trim() ? pendingCriteria : null
-              setPendingCriteria(null)
-              void startRound(snapshot.runId, goalMd, criteriaMd ?? first).catch((e) => setError(serverError(e)))
+              void startRound(snapshot.runId, goalMd, criteriaMd ?? first).then(() => setPendingCriteria(null)).catch((e) => setError(serverError(e)))
             }}
             criteria={lastRound?.criteriaMd ?? null}
             criteriaSource={lastRound?.criteriaSource ?? null}
