@@ -4,6 +4,7 @@ import type { Genome, RunConfig } from '../core/types.js'
 import { parseWithRepair } from '../judge/parse.js'
 import type { Provider } from '../runtime/provider.js'
 import { buildReflectPrompt, type ReflectInput } from './prompts.js'
+import { recombineStrategies } from './recombine.js'
 import { REFLECT_JSON_SCHEMA } from './schemas.js'
 
 const ReflectSchema = z.object({
@@ -79,5 +80,21 @@ export class Reflector {
       modelId,
       temperature,
     }
+  }
+
+  /**
+   * Merges two parent strategies into one child text. WHY a passthrough on the
+   * Reflector rather than provider-threading through breed: the driver holds a
+   * Reflector but no provider, and recombination is a mutation-shaped task, so
+   * the mutation model (this.cfg.modelId, i.e. config.reflect.modelId) is
+   * structurally the right one — breed receives a bound closure and never sees
+   * models or providers. Throws on failure; breed falls back to split-merge.
+   */
+  async recombine(
+    strategyA: string,
+    strategyB: string,
+    goalMd: string,
+  ): Promise<{ strategyMd: string; notesMd: string }> {
+    return recombineStrategies(this.provider, this.cfg.modelId, strategyA, strategyB, goalMd)
   }
 }

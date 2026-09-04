@@ -9,6 +9,33 @@ export interface BreedInput {
   plan: SelectionPlan
   /** Reflection output per surviving agent. Elite agents are absent by design. */
   mutated: Map<string, Genome>
+  /**
+   * Narrow LLM seam for crossover recombination: given both parents' strategies,
+   * returns the merged child text. The caller binds goal/model/provider in the
+   * closure, so breed threads no config and no provider. Absent (tests, legacy
+   * callers) every crossover degrades to the deterministic split-merge below.
+   */
+  recombine?: RecombineFn
+}
+
+/**
+ * One crossover child per call — so pct 0 (no crossover slots in the plan)
+ * costs zero LLM calls by construction, and the default stays free.
+ */
+export type RecombineFn = (
+  strategyA: string,
+  strategyB: string,
+) => Promise<{ strategyMd: string; notesMd: string }>
+
+/** Deterministic 4d split-merge: first ceil-half of A's lines + last floor-half of B's. */
+function splitMerge(strategyA: string, strategyB: string): string {
+  const linesA = strategyA.split('\n')
+  const linesB = strategyB.split('\n')
+  // Odd-line rule: the extra line goes to A, the primary parent.
+  return [
+    ...linesA.slice(0, Math.ceil(linesA.length / 2)),
+    ...linesB.slice(linesB.length - Math.floor(linesB.length / 2)),
+  ].join('\n')
 }
 
 /**
@@ -17,7 +44,7 @@ export interface BreedInput {
  * performers, so population size is unchanged.
  */
 export async function breed(input: BreedInput): Promise<void> {
-  const { repos, runId, nextRoundIdx, plan, mutated } = input
+  const { repos, runId, nextRoundIdx, plan, mutated, recombine } = input
   const prevIdx = nextRoundIdx - 1
 
   for (const agentId of plan.elite) {
@@ -79,8 +106,6 @@ export async function breed(input: BreedInput): Promise<void> {
   }
 
   if (plan.crossovers.length > 0) {
-    // ponytail: naive line-split merge — deterministic and free; upgrade path is
-    // LLM-recombine if crossover proves load-bearing.
     const labelOf = new Map(repos.agents.listAll(runId).map((a) => [a.id, a.label]))
     for (const x of plan.crossovers) {
       const genomeA = repos.genomes.forRound(x.parentAId, prevIdx)
@@ -93,18 +118,35 @@ export async function breed(input: BreedInput): Promise<void> {
         parentAgentId: x.parentAId,
         bornRound: nextRoundIdx,
       })
-      const linesA = genomeA.strategyMd.split('\n')
-      const linesB = genomeB.strategyMd.split('\n')
-      // Odd-line rule: the extra line goes to A, the primary parent.
-      const strategyMd = [
-        ...linesA.slice(0, Math.ceil(linesA.length / 2)),
-        ...linesB.slice(linesB.length - Math.floor(linesB.length / 2)),
-      ].join('\n')
+      const labelA = labelOf.get(x.parentAId) ?? x.parentAId
+      const labelB = labelOf.get(x.parentBId) ?? x.parentBId
+      let strategyMd: string | null = null
+      let notesMd: string | null = null
+      if (recombine) {
+        try {
+          const merged = await recombine(genomeA.strategyMd, genomeB.strategyMd)
+          if (merged.strategyMd.trim().length === 0) throw new Error('recombine returned an empty strategy')
+          strategyMd = merged.strategyMd.trim()
+          // Provenance is about lineage, not method: the exact 4d prefix on
+          // both paths, followed by the recombined notes verbatim.
+          notesMd = `Crossover of ${labelA} × ${labelB}.\n` + merged.notesMd
+        } catch {
+          // Fall through to split-merge below. A crossover slot must NEVER fail
+          // a round — same philosophy as reflection carry-forward in reflect.ts.
+        }
+      }
+      if (strategyMd === null || notesMd === null) {
+        strategyMd = splitMerge(genomeA.strategyMd, genomeB.strategyMd)
+        // The parenthetical marks the method, not the lineage: only a seam that
+        // was present and failed earns it, so the no-seam path stays byte-identical to 4d.
+        const failed = recombine !== undefined ? ' (recombine failed, split merge)' : ''
+        notesMd = `Crossover of ${labelA} × ${labelB}${failed}.\n` + genomeA.notesMd
+      }
       repos.genomes.create({
         agentId: child.id,
         roundIdx: nextRoundIdx,
         strategyMd,
-        notesMd: `Crossover of ${labelOf.get(x.parentAId) ?? x.parentAId} × ${labelOf.get(x.parentBId) ?? x.parentBId}.\n` + genomeA.notesMd,
+        notesMd,
         modelId: genomeA.modelId,
         temperature: genomeA.temperature,
         parentGenomeId: genomeA.id,

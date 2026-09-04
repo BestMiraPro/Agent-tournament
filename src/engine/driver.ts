@@ -584,7 +584,14 @@ export class TournamentEngine {
         for (const r of reflected) if (r.ok) mutated.set(r.value[0], r.value[1])
       }
 
-      await breed({ repos, runId, nextRoundIdx: roundIdx + 1, plan, mutated })
+      // The recombine seam binds the round goal to the Reflector's
+      // mutation-shaped call, so the model is the reflector's own
+      // (config.reflect.modelId) by construction — the driver threads no model
+      // id and no provider of its own, only this closure.
+      await breed({
+        repos, runId, nextRoundIdx: roundIdx + 1, plan, mutated,
+        recombine: (a, b) => this.d.reflector.recombine(a, b, input.goalMd),
+      })
 
       repos.rounds.markEnded(round.id, repos.submissions.totalCost(round.id))
       repos.rounds.setStatus(round.id, 'complete')
