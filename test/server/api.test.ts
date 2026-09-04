@@ -145,6 +145,22 @@ test('PATCH /api/runs/:id/config carries selection.crossoverPct into the stored 
   expect(bad.statusCode).toBe(400)
 })
 
+test('PATCH /api/runs/:id/config carries selection.diversityFloor into the stored config', async () => {
+  const { app, repos } = setup()
+  const created = JSON.parse(
+    (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body,
+  )
+  expect(repos.runs.get(created.runId)!.config.selection.diversityFloor).toBe(false)
+  const res = await app.inject({
+    method: 'PATCH', url: `/api/runs/${created.runId}/config`, payload: { selection: { diversityFloor: true } },
+  })
+  expect(res.statusCode).toBe(200)
+  expect(repos.runs.get(created.runId)!.config.selection.diversityFloor).toBe(true)
+})
+  const { app, repos } = setup()
+  const created = JSON.parse(
+    (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body,
+  )
 test('PATCH legacy branch default-fills selection for pre-4d rows without a selection key', async () => {
   const { app, repos } = setup()
   const created = JSON.parse(

@@ -105,6 +105,7 @@ export interface RunConfig {
     topPct: number
     bottomPct: number
     crossoverPct: number
+    diversityFloor: boolean
   }
   /**
    * Guardrail against the tournament's own selection pressure: agents are selected on
@@ -175,7 +176,7 @@ export const DEFAULT_CONFIG: RunConfig = {
     strategyCharCap: 2000,
     allowModelMutation: true,
   },
-  selection: { eliteCount: 1, topPct: 0.2, bottomPct: 0.2, crossoverPct: 0 },
+  selection: { eliteCount: 1, topPct: 0.2, bottomPct: 0.2, crossoverPct: 0, diversityFloor: false },
   // Deliberately conservative: these are what stop an unattended run from quietly
   // burning a lot before anyone notices, not a tuned ceiling for any particular goal.
   // Per-agent 200k is comfortably above a normal agentic session's token count but

@@ -37,6 +37,7 @@ const schema = z.object({
       eliteCount: z.number().int().min(0),
       topPct: z.number().finite().min(0).max(1),
       bottomPct: z.number().finite().min(0).max(1),
+      diversityFloor: z.boolean(),
     })
     .partial()
     .optional(),
@@ -64,7 +65,7 @@ export interface RunSpec {
   judge: { modelId: string; mode: 'auto' | 'single_call' | 'batched_finals' }
   reflect: { modelId: string; topK: number }
   budget: { maxRunTokens: number; maxRoundTokens: number; maxAgentTokens: number }
-  selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
+  selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number; diversityFloor?: boolean }
   concurrency: number
   pricing: Record<string, { inPerM: number; outPerM: number; cacheReadPerM: number; cacheWritePerM: number }>
   seedDir: string | null
@@ -126,6 +127,7 @@ export function parseRunSpec(input: unknown): RunSpec {
       topPct: p.selection?.topPct ?? DEFAULT_CONFIG.selection.topPct,
       bottomPct: p.selection?.bottomPct ?? DEFAULT_CONFIG.selection.bottomPct,
       crossoverPct: p.selection?.crossoverPct ?? DEFAULT_CONFIG.selection.crossoverPct,
+      diversityFloor: p.selection?.diversityFloor ?? DEFAULT_CONFIG.selection.diversityFloor,
     },
     concurrency: p.concurrency ?? DEFAULT_CONFIG.concurrency,
     pricing: p.pricing ?? {},

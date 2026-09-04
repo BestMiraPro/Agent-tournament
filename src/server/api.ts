@@ -501,6 +501,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         eliteCount: z.number().int().min(0),
         topPct: z.number().finite().min(0).max(1),
         bottomPct: z.number().finite().min(0).max(1),
+        diversityFloor: z.boolean(),
       }).partial().optional(),
       concurrency: z.number().int().min(1).max(64).optional(),
       pricing: z.record(z.string().min(1), z.object({ inPerM: z.number().nonnegative(), outPerM: z.number().nonnegative(), cacheReadPerM: z.number().nonnegative(), cacheWritePerM: z.number().nonnegative() })).optional(),

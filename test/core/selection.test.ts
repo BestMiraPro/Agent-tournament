@@ -9,7 +9,7 @@ const ranked = (n: number): RankedAgent[] =>
     score: 100 - i,
   }))
 
-const cfg = { eliteCount: 1, topPct: 0.2, bottomPct: 0.2, crossoverPct: 0 }
+const cfg = { eliteCount: 1, topPct: 0.2, bottomPct: 0.2, crossoverPct: 0, diversityFloor: false }
 
 describe('planSelection', () => {
   test('population size is invariant', () => {
@@ -18,7 +18,7 @@ describe('planSelection', () => {
   })
 
   test('clone count always equals cull count, even at asymmetric ratios', () => {
-    const asym = { eliteCount: 1, topPct: 0.3, bottomPct: 0.1, crossoverPct: 0 }
+    const asym = { ...cfg, topPct: 0.3, bottomPct: 0.1 }
     const p = planSelection(ranked(20), asym)
     expect(p.clones.length).toBe(p.culled.length)
     expect(p.elite.length + p.survivors.length + p.clones.length).toBe(20)
@@ -84,7 +84,7 @@ describe('planSelection', () => {
 
   test('returns an empty plan for an empty population', () => {
     const p = planSelection([], cfg)
-    expect(p).toEqual({ elite: [], survivors: [], culled: [], clones: [], crossovers: [] })
+    expect(p).toEqual({ elite: [], survivors: [], culled: [], clones: [], crossovers: [], rescued: [] })
   })
 
   test('throws when eliteCount is negative', () => {
@@ -96,6 +96,74 @@ describe('planSelection', () => {
   })
 })
 
+describe('planSelection diversityFloor', () => {
+  // n=10, elite 1, top band 2 (a1-a2), 3 culled (a8-a10), survivors a2-a7.
+  const floorCfg = { eliteCount: 1, topPct: 0.2, bottomPct: 0.3, crossoverPct: 0, diversityFloor: true }
+  const offCfg = { ...floorCfg, diversityFloor: false }
+  const shared = 'alpha beta gamma delta'
+  const odd = 'zebra quasar xenon fjord'
+  const texts = (overrides: Record<string, string> = {}): Map<string, string> => {
+    const m = new Map<string, string>()
+    for (let i = 1; i <= 10; i++) m.set(`a${i}`, shared)
+    for (const [id, text] of Object.entries(overrides)) m.set(id, text)
+    return m
+  }
+
+  test('off ignores strategies entirely: rescued is empty, bands byte-identical', () => {
+    const plain = planSelection(ranked(10), offCfg)
+    const withTexts = planSelection(ranked(10), offCfg, texts({ a10: odd }))
+    expect(withTexts).toEqual(plain)
+    expect(plain.rescued).toEqual([])
+    expect(plain.culled).toEqual(['a8', 'a9', 'a10'])
+  })
+
+  test('on rescues the most-distinct culled agent and bumps the lowest survivor', () => {
+    const p = planSelection(ranked(10), floorCfg, texts({ a10: odd }))
+    expect(p.rescued).toEqual(['a10'])
+    expect(p.survivors).toContain('a10')
+    expect(p.survivors).not.toContain('a7')
+    expect(p.culled).toContain('a7')
+    expect(p.culled).not.toContain('a10')
+    // Totals unchanged: population invariant holds.
+    expect(p.elite.length + p.survivors.length + p.clones.length + p.crossovers.length).toBe(10)
+    expect(p.clones.length + p.crossovers.length).toBe(p.culled.length)
+  })
+
+  test('clones and crossovers derive from the final culled set after the swap', () => {
+    const p = planSelection(ranked(10), { ...floorCfg, crossoverPct: 0.5 }, texts({ a10: odd }))
+    expect(p.rescued).toEqual(['a10'])
+    // Final culled is [a8, a9, a7]: first slot crosses, rest clone — the bumped
+    // lowest-survivor is replaced, the rescued agent is not.
+    expect(p.crossovers.map((x) => x.replacesAgentId)).toEqual(['a8'])
+    expect(p.clones.map((c) => c.replacesAgentId).sort()).toEqual(['a7', 'a9'])
+  })
+
+  test('all-identical strategies tie → deterministic first-max rescue', () => {
+    const p = planSelection(ranked(10), floorCfg, texts())
+    expect(p.rescued).toEqual(['a8'])
+    expect(p.culled).toContain('a7')
+  })
+
+  test('a most-distinct elite is kept: rescue happens among the culled only', () => {
+    const p = planSelection(ranked(10), floorCfg, texts({ a1: odd }))
+    expect(p.elite).toEqual(['a1'])
+    expect(p.rescued).toEqual(['a8'])
+    expect(p.rescued).not.toContain('a1')
+  })
+
+  test('missing strategy text scores 0: no evidence means no rescue', () => {
+    // Empty record: every culled agent is textless → plan equals the floor-off bands.
+    const p = planSelection(ranked(10), floorCfg, {})
+    expect(p.rescued).toEqual([])
+    expect(p.culled).toEqual(['a8', 'a9', 'a10'])
+    // Partial: a9 is distinct with text, a10 has no text at all → a9 wins on
+    // evidence; the textless agent scores 0 and is never rescued by default.
+    const partial = texts({ a9: odd })
+    partial.delete('a10')
+    const q = planSelection(ranked(10), floorCfg, partial)
+    expect(q.rescued).toEqual(['a9'])
+  })
+})
 describe('planSelection crossover', () => {
   test('pct 0 yields no crossovers and clones identical to today', () => {
     const p = planSelection(ranked(20), cfg)
@@ -127,7 +195,7 @@ describe('planSelection crossover', () => {
   })
 
   test('a single-entry top band forces all clones', () => {
-    const p = planSelection(ranked(4), { eliteCount: 1, topPct: 0.2, bottomPct: 0.5, crossoverPct: 1 })
+    const p = planSelection(ranked(4), { eliteCount: 1, topPct: 0.2, bottomPct: 0.5, crossoverPct: 1, diversityFloor: false })
     expect(p.culled).toHaveLength(2)
     expect(p.crossovers).toEqual([])
     expect(p.clones).toHaveLength(2)

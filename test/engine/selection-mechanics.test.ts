@@ -84,7 +84,7 @@ describe('selection mechanics through the driver', () => {
     // (L >= 2 parents) and a non-empty cull set: topPct 0.5 -> top band of 2,
     // bottomPct 0.5 -> 2 culled, crossoverPct 1 -> both slots crossover.
     const ctx = makeMockEngine({ seed: 42, populationSize: 4 })
-    ctx.config.selection = { eliteCount: 1, topPct: 0.5, bottomPct: 0.5, crossoverPct: 1 }
+    ctx.config.selection = { eliteCount: 1, topPct: 0.5, bottomPct: 0.5, crossoverPct: 1, diversityFloor: false }
     const run = ctx.engine.createRun('crossover', GOAL)
     await ctx.engine.runRound(run.id, { goalMd: GOAL, criteriaMd: null })
     const rows = ctx.db

@@ -24,7 +24,7 @@ const setup = (n: number) => {
 describe('breed', () => {
   test('preserves the elite strategy verbatim', async () => {
     const { repos, run, agents } = setup(5)
-    const plan = { elite: [agents[0]!.id], survivors: [agents[1]!.id, agents[2]!.id, agents[3]!.id], culled: [agents[4]!.id], clones: [{ parentAgentId: agents[0]!.id, replacesAgentId: agents[4]!.id }], crossovers: [] }
+    const plan = { elite: [agents[0]!.id], survivors: [agents[1]!.id, agents[2]!.id, agents[3]!.id], culled: [agents[4]!.id], clones: [{ parentAgentId: agents[0]!.id, replacesAgentId: agents[4]!.id }], crossovers: [], rescued: [] as string[] }
     await breed({
       repos, runId: run.id, nextRoundIdx: 2, plan,
       mutated: new Map([
@@ -39,7 +39,7 @@ describe('breed', () => {
 
   test('applies mutated genomes to survivors', async () => {
     const { repos, run, agents } = setup(5)
-    const plan = { elite: [agents[0]!.id], survivors: [agents[1]!.id], culled: [], clones: [], crossovers: [] }
+    const plan = { elite: [agents[0]!.id], survivors: [agents[1]!.id], culled: [], clones: [], crossovers: [], rescued: [] as string[] }
     await breed({
       repos, runId: run.id, nextRoundIdx: 2, plan,
       mutated: new Map([[agents[1]!.id, { strategyMd: 'evolved', notesMd: 'n', modelId: 'm', temperature: 0.8 }]]),
@@ -51,7 +51,7 @@ describe('breed', () => {
 
   test('culls agents and creates replacements, keeping population constant', async () => {
     const { repos, run, agents } = setup(5)
-    const plan = { elite: [agents[0]!.id], survivors: [agents[1]!.id, agents[2]!.id, agents[3]!.id], culled: [agents[4]!.id], clones: [{ parentAgentId: agents[0]!.id, replacesAgentId: agents[4]!.id }], crossovers: [] }
+    const plan = { elite: [agents[0]!.id], survivors: [agents[1]!.id, agents[2]!.id, agents[3]!.id], culled: [agents[4]!.id], clones: [{ parentAgentId: agents[0]!.id, replacesAgentId: agents[4]!.id }], crossovers: [], rescued: [] as string[] }
     await breed({
       repos, runId: run.id, nextRoundIdx: 2, plan,
       mutated: new Map(agents.slice(1, 4).map((a) => [a.id, { strategyMd: 'm', notesMd: '', modelId: 'm', temperature: 0.7 }])),
@@ -62,7 +62,7 @@ describe('breed', () => {
 
   test('clones inherit the parent strategy and record parentage', async () => {
     const { repos, run, agents } = setup(5)
-    const plan = { elite: [agents[0]!.id], survivors: [agents[1]!.id, agents[2]!.id, agents[3]!.id], culled: [agents[4]!.id], clones: [{ parentAgentId: agents[0]!.id, replacesAgentId: agents[4]!.id }], crossovers: [] }
+    const plan = { elite: [agents[0]!.id], survivors: [agents[1]!.id, agents[2]!.id, agents[3]!.id], culled: [agents[4]!.id], clones: [{ parentAgentId: agents[0]!.id, replacesAgentId: agents[4]!.id }], crossovers: [], rescued: [] as string[] }
     await breed({
       repos, runId: run.id, nextRoundIdx: 2, plan,
       mutated: new Map(agents.slice(1, 4).map((a) => [a.id, { strategyMd: 'm', notesMd: '', modelId: 'm', temperature: 0.7 }])),
@@ -108,6 +108,7 @@ describe('breed crossover', () => {
     culled: victim2 ? [ids.victim, victim2] : [ids.victim],
     clones,
     crossovers: [{ parentAId: ids.A, parentBId: ids.B, replacesAgentId: ids.victim }],
+    rescued: [] as string[],
   })
 
   test('merges an even line count: first half of A plus last half of B', async () => {

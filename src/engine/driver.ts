@@ -494,6 +494,9 @@ export class TournamentEngine {
       const plan = planSelection(
         judged.scores.map((s) => ({ agentId: s.agentId, rank: s.rank, score: s.score })),
         config.selection,
+        // Strategies thread through the prepared genomes (same round, same agents)
+        // so the diversityFloor rescue can score culled agents — one arg, no shape change.
+        new Map(prepared.map((p) => [p.agent.id, p.genome.strategyMd])),
       )
       // Everything non-elite and non-culled used to collapse to 'middle', so the
       // 'top' band defined by the schema and the spec was never assigned.
