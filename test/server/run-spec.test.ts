@@ -72,4 +72,44 @@ describe('parseRunSpec', () => {
     expect(() => parseRunSpec({ ...base, selection: { crossoverPct: 1.5 } })).toThrow()
     expect(() => parseRunSpec({ ...base, selection: { crossoverPct: -0.1 } })).toThrow()
   })
+
+  test('rejects a negative selection.eliteCount', () => {
+    expect(() => parseRunSpec({ ...base, selection: { eliteCount: -1 } })).toThrow()
+  })
+
+  test('rejects out-of-range selection.topPct', () => {
+    expect(() => parseRunSpec({ ...base, selection: { topPct: 1.5 } })).toThrow()
+    expect(() => parseRunSpec({ ...base, selection: { topPct: NaN } })).toThrow()
+  })
+
+  test('accepts selection.bottomPct of 0 (no-cull A/B)', () => {
+    expect(parseRunSpec({ ...base, selection: { bottomPct: 0 } }).selection.bottomPct).toBe(0)
+  })
+
+  test('rejects concurrency outside 1..64', () => {
+    expect(() => parseRunSpec({ ...base, concurrency: 0 })).toThrow()
+    expect(() => parseRunSpec({ ...base, concurrency: 65 })).toThrow()
+  })
+
+  test('rejects negative pricing rates', () => {
+    expect(() =>
+      parseRunSpec({ ...base, pricing: { 'a/m': { inPerM: -1, outPerM: 0 } } }),
+    ).toThrow()
+  })
+
+  test('eliteCount beyond the top band throws', () => {
+    expect(() =>
+      parseRunSpec({ ...base, selection: { eliteCount: 5, topPct: 0.2 } }),
+    ).toThrow(/top band size/)
+  })
+
+  test('eliteCount within the top band passes', () => {
+    const s = parseRunSpec({ ...base, selection: { eliteCount: 1, topPct: 0.2 } })
+    expect(s.selection.eliteCount).toBe(1)
+  })
+
+  test('criteria round-trips through the return', () => {
+    expect(parseRunSpec({ ...base, criteria: '## C' }).criteria).toBe('## C')
+    expect(parseRunSpec(base).criteria).toBeNull()
+  })
 })

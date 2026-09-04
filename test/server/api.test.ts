@@ -3,6 +3,15 @@ import { buildApi } from '../../src/server/api.js'
 import { openDb } from '../../src/db/open.js'
 import { makeRepos } from '../../src/db/repos.js'
 import { DEFAULT_CONFIG } from '../../src/core/types.js'
+import { parseRunSpec } from '../../src/server/run-spec.js'
+import { runConfigFor } from '../../src/server/compose-run.js'
+import { MockProvider } from '../../src/runtime/mock-provider.js'
+import { MockSandbox } from '../../src/runtime/mock-sandbox.js'
+import { MockAgentRunner } from '../../src/runtime/agent-runner.js'
+import { TournamentEngine } from '../../src/engine/driver.js'
+import { Judge } from '../../src/judge/judge.js'
+import { Reflector } from '../../src/evolution/reflect.js'
+import { RunRegistry } from '../../src/server/runs.js'
 
 const setup = () => {
   const db = openDb(':memory:')
@@ -149,4 +158,126 @@ test('PATCH legacy branch default-fills selection for pre-4d rows without a sele
   })
   expect(res.statusCode).toBe(200)
   expect(repos.runs.get(created.runId)!.config.selection.crossoverPct).toBe(0)
+})
+
+test('PATCH legacy branch carries the new setup knobs into the stored config', async () => {
+  const { app, repos } = setup()
+  const created = JSON.parse(
+    (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body,
+  )
+  const res = await app.inject({
+    method: 'PATCH', url: `/api/runs/${created.runId}/config`,
+    payload: {
+      selection: { eliteCount: 2, topPct: 0.3, bottomPct: 0.1 },
+      concurrency: 4,
+      pricing: { 'm/m': { inPerM: 1, outPerM: 2 } },
+    },
+  })
+  expect(res.statusCode).toBe(200)
+  const cfg = repos.runs.get(created.runId)!.config
+  expect(cfg.selection.eliteCount).toBe(2)
+  expect(cfg.selection.topPct).toBe(0.3)
+  expect(cfg.selection.bottomPct).toBe(0.1)
+  expect(cfg.concurrency).toBe(4)
+  expect(cfg.pricing['m/m']).toEqual({ inPerM: 1, outPerM: 2 })
+})
+
+// Composed-run setup: the record branch re-validates via merge→parseRunSpec,
+// so the cross-field rule arrives free. Roster sums to 20 = DEFAULT populationSize.
+const setupComposed = () => {
+  const db = openDb(':memory:')
+  const repos = makeRepos(db)
+  const registry = new RunRegistry()
+  const app = buildApi({
+    repos,
+    registry,
+    manager: {
+      isBusy: () => false,
+      lastError: () => null,
+      startRound: () => {},
+    } as never,
+    createRun: (name: string) => {
+      const r = repos.runs.create({ name, config: DEFAULT_CONFIG, seedDir: null })
+      return r.id
+    },
+  })
+  return { app, repos, registry }
+}
+
+// Composed-run setup with a REAL engine: the record branch re-validates via
+// merge→parseRunSpec (cross-field free) and reconfigures the engine (pricing
+// preflight free) — a fake reconfigure would hide both. Roster sums to 20 =
+// DEFAULT populationSize.
+const seedRecord = (repos: ReturnType<typeof makeRepos>, registry: RunRegistry) => {
+  const spec = parseRunSpec({
+    name: 'composed', goal: 'g', sandbox: 'mock',
+    roster: [{ modelId: 'm/m', count: 20, temperature: 0.7 }],
+  })
+  const config = runConfigFor(spec)
+  const provider = new MockProvider(42)
+  const sandbox = new MockSandbox()
+  const engine = new TournamentEngine({
+    repos, config, sandbox,
+    runner: new MockAgentRunner(sandbox, 42),
+    judge: new Judge(provider, config.judge, 42),
+    reflector: new Reflector(provider, config.reflect, config.roster.map((r) => r.modelId)),
+    seedStrategy: () => 's',
+    onEvent: () => {},
+  })
+  const runId = engine.createRun('composed', 'g').id
+  registry.set({
+    runId, spec, engine,
+    manager: { isBusy: () => false } as never,
+    composed: { config, provider, warnings: [], cleanup: async () => {} } as never,
+    bridges: [], warnings: [], capacity: null,
+  })
+  return runId
+}
+
+test('PATCH record branch stores selection/concurrency via reconfigure', async () => {
+  const { app, repos, registry } = setupComposed()
+  const runId = seedRecord(repos, registry)
+  const res = await app.inject({
+    method: 'PATCH', url: `/api/runs/${runId}/config`,
+    payload: { selection: { eliteCount: 2, topPct: 0.3 }, concurrency: 4 },
+  })
+  expect(res.statusCode).toBe(200)
+  const cfg = repos.runs.get(runId)!.config
+  expect(cfg.selection.eliteCount).toBe(2)
+  expect(cfg.selection.topPct).toBe(0.3)
+  expect(cfg.concurrency).toBe(4)
+})
+
+test('PATCH record branch surfaces the engine pricing preflight (cache rates required)', async () => {
+  const { app, repos, registry } = setupComposed()
+  const runId = seedRecord(repos, registry)
+  // Light 2-key shape passes the API schema; the engine fail-closed preflight
+  // (assertPrice) refuses it — deep validation stays at the engine per spec §4.2.
+  const res = await app.inject({
+    method: 'PATCH', url: `/api/runs/${runId}/config`,
+    payload: { pricing: { 'm/m': { inPerM: 1, outPerM: 2 } } },
+  })
+  expect(res.statusCode).toBe(400)
+  expect(JSON.parse(res.body).error).toMatch(/cacheReadPerM/)
+})
+
+test('PATCH record branch rejects an eliteCount violating the cross-field rule', async () => {
+  const { app, repos, registry } = setupComposed()
+  const runId = seedRecord(repos, registry)
+  // pop 20, topPct 0.2 → top band 4; elite 5 exceeds it.
+  const res = await app.inject({
+    method: 'PATCH', url: `/api/runs/${runId}/config`,
+    payload: { selection: { eliteCount: 5, topPct: 0.2 } },
+  })
+  expect(res.statusCode).toBe(400)
+  expect(JSON.parse(res.body).error).toMatch(/top band size/)
+})
+
+test('PATCH record branch rejects concurrency 65', async () => {
+  const { app, repos, registry } = setupComposed()
+  const runId = seedRecord(repos, registry)
+  const res = await app.inject({
+    method: 'PATCH', url: `/api/runs/${runId}/config`, payload: { concurrency: 65 },
+  })
+  expect(res.statusCode).toBe(400)
 })

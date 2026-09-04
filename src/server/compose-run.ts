@@ -84,6 +84,12 @@ export function runConfigFor(spec: RunSpec): RunConfig {
     reflect: { ...DEFAULT_CONFIG.reflect, modelId: spec.reflect.modelId, topK: spec.reflect.topK },
     selection: { ...DEFAULT_CONFIG.selection, ...spec.selection },
     budget: { ...DEFAULT_CONFIG.budget, ...spec.budget },
+    concurrency: spec.concurrency ?? DEFAULT_CONFIG.concurrency,
+    // Light API shape (in/out only — spec §4.2): the engine preflight
+    // (BudgetTracker assertPrice) deep-validates at createRun/reconfigure and
+    // refuses cache-less entries, so the cast carries the type without
+    // duplicating the check or inventing cache rates (fail-closed by design).
+    pricing: { ...DEFAULT_CONFIG.pricing, ...spec.pricing } as RunConfig['pricing'],
     seedDir: spec.seedDir,
   }
 }

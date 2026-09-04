@@ -13,6 +13,8 @@ import { strategyDiversity } from '../core/analytics.js'
 import { parseRunSpec, type RunSpec } from './run-spec.js'
 import { buildRunSnapshot } from './state.js'
 import { RunManager } from './run-manager.js'
+import { startServer, type ServerHandle } from '../runtime/opencode/server.js'
+import { discoverModels } from '../runtime/opencode/discovery.js'
 
 export interface ApiDeps {
   repos: Repos
@@ -23,6 +25,17 @@ export interface ApiDeps {
   registry?: RunRegistry
   emit?: EventSink
   sweepWith?: (config: RunConfig, runId: string, onWarning: (message: string) => void) => Promise<string[]>
+  startModelsServer?: () => Promise<ServerHandle>
+}
+
+// WHY module-local 60s success-only cache: each miss spawns a server process,
+// so an uncached setup screen would fork one per keystroke; a minute-stale
+// model list is harmless (free text always works). Failures never cache.
+let modelsCache: { at: number; models: string[] } | null = null
+
+/** Test seam reset: each buildApi otherwise shares the process cache. */
+export function _resetModelsCacheForTests(): void {
+  modelsCache = null
 }
 
 /** Compose/create failures are client or contention problems, never 500s. */
@@ -236,6 +249,30 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
   app.get('/api/runs', async () => ({
     runs: deps.repos.runs.list?.() ?? [],
   }))
+
+  app.get('/api/models', async (_req, reply) => {
+    if (modelsCache && Date.now() - modelsCache.at < 60_000) {
+      return { models: modelsCache.models }
+    }
+    const start = deps.startModelsServer ?? startServer
+    let handle: ServerHandle
+    try {
+      handle = await start()
+    } catch (e) {
+      return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
+    }
+    try {
+      // Discovery order untouched — the client does presentation.
+      const models = await discoverModels(handle.client)
+      modelsCache = { at: Date.now(), models }
+      return { models }
+    } catch (e) {
+      return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
+    } finally {
+      // A stop failure must not mask a successful discovery — hence ignore.
+      await handle.stop().catch(() => {})
+    }
+  })
 
   app.get('/api/runs/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
@@ -461,7 +498,12 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       }).partial().optional(),
       selection: z.object({
         crossoverPct: z.number().min(0).max(1),
+        eliteCount: z.number().int().min(0),
+        topPct: z.number().finite().min(0).max(1),
+        bottomPct: z.number().finite().min(0).max(1),
       }).partial().optional(),
+      concurrency: z.number().int().min(1).max(64).optional(),
+      pricing: z.record(z.string().min(1), z.object({ inPerM: z.number().nonnegative(), outPerM: z.number().nonnegative() })).optional(),
     })
     let patch: z.infer<typeof patchSchema>
     try {
@@ -488,7 +530,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           roster: patch.roster ?? record.spec.roster,
           budget: { ...record.spec.budget, ...patch.budget },
           judge: { ...record.spec.judge, ...patch.judge },
-          selection: { ...record.spec.selection, ...patch.selection },
+          selection: { ...DEFAULT_CONFIG.selection, ...record.spec.selection, ...patch.selection },
+          concurrency: patch.concurrency ?? record.spec.concurrency,
+          pricing: { ...record.spec.pricing, ...patch.pricing },
         })
       } catch (e) {
         return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
@@ -500,9 +544,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       }
       try {
         const newConfig = runConfigFor(newSpec)
-        // Prices are stable for a run's lifetime: a PATCH cannot set pricing, so the
-        // run's existing table keeps enforcing the USD side of any new cap.
-        newConfig.pricing = record.composed.config.pricing
+        // No engine code: concurrency/selection/pricing are all re-read per
+        // round through the 4b reconfigure swap below.
         // Mirrors the per-run engine construction above (same provider, same seed).
         const judge = new Judge(record.composed.provider, newConfig.judge, 42)
         const reflector = new Reflector(
@@ -520,12 +563,18 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       }
       deps.repos.runs.updateConfig(id, record.composed.config)
     } else {
+      // No engine code: concurrency/selection/pricing are all re-read per
+      // round through the 4b reconfigure swap on the record branch.
       const next = {
         ...run.config,
         roster: patch.roster ?? run.config.roster,
         budget: { ...run.config.budget, ...patch.budget },
         judge: { ...run.config.judge, ...patch.judge },
         selection: { ...DEFAULT_CONFIG.selection, ...run.config.selection, ...patch.selection },
+        concurrency: patch.concurrency ?? run.config.concurrency,
+        // Same light-shape cast as runConfigFor: legacy rows have no engine to
+        // preflight, so the entry stores as-is and fails closed at next contact.
+        pricing: { ...run.config.pricing, ...patch.pricing } as RunConfig['pricing'],
       }
       deps.repos.runs.updateConfig(id, next)
     }

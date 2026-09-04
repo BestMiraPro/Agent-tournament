@@ -32,9 +32,17 @@ const schema = z.object({
     .partial()
     .default({}),
   selection: z
-    .object({ crossoverPct: z.number().min(0).max(1) })
+    .object({
+      crossoverPct: z.number().min(0).max(1),
+      eliteCount: z.number().int().min(0),
+      topPct: z.number().finite().min(0).max(1),
+      bottomPct: z.number().finite().min(0).max(1),
+    })
     .partial()
     .optional(),
+  // Upper bound is a typo-guard, not tuning — the provider rate-limits real parallelism anyway.
+  concurrency: z.number().int().min(1).max(64).optional(),
+  pricing: z.record(z.string().min(1), z.object({ inPerM: z.number().nonnegative(), outPerM: z.number().nonnegative() })).optional(),
   seedDir: z.string().nullable().default(null),
   workspaceRoot: z.string().nullable().default(null),
   authFile: z.string().nullable().default(null),
@@ -53,7 +61,9 @@ export interface RunSpec {
   judge: { modelId: string; mode: 'auto' | 'single_call' | 'batched_finals' }
   reflect: { modelId: string; topK: number }
   budget: { maxRunTokens: number; maxRoundTokens: number; maxAgentTokens: number }
-  selection: { crossoverPct: number }
+  selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
+  concurrency: number
+  pricing: Record<string, { inPerM: number; outPerM: number }>
   seedDir: string | null
   workspaceRoot: string | null
   authFile: string | null
@@ -81,6 +91,14 @@ export function parseRunSpec(input: unknown): RunSpec {
     throw new Error('local sandbox requires workspaceRoot')
   }
   const population = p.roster.reduce((n, r) => n + r.count, 0)
+  // Same words as the engine guard (selection.ts): computed from merged spec
+  // values so PATCH inherits it free through its merge→parseRunSpec path.
+  const eliteCount = p.selection?.eliteCount ?? DEFAULT_CONFIG.selection.eliteCount
+  const topPct = p.selection?.topPct ?? DEFAULT_CONFIG.selection.topPct
+  const topBand = Math.max(1, Math.floor(population * topPct))
+  if (eliteCount > topBand) {
+    throw new Error(`eliteCount (${eliteCount}) cannot exceed the top band size (${topBand})`)
+  }
   return {
     name: p.name,
     goal: p.goal,
@@ -101,8 +119,13 @@ export function parseRunSpec(input: unknown): RunSpec {
       maxAgentTokens: p.budget.maxAgentTokens ?? DEFAULT_CONFIG.budget.maxAgentTokens,
     },
     selection: {
+      eliteCount: p.selection?.eliteCount ?? DEFAULT_CONFIG.selection.eliteCount,
+      topPct: p.selection?.topPct ?? DEFAULT_CONFIG.selection.topPct,
+      bottomPct: p.selection?.bottomPct ?? DEFAULT_CONFIG.selection.bottomPct,
       crossoverPct: p.selection?.crossoverPct ?? DEFAULT_CONFIG.selection.crossoverPct,
     },
+    concurrency: p.concurrency ?? DEFAULT_CONFIG.concurrency,
+    pricing: p.pricing ?? {},
     seedDir: p.seedDir,
     workspaceRoot: p.workspaceRoot,
     authFile: p.authFile,
