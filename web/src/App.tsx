@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import './styles.css'
-import { createRunFull, deleteRun, getRun, serverError, startRound, type FullRunSpec, type RunSnapshot } from './api.js'
+import { abortRound, createAgent, createRunFull, deleteRun, getRoundStats, getRun, overrideCriteria, serverError, startRound, type FullRunSpec, type RunSnapshot } from './api.js'
 import { useLiveRun } from './useLiveRun.js'
 import { AgentDrawer } from './components/AgentDrawer.js'
 import { AnalyticsPanel } from './components/AnalyticsPanel.js'
@@ -41,6 +41,11 @@ export function App() {
   const [stopped, setStopped] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [stopError, setStopError] = useState<string | null>(null)
+  const [lastRound, setLastRound] = useState<{
+    criteriaMd: string | null
+    criteriaSource: 'user' | 'generated' | null
+    metaDigest: string | null
+  } | null>(null)
   const live = useLiveRun(snapshot)
 
   const refresh = useCallback(async (runId: string) => {
@@ -96,9 +101,26 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live.busy, live.roundIdx])
 
+  // Last scored round's criteria/digest prefill the between-rounds controls.
+  // Missing (no scored round yet, or fetch failed) = auto-generate, no digest.
+  const runIdForRounds = snapshot?.runId
+  const lastRoundIdx = snapshot?.lastRoundIdx
+  useEffect(() => {
+    if (runIdForRounds === undefined || lastRoundIdx === undefined) return
+    let alive = true
+    getRoundStats(runIdForRounds)
+      .then((rounds) => {
+        if (!alive) return
+        const last = rounds.find((r) => r.idx === lastRoundIdx) ?? null
+        setLastRound(last
+          ? { criteriaMd: last.criteriaMd, criteriaSource: last.criteriaSource, metaDigest: last.metaDigest }
+          : { criteriaMd: null, criteriaSource: null, metaDigest: null })
+      })
+      .catch(() => { if (alive) setLastRound(null) })
+    return () => { alive = false }
+  }, [runIdForRounds, lastRoundIdx])
   // A stop cannot be undone server-side, but a fresh round means this run is
   // alive again (e.g. a new run reusing this view) — drop the stale note.
-  const lastRoundIdx = snapshot?.lastRoundIdx
   useEffect(() => {
     setStopped(false)
   }, [lastRoundIdx])
@@ -146,9 +168,26 @@ export function App() {
             goal={snapshot.goalMd ?? 'Produce the best possible answer.'}
             busy={busy}
             roundIdx={snapshot.lastRoundIdx}
-            onRun={(goalMd) => {
-              void startRound(snapshot.runId, goalMd).catch((e) => setError(serverError(e)))
+            onRun={(goalMd, criteriaMd) => {
+              void startRound(snapshot.runId, goalMd, criteriaMd).catch((e) => setError(serverError(e)))
             }}
+            criteria={lastRound?.criteriaMd ?? null}
+            criteriaSource={lastRound?.criteriaSource ?? null}
+            metaDigest={lastRound?.metaDigest ?? null}
+            rosterModels={[...new Set(snapshot.roster.map((r) => r.modelId))]}
+            agents={snapshot.agents.map((a) => ({ agentId: a.agentId, label: a.label }))}
+            onOverrideCriteria={(text) =>
+              overrideCriteria(snapshot.runId, snapshot.lastRoundIdx, text)
+                .then(() => 'Criteria override recorded.')
+                .catch((e) => serverError(e))}
+            onAddAgent={(input) =>
+              createAgent(snapshot.runId, input)
+                .then((r) => ({ ok: true as const, message: `Added ${r.label}.` }))
+                .catch((e) => ({ ok: false as const, message: serverError(e) }))}
+            onAbort={() =>
+              abortRound(snapshot.runId, snapshot.lastRoundIdx)
+                .then(() => 'Abort requested. In-flight agents finish; the round will be marked failed.')
+                .catch((e) => serverError(e))}
           />
           <h2 style={{ fontSize: '.9rem' }}>Leaderboard</h2>
           <Leaderboard agents={snapshot.agents} live={live} />
@@ -166,6 +205,7 @@ export function App() {
           runId={snapshot.runId}
           agentId={selectedAgentId}
           onClose={() => setSelectedAgentId(null)}
+          onRetired={() => { setSelectedAgentId(null); void refresh(snapshot.runId) }}
         />
       )}
     </>

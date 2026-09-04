@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { getAgentDetail, serverError, type AgentDetail } from '../api.js'
+import { getAgentDetail, retireAgent, serverError, type AgentDetail } from '../api.js'
 import { lineDiff, type DiffLine } from '../lib/diff.js'
+import { Markdown } from './Markdown.js'
 
 const DIFF_PREFIX: Record<DiffLine['kind'], string> = { same: ' ', add: '+', del: '−' }
 
@@ -31,14 +32,26 @@ function fileName(f: unknown): string {
   return String(f)
 }
 
-export function AgentDrawer({ runId, agentId, onClose }: {
+export function AgentDrawer({ runId, agentId, onClose, onRetired }: {
   runId: string
   agentId: string
   onClose: () => void
+  onRetired?: () => void
 }) {
   const [data, setData] = useState<AgentDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [retiring, setRetiring] = useState(false)
+  const [retireError, setRetireError] = useState<string | null>(null)
+
+  const handleRetire = () => {
+    if (!window.confirm('Retire this agent? It sits out future rounds.')) return
+    setRetiring(true)
+    setRetireError(null)
+    retireAgent(runId, agentId)
+      .then(() => { onRetired?.() })
+      .catch((e) => { setRetireError(serverError(e)); setRetiring(false) })
+  }
 
   // Selecting another cell changes agentId → refetch; `alive` stops a slow stale
   // response from clobbering a newer selection.
@@ -86,8 +99,14 @@ export function AgentDrawer({ runId, agentId, onClose }: {
             </span>
           )}
           {data && <span className="muted">r{data.agent.bornRound} · {data.agent.status}</span>}
+          {data?.agent.status === 'active' && (
+            <button className="danger danger--small" disabled={retiring} onClick={handleRetire}>
+              {retiring ? 'Retiring…' : 'Retire agent'}
+            </button>
+          )}
           <button className="drawer__close" aria-label="Close" onClick={onClose}>✕</button>
         </div>
+        {retireError && <p className="error drawer__retire-error">{retireError}</p>}
         <div className="drawer__body">
           {loading && <p>Loading…</p>}
           {error && <p className="error">{error}</p>}
@@ -121,7 +140,7 @@ export function AgentDrawer({ runId, agentId, onClose }: {
               {current && (
                 <section>
                   <h3>Strategy</h3>
-                  <pre className="drawer__pre">{current.strategyMd}</pre>
+                  <Markdown text={current.strategyMd} />
                   {previous && (
                     <>
                       <h4>vs previous round</h4>
@@ -148,7 +167,7 @@ export function AgentDrawer({ runId, agentId, onClose }: {
                       </p>
                       {sub.errorText && <pre className="drawer__error">{sub.errorText}</pre>}
                       {sub.submissionMd
-                        ? <pre className="drawer__pre">{sub.submissionMd}</pre>
+                        ? <Markdown text={sub.submissionMd} />
                         : <p className="muted">No submission file.</p>}
                       {manifestFiles && manifestFiles.length > 0 && (
                         <ul className="drawer__files">
@@ -164,7 +183,7 @@ export function AgentDrawer({ runId, agentId, onClose }: {
               {lastEntry && (
                 <section>
                   <h3>Judge rationale</h3>
-                  <pre className="drawer__pre">{lastEntry.rationaleMd}</pre>
+                  <Markdown text={lastEntry.rationaleMd} />
                 </section>
               )}
               <section>

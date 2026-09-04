@@ -13,7 +13,7 @@ describe('renderMarkdown escape-first', () => {
     // renders as plain text per spec); the pin is that no TAG carries it.
     const out = renderMarkdown('<img src=x onerror=alert(1)>')
     expect(out).not.toContain('<img')
-    expect(out).not.toMatch(/<[^>]*\bonerror=/)
+    expect(out).not.toMatch(/<[^>]*\bonerror=/i)
     expect(out).toContain('&lt;img')
   })
 })
@@ -109,5 +109,16 @@ describe('renderMarkdown unsupported stays plain text', () => {
 
   test('empty string → empty string', () => {
     expect(renderMarkdown('')).toBe('')
+  })
+
+  test('literal old-style placeholder tokens render as inert text, never undefined', () => {
+    const out = renderMarkdown('a \u0000FENCE0\u0000 b\n\n\u0000SPAN0\u0000')
+    expect(out).not.toContain('undefined')
+    expect(out).toContain('FENCE0')
+    expect(out).toContain('SPAN0')
+  })
+
+  test('non-string input is coerced, typed string callers unaffected', () => {
+    expect((renderMarkdown as (x: unknown) => string)(42)).toContain('<p>42</p>')
   })
 })

@@ -120,6 +120,9 @@ export interface RoundStats {
   fitness: { mean: number; min: number; max: number }
   modelShare: { modelId: string; count: number }[]
   diversity: number
+  criteriaMd: string | null
+  criteriaSource: 'user' | 'generated'
+  metaDigest: string | null
 }
 
 export const getRoundStats = (runId: string): Promise<RoundStats[]> =>
@@ -128,11 +131,11 @@ export const getRoundStats = (runId: string): Promise<RoundStats[]> =>
 export const deleteRun = (runId: string): Promise<{ stopped: boolean }> =>
   fetch(`/api/runs/${runId}`, { method: 'DELETE' }).then(json)
 
-export const startRound = (runId: string, goalMd: string): Promise<unknown> =>
+export const startRound = (runId: string, goalMd: string, criteriaMd?: string | null): Promise<unknown> =>
   fetch(`/api/runs/${runId}/rounds`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ goalMd }),
+    body: JSON.stringify({ goalMd, criteriaMd: criteriaMd ?? null }),
   }).then(json)
 
 export const patchConfig = (runId: string, config: unknown): Promise<{ warnings: string[] }> =>
@@ -141,3 +144,34 @@ export const patchConfig = (runId: string, config: unknown): Promise<{ warnings:
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(config),
   }).then(json)
+
+export type AddAgentStrategy =
+  | { mode: 'blank' }
+  | { mode: 'pasted'; strategyMd: string }
+  | { mode: 'clone'; agentId: string }
+
+export interface AddAgentInput {
+  modelId: string
+  temperature: number
+  strategy: AddAgentStrategy
+}
+
+export const createAgent = (runId: string, input: AddAgentInput): Promise<{ agentId: string; label: string }> =>
+  fetch(`/api/runs/${runId}/agents`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then(json)
+
+export const retireAgent = (runId: string, agentId: string): Promise<{ retired: boolean }> =>
+  fetch(`/api/runs/${runId}/agents/${agentId}`, { method: 'DELETE' }).then(json)
+
+export const overrideCriteria = (runId: string, idx: number, criteriaMd: string): Promise<{ ok: boolean }> =>
+  fetch(`/api/runs/${runId}/rounds/${idx}/criteria`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ criteriaMd }),
+  }).then(json)
+
+export const abortRound = (runId: string, idx: number): Promise<{ aborted: boolean }> =>
+  fetch(`/api/runs/${runId}/rounds/${idx}/abort`, { method: 'POST' }).then(json)

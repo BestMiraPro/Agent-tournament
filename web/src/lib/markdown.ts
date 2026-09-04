@@ -4,10 +4,11 @@
 // XSS tests in test/web/markdown.test.ts. Closed subset: no links, images,
 // tables, or raw HTML are ever generated (structurally impossible, not filtered).
 export function renderMarkdown(md: string): string {
-  if (md === '') return ''
+  const src = String(md)
+  if (src === '') return ''
 
   // 1. Escape HTML first (& first so entity semicolons survive intact).
-  let text = md
+  let text = src
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -15,19 +16,25 @@ export function renderMarkdown(md: string): string {
     .replace(/'/g, '&#39;')
 
   // 2. Extract fenced blocks, then inline code, to placeholders (code content is
-  // already escaped above, so restoring it later is safe).
+  // already escaped above, so restoring it later is safe). The per-call random
+  // salt keeps tokens unguessable: a literal NUL-token in the input can never
+  // collide (it would otherwise restore as `undefined`). NULs still can't
+  // appear in real textareas, so placeholders can't leak into output either.
+  const salt = Math.random().toString(36).slice(2)
+  const fencePrefix = `\u0000FENCE${salt}-`
+  const spanPrefix = `\u0000SPAN${salt}-`
   const fences: string[] = []
   text = text.replace(/```[\s\S]*?```/g, (m) => {
     let code = m.slice(3, -3)
     if (code.includes('\n')) code = code.slice(code.indexOf('\n') + 1)
     if (code.endsWith('\n')) code = code.slice(0, -1)
     fences.push(code)
-    return `\u0000FENCE${fences.length - 1}\u0000`
+    return `${fencePrefix}${fences.length - 1}\u0000`
   })
   const spans: string[] = []
   text = text.replace(/`([^`\n]+)`/g, (_, code: string) => {
     spans.push(code)
-    return `\u0000SPAN${spans.length - 1}\u0000`
+    return `${spanPrefix}${spans.length - 1}\u0000`
   })
 
   // Inline markup on code-free text: bold before italic (order matters).
@@ -39,12 +46,19 @@ export function renderMarkdown(md: string): string {
   // 3. Block structure, line by line (note: `>` arrives here as `&gt;`).
   const out: string[] = []
   const lines = text.split('\n')
+  // Prefix-parse (not a bare index regex): only tokens carrying this call's
+  // salt restore; anything else falls through to plain paragraph text.
+  const fenceIdx = (line: string): number | null => {
+    if (!line.startsWith(fencePrefix) || !line.endsWith('\u0000')) return null
+    const n = Number(line.slice(fencePrefix.length, -1))
+    return Number.isInteger(n) && n >= 0 && n < fences.length ? n : null
+  }
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!
     if (line.trim() === '') continue
-    const fence = line.match(/^\u0000FENCE(\d+)\u0000$/)
-    if (fence) {
-      out.push(`<pre><code>${fences[Number(fence[1])]}</code></pre>`)
+    const fenced = fenceIdx(line)
+    if (fenced !== null) {
+      out.push(`<pre><code>${fences[fenced]}</code></pre>`)
       continue
     }
     const heading = line.match(/^(#{1,3}) (.*)$/)
@@ -76,6 +90,9 @@ export function renderMarkdown(md: string): string {
     out.push(`<p>${inline(line)}</p>`)
   }
 
-  // 4. Restore inline code placeholders.
-  return out.join('\n').replace(/\u0000SPAN(\d+)\u0000/g, (_, n: string) => `<code>${spans[Number(n)]}</code>`)
+  // 4. Restore inline code placeholders (salted: input text can't match).
+  // The salt is alnum (toString(36)) so it needs no escaping; the NUL chars
+  // match literally.
+  const spanRe = new RegExp(`\u0000SPAN${salt}-(\\d+)\u0000`, 'g')
+  return out.join('\n').replace(spanRe, (_, n: string) => `<code>${spans[Number(n)]}</code>`)
 }
