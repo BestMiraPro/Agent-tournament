@@ -21,6 +21,18 @@ describe('parsePricing', () => {
     expect(error).toMatch(/line 2/)
   })
 
+  test('extra-token line is a wrong-arity error naming the line number', () => {
+    const { pricing, error } = parsePricing('mymodel 1 2 3 4 extra')
+    expect(pricing).toBeNull()
+    expect(error).toMatch(/line 1/)
+  })
+
+  test('3-token line is a wrong-arity error naming the line number', () => {
+    const { pricing, error } = parsePricing('m1 1 2 0.5 1\nmymodel 1 2')
+    expect(pricing).toBeNull()
+    expect(error).toMatch(/line 2/)
+  })
+
   test('non-numeric rate is an error', () => {
     const { pricing, error } = parsePricing('m1 1 abc 0.5 1')
     expect(pricing).toBeNull()
