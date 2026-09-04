@@ -366,4 +366,140 @@ describe('dashboard end to end', () => {
 
     await app.close()
   }, 60_000)
+
+  test('phase4f guard: diversityFloor rescues the most-distinct culled agent on mocks', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const population = 4
+    // Keyword-spread seeds: fitness gaps dwarf the mock-judge jitter (<=0.5), so
+    // ranks follow index order and the zero-keyword odd-one-out ranks last —
+    // culled, but the most distinct strategy in the field.
+    const seeds = [
+      'verify test iterate concise structure evidence example',
+      'verify test iterate alpha beta',
+      'verify alpha beta gamma',
+      'zebra quasar xenon fjord uncommon words entirely',
+    ]
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      populationSize: population,
+      sandbox: 'mock',
+      roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
+      // n=4: top band 1, 2 culled, 1 survivor — the floor rescues one culled agent
+      // and bumps that single survivor, so the swap is fully pinned below.
+      selection: { ...DEFAULT_CONFIG.selection, topPct: 0.25, bottomPct: 0.5, diversityFloor: true },
+    }
+    const broadcaster = new EventBroadcaster()
+    const emit = (e: EngineEvent) => broadcaster.broadcast(e)
+    const provider = new MockProvider(42)
+    const sandbox = new MockSandbox()
+    const engine = new TournamentEngine({
+      repos, config, sandbox,
+      runner: new MockAgentRunner(sandbox, 42),
+      judge: new Judge(provider, config.judge, 42),
+      reflector: new Reflector(provider, config.reflect, ['mock/model']),
+      seedStrategy: (i) => seeds[i]!,
+      onEvent: emit,
+    })
+    const manager = new RunManager(engine, emit)
+    const app = buildApi({ repos, manager, createRun: (name) => engine.createRun(name, '').id })
+
+    const created = JSON.parse(
+      (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'e2e-floor', goal: 'g' } })).body,
+    )
+    const runId: string = created.runId
+    // The Task-2 PATCH path: the floor rides the stored run config. (In this legacy
+    // wiring the engine reads its constructor config per round; only the registry
+    // branch re-reads via the reconfigure swap — the PATCH pins the route stores it.)
+    const patched = await app.inject({
+      method: 'PATCH', url: `/api/runs/${runId}/config`, payload: { selection: { diversityFloor: true } },
+    })
+    expect(patched.statusCode).toBe(200)
+    expect(repos.runs.get(runId)!.config.selection.diversityFloor).toBe(true)
+
+    const started = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'write a good answer' },
+    })
+    expect(started.statusCode).toBe(202)
+    await manager.waitForIdle(runId)
+
+    const active = repos.agents.listActive(runId)
+    // Population invariant: 1 elite + 1 rescued survivor + 2 clone children.
+    expect(active).toHaveLength(population)
+    const idOfSeed = (text: string) =>
+      repos.agents.listAll(runId).find((a) => repos.genomes.forRound(a.id, 1)?.strategyMd === text)!.id
+    const rescuedId = idOfSeed(seeds[3]!)
+    // The rescued odd-one-out survives with reflection output down the mutated
+    // (survivor) path — culled agents get no next-round genome at all.
+    expect(active.map((a) => a.id)).toContain(rescuedId)
+    const next = repos.genomes.forRound(rescuedId, 2)
+    expect(next).not.toBeNull()
+    expect(next!.origin).toBe('mutation')
+    expect(next!.notesMd).toContain('Adjusted after reviewing the leaders.')
+    // The bumped lowest survivor and the other culled agent are gone instead.
+    const activeIds = new Set(active.map((a) => a.id))
+    expect(activeIds.has(idOfSeed(seeds[1]!))).toBe(false)
+    expect(activeIds.has(idOfSeed(seeds[2]!))).toBe(false)
+
+    await app.close()
+  }, 60_000)
+
+  test('phase4f guard: crossover children recombine via the mock provider on mocks', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const population = 4
+    const seeds = [
+      'verify test iterate concise structure evidence example alpha',
+      'verify test iterate beta',
+      'verify gamma delta',
+      'plain words with no signal here',
+    ]
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      populationSize: population,
+      sandbox: 'mock',
+      roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
+      // n=4: top band 2 (crossover needs 2+ parents), 2 culled, pct 1 → both
+      // culled slots become crossovers, zero clones.
+      selection: { ...DEFAULT_CONFIG.selection, topPct: 0.5, bottomPct: 0.5, crossoverPct: 1 },
+    }
+    const broadcaster = new EventBroadcaster()
+    const emit = (e: EngineEvent) => broadcaster.broadcast(e)
+    const provider = new MockProvider(42)
+    const sandbox = new MockSandbox()
+    const engine = new TournamentEngine({
+      repos, config, sandbox,
+      runner: new MockAgentRunner(sandbox, 42),
+      judge: new Judge(provider, config.judge, 42),
+      reflector: new Reflector(provider, config.reflect, ['mock/model']),
+      seedStrategy: (i) => seeds[i]!,
+      onEvent: emit,
+    })
+    const manager = new RunManager(engine, emit)
+    const app = buildApi({ repos, manager, createRun: (name) => engine.createRun(name, '').id })
+
+    const created = JSON.parse(
+      (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'e2e-recombine', goal: 'g' } })).body,
+    )
+    const runId: string = created.runId
+    const started = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'write a good answer' },
+    })
+    expect(started.statusCode).toBe(202)
+    await manager.waitForIdle(runId)
+
+    const children = repos.agents.listActive(runId).flatMap((a) => {
+      const g = repos.genomes.forRound(a.id, 2)
+      return g?.origin === 'crossover' ? [g] : []
+    })
+    expect(children).toHaveLength(2)
+    for (const child of children) {
+      // Mock-provider text, not the split fallback: the reflect-path marker is
+      // present and the failure parenthetical is absent.
+      expect(child.notesMd).toContain('Adjusted after reviewing the leaders.')
+      expect(child.notesMd).not.toContain('(recombine failed, split merge)')
+    }
+
+    await app.close()
+  }, 60_000)
 })
