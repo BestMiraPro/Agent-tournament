@@ -45,7 +45,7 @@ export function RosterBuilder({ value, onChange, models, disabled }: {
             onChange={(e) => update(i, { temperature: e.target.value === '' ? NaN : Number(e.target.value) })}
             disabled={disabled}
           />
-          <button onClick={() => onChange(value.filter((_, j) => j !== i))} disabled={disabled || value.length === 1}>
+          <button aria-label={`Remove row ${i + 1}`} onClick={() => onChange(value.filter((_, j) => j !== i))} disabled={disabled || value.length === 1}>
             Remove
           </button>
         </div>
@@ -54,6 +54,7 @@ export function RosterBuilder({ value, onChange, models, disabled }: {
         {models.map((m) => <option key={m} value={m} />)}
       </datalist>
       <button
+        aria-label="Add agent row"
         onClick={() => onChange([...value, { modelId: '', count: 1, temperature: 0.7 }])}
         disabled={disabled}
       >

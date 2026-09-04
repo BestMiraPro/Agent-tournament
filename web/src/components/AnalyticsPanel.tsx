@@ -184,7 +184,7 @@ export function AnalyticsPanel({ runId, agents, onOpenAgent, refreshKey }: {
   if (!rounds || rounds.length === 0) return null
 
   return (
-    <section className="analytics" aria-label="Run analytics">
+    <section className="analytics" aria-label="Run analytics" aria-busy={loading && rounds === null}>
       <h2>Analytics</h2>
       <FitnessChart rounds={rounds} />
       <RoundTable rounds={rounds} />

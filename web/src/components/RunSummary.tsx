@@ -15,7 +15,7 @@ export function RunSummary({ snapshot, busy, roundStats }: {
   const rostered = snapshot.roster.reduce((sum, r) => sum + (Number.isFinite(r.count) ? r.count : 0), 0)
 
   return (
-    <section className="summary__strip" aria-label="Run summary">
+    <section className="summary__strip" aria-label="Run summary" role="status" aria-live="polite">
       <span className="summary__name">{snapshot.name}</span>
       <span className="badge" title="sandbox">{snapshot.sandbox}</span>
       <span className="badge">{busy ? 'running' : 'idle'}</span>

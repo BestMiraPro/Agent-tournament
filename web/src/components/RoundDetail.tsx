@@ -89,7 +89,7 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
   }
 
   return (
-    <section className="rounddetail" aria-label="Round detail">
+    <section className="rounddetail" aria-label="Round detail" aria-busy={loading && detail === null}>
       <div className="rounddetail__head">
         <h2>Round detail</h2>
         <select
