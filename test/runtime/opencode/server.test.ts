@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { parseServerPort, startServer } from '../../../src/runtime/opencode/server.js'
 
-const spawned = vi.hoisted(() => ({ children: [] as ChildProcess[] }))
+const spawned = vi.hoisted(() => ({ children: [] as ChildProcess[], options: [] as unknown[] }))
 
 // Capture the real child so the tests can assert kill delivery on the handle
 // (passthrough — the child still really spawns).
@@ -16,6 +16,7 @@ vi.mock('node:child_process', async (importOriginal) => {
     spawn: (...args: Parameters<typeof orig.spawn>) => {
       const child = orig.spawn(...args)
       spawned.children.push(child)
+      spawned.options.push(args[2])
       return child
     },
   }
@@ -98,10 +99,38 @@ describe('startServer startup timeout', () => {
 
   test('does not kill the child when it exits on its own', async () => {
     spawned.children.length = 0
+    spawned.options.length = 0
     await expect(startServer({ command: exiterCommand(), startupTimeoutMs: 5000 })).rejects.toThrow(
       'process exited with code',
     )
     expect(spawned.children).toHaveLength(1)
     expect(spawned.children[0]?.killed).toBe(false)
+  }, 15_000)
+
+  test('scrubs server-auth env from the spawned child', async () => {
+    const savedU = process.env.OPENCODE_SERVER_USERNAME
+    const savedP = process.env.OPENCODE_SERVER_PASSWORD
+    process.env.OPENCODE_SERVER_USERNAME = 'someone'
+    process.env.OPENCODE_SERVER_PASSWORD = 'secret'
+    spawned.children.length = 0
+    spawned.options.length = 0
+    try {
+      await expect(startServer({ command: exiterCommand(), startupTimeoutMs: 5000 })).rejects.toThrow(
+        'process exited with code',
+      )
+      expect(spawned.options).toHaveLength(1)
+      const env = (spawned.options[0] as { env?: NodeJS.ProcessEnv }).env
+      expect(env).not.toHaveProperty('OPENCODE_SERVER_USERNAME')
+      expect(env).not.toHaveProperty('OPENCODE_SERVER_PASSWORD')
+      // Nothing else stripped: the rest of the parent env still passes through.
+      expect(env?.PATH).toBe(process.env.PATH)
+      // The parent env itself is untouched.
+      expect(process.env.OPENCODE_SERVER_PASSWORD).toBe('secret')
+    } finally {
+      if (savedU === undefined) delete process.env.OPENCODE_SERVER_USERNAME
+      else process.env.OPENCODE_SERVER_USERNAME = savedU
+      if (savedP === undefined) delete process.env.OPENCODE_SERVER_PASSWORD
+      else process.env.OPENCODE_SERVER_PASSWORD = savedP
+    }
   }, 15_000)
 })

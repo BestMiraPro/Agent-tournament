@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { composeRun } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
@@ -72,5 +75,42 @@ describe('composeRun', () => {
     expect(reported[0]).toMatch(/preflight was skipped/i)
     expect(c.warnings).toEqual(reported)
     await c.cleanup()
+  })
+
+  test('creates a nested non-existent workspace root before starting any server', async () => {
+    const seams = mockSeams()
+    seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
+    const top = mkdtempSync(join(tmpdir(), 'compose-ws-'))
+    const root = join(top, 'a', 'b')
+    try {
+      const c = await composeRun(parseRunSpec({
+        name: 'w', goal: 'g', sandbox: 'local',
+        roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
+        workspaceRoot: root,
+      }), seams as never)
+      expect(existsSync(root)).toBe(true)
+      expect(seams.startHostServer).toHaveBeenCalled()
+      await c.cleanup()
+    } finally {
+      rmSync(top, { recursive: true, force: true })
+    }
+  })
+
+  test('a file in the way of the workspace root fails before any server starts', async () => {
+    const seams = mockSeams()
+    const dir = mkdtempSync(join(tmpdir(), 'compose-ws-file-'))
+    const blocked = join(dir, 'blocked')
+    writeFileSync(blocked, 'x')
+    try {
+      await expect(composeRun(parseRunSpec({
+        name: 'w', goal: 'g', sandbox: 'local',
+        roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
+        workspaceRoot: blocked,
+      }), seams as never)).rejects.toThrow(/workspace root/)
+      expect(seams.startHostServer).not.toHaveBeenCalled()
+      expect(seams.attachHostServer).not.toHaveBeenCalled()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

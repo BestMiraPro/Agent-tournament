@@ -41,10 +41,17 @@ export async function startServer(opts: StartServerOptions = {}): Promise<Server
   const command = opts.command ?? 'opencode'
   const startupTimeoutMs = opts.startupTimeoutMs ?? 30_000
 
+  const env = { ...process.env }
+  // Our client never sends Basic auth, so an inherited server-auth env can only
+  // 401 our own loopback plumbing: a shell leaking both vars makes every spawned
+  // server demand credentials our client does not have. Scrub them from the copy.
+  delete env.OPENCODE_SERVER_USERNAME
+  delete env.OPENCODE_SERVER_PASSWORD
+
   const child: ChildProcess = spawn(
     command,
     ['serve', '--hostname', '127.0.0.1', '--port', String(port)],
-    { stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' },
+    { stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32', env },
   )
 
   const resolvedPort = await new Promise<number>((resolve, reject) => {

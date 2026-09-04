@@ -109,47 +109,54 @@ export class OpenCodeAgentRunner implements AgentRunner {
         /* a dashboard subscriber must never break an agent's run */
       }
 
-      const res = await Promise.race([
-        client.prompt(
-          session.id,
-          handle.workspacePath,
-          {
-            model: splitModelId(ctx.genome.modelId),
-            system: ctx.genome.strategyMd,
-            parts: [{ type: 'text', text: buildAgentPrompt(ctx.goalMd) }],
-          },
-          ctx.timeoutMs,
-        ),
-        new Promise<never>((_r, reject) =>
-          setTimeout(() => reject(new TimeoutError()), ctx.timeoutMs),
-        ),
-      ])
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const res = await Promise.race([
+          client.prompt(
+            session.id,
+            handle.workspacePath,
+            {
+              model: splitModelId(ctx.genome.modelId),
+              system: ctx.genome.strategyMd,
+              parts: [{ type: 'text', text: buildAgentPrompt(ctx.goalMd) }],
+            },
+            ctx.timeoutMs,
+          ),
+          new Promise<never>((_r, reject) => {
+            timer = setTimeout(() => reject(new TimeoutError()), ctx.timeoutMs)
+          }),
+        ])
 
-      const t = res.info?.tokens
-      const usage = {
-        tokensIn: t?.input ?? 0,
-        tokensOut: t?.output ?? 0,
-        tokensCacheRead: t?.cache?.read ?? 0,
-        tokensCacheWrite: t?.cache?.write ?? 0,
-        costUsd: res.info?.cost ?? 0,
-      }
+        const t = res.info?.tokens
+        const usage = {
+          tokensIn: t?.input ?? 0,
+          tokensOut: t?.output ?? 0,
+          tokensCacheRead: t?.cache?.read ?? 0,
+          tokensCacheWrite: t?.cache?.write ?? 0,
+          costUsd: res.info?.cost ?? 0,
+        }
 
-      if (res.info?.error) {
-        const code = res.info.error.data?.statusCode ?? res.info.error.name ?? 'error'
+        if (res.info?.error) {
+          const code = res.info.error.data?.statusCode ?? res.info.error.name ?? 'error'
+          return {
+            status: 'error',
+            errorText: `${code}: ${res.info.error.data?.message ?? ''}`.slice(0, 500),
+            ...usage,
+            durationMs: Date.now() - started,
+          }
+        }
+
+        const submission = await this.sandbox.readFile(handle, SUBMISSION_FILE)
         return {
-          status: 'error',
-          errorText: `${code}: ${res.info.error.data?.message ?? ''}`.slice(0, 500),
+          status: submission && submission.trim().length > 0 ? 'ok' : 'no_submission',
+          errorText: null,
           ...usage,
           durationMs: Date.now() - started,
         }
-      }
-
-      const submission = await this.sandbox.readFile(handle, SUBMISSION_FILE)
-      return {
-        status: submission && submission.trim().length > 0 ? 'ok' : 'no_submission',
-        errorText: null,
-        ...usage,
-        durationMs: Date.now() - started,
+      } finally {
+        // Without this the loser of the race keeps a timer alive for the full
+        // timeoutMs after every run, holding the process open.
+        clearTimeout(timer)
       }
     } catch (e) {
       const isTimeout = e instanceof TimeoutError

@@ -1,3 +1,4 @@
+import { mkdirSync } from 'node:fs'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import type { Provider } from '../runtime/provider.js'
 import type { AgentRunner } from '../runtime/agent-runner.js'
@@ -132,6 +133,16 @@ export async function composeRun(
   }
 
   const workspaceRoot = spec.workspaceRoot!
+  // Earliest point both the CLI and the server POST path share: opencode
+  // realpaths the session directory and 500s when it is missing, so the root
+  // must exist before any server starts. Mock mode returns above and never
+  // touches fs, so mock tests stay hermetic; recursive mkdir on an existing
+  // dir is a no-op.
+  try {
+    mkdirSync(workspaceRoot, { recursive: true })
+  } catch (e) {
+    throw new Error(`workspace root ${workspaceRoot}: ${e instanceof Error ? e.message : String(e)}`)
+  }
   if (spec.sandbox === 'docker') {
     await assertHostCapacity(config, s.readCapacity as never, onWarning)
   }

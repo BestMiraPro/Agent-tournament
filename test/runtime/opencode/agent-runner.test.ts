@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { OpenCodeAgentRunner, buildAgentPrompt } from '../../../src/runtime/opencode/agent-runner.js'
 import { MockSandbox } from '../../../src/runtime/mock-sandbox.js'
 import type { PromptBody, PromptResponse } from '../../../src/runtime/opencode/client.js'
@@ -90,6 +90,20 @@ describe('OpenCodeAgentRunner', () => {
     const res = await new OpenCodeAgentRunner(c as never, sb).run(h, ctx('s', 50))
     expect(res.status).toBe('timeout')
     expect(c.aborted).toBe(true)
+  })
+
+  test('clears the race timer after a fast run', async () => {
+    vi.useFakeTimers()
+    try {
+      const sb = new MockSandbox()
+      const h = await sb.provision('a1', {})
+      await sb.writeFile(h, 'SUBMISSION.md', 'x')
+      const res = await new OpenCodeAgentRunner(new FakeClient(okResponse) as never, sb).run(h, ctx('s', 600_000))
+      expect(res.status).toBe('ok')
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
