@@ -183,6 +183,21 @@ export function App() {
       {snapshot.warnings.length > 0 && <p className="muted">{snapshot.warnings.join(' · ')}</p>}
       {live.wsStatus === 'reconnecting' && <p className="muted reconnect-banner">Reconnecting…</p>}
       <RunSummary snapshot={snapshot} busy={busy} roundStats={roundStats} />
+      <div className="export-bar">
+        <select
+          value="-- export --"
+          onChange={(e) => {
+            const v = e.target.value
+            if (v === 'json' || v === 'csv') {
+              window.location.href = `/api/runs/${snapshot.runId}/export?format=${v}`
+            }
+          }}
+        >
+          <option value="-- export --">-- export --</option>
+          <option value="json">JSON</option>
+          <option value="csv">CSV</option>
+        </select>
+      </div>
       {!busy && snapshot.lastRoundIdx === 0 && <p className="muted">No rounds yet — set a goal and run round 1.</p>}
       <div className="layout" ref={gridRef} tabIndex={-1}>
         <AgentGrid agents={snapshot.agents} live={live} onSelect={setSelectedAgentId} />

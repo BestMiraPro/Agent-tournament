@@ -630,4 +630,51 @@ describe('dashboard end to end', () => {
 
     await app.close()
   }, 60_000)
+
+  test('phase4j guard: export serves json + csv and 400s on unknown format', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (name: string) => repos.runs.create({ name, config: DEFAULT_CONFIG, seedDir: null }).id,
+    })
+    const created = JSON.parse(
+      (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'export-run', goal: 'g' } })).body,
+    )
+    const runId: string = created.runId
+    // Seed 2 agents + 1 scored round (no submissions needed for the guard).
+    const a1 = repos.agents.create({ runId, label: 'a1', parentAgentId: null, bornRound: 1 })
+    const a2 = repos.agents.create({ runId, label: 'a2', parentAgentId: null, bornRound: 1 })
+    const r1 = repos.rounds.create({ runId, idx: 1, goalMd: 'goal' })
+    for (const a of [a1, a2]) {
+      repos.genomes.create({
+        agentId: a.id, roundIdx: 1, strategyMd: 's', notesMd: '',
+        modelId: 'mock/model', temperature: 0.7, parentGenomeId: null, origin: 'seed',
+      })
+    }
+    repos.scores.insertMany(r1.id, [
+      { roundId: r1.id, agentId: a1.id, rank: 1, score: 80, rationaleMd: 'r1', band: 'elite' },
+      { roundId: r1.id, agentId: a2.id, rank: 2, score: 50, rationaleMd: 'r2', band: 'bottom' },
+    ])
+
+    const jsonRes = await app.inject({ method: 'GET', url: `/api/runs/${runId}/export?format=json` })
+    expect(jsonRes.statusCode).toBe(200)
+    expect(jsonRes.headers['content-type']).toContain('application/json')
+    const jsonBody = JSON.parse(jsonRes.body)
+    expect(Array.isArray(jsonBody.rounds)).toBe(true)
+
+    const csvRes = await app.inject({ method: 'GET', url: `/api/runs/${runId}/export?format=csv` })
+    expect(csvRes.statusCode).toBe(200)
+    expect(csvRes.headers['content-type']).toContain('text/csv')
+    expect(csvRes.body.startsWith('round,agentLabel')).toBe(true)
+
+    const badRes = await app.inject({ method: 'GET', url: `/api/runs/${runId}/export?format=xml` })
+    expect(badRes.statusCode).toBe(400)
+
+    const noRunRes = await app.inject({ method: 'GET', url: '/api/runs/nope/export?format=json' })
+    expect(noRunRes.statusCode).toBe(404)
+
+    await app.close()
+  }, 60_000)
 })

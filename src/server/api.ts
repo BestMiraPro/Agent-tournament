@@ -15,6 +15,7 @@ import { buildRunSnapshot } from './state.js'
 import { RunManager } from './run-manager.js'
 import { startServer, type ServerHandle } from '../runtime/opencode/server.js'
 import { discoverModels } from '../runtime/opencode/discovery.js'
+import { buildCsvRows, buildJsonDump } from './export.js'
 
 export interface ApiDeps {
   repos: Repos
@@ -461,6 +462,23 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     // Unscored rounds (row exists, no scores yet) fall through with entries []
     // — the UI shows them as in-flight rather than missing.
     return roundDetail(deps.repos, round)
+  })
+
+  app.get('/api/runs/:runId/export', async (req, reply) => {
+    const { runId } = req.params as { runId: string }
+    if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
+    const format = (req.query as { format?: string }).format ?? 'json'
+    if (format === 'csv') {
+      reply.header('Content-Type', 'text/csv')
+      reply.header('Content-Disposition', `attachment; filename="run-${runId}.csv"`)
+      return reply.send(buildCsvRows(runId, deps.repos))
+    }
+    if (format === 'json') {
+      reply.header('Content-Type', 'application/json')
+      reply.header('Content-Disposition', `attachment; filename="run-${runId}.json"`)
+      return reply.send(buildJsonDump(runId, deps.repos))
+    }
+    return reply.code(400).send({ error: 'unknown format' })
   })
 
   app.post('/api/runs/:runId/rounds/:idx/criteria', async (req, reply) => {
