@@ -97,8 +97,13 @@ Out of scope (stay out):
   typo-guard, not tuning — one-line WHY; the provider rate-limits real
   parallelism anyway).
 - `pricing: z.record(z.string().min(1), z.object({ inPerM: z.number().nonnegative(),
-  outPerM: z.number().nonnegative() })).optional()` (light shape check; deep
+  outPerM: z.number().nonnegative(), cacheReadPerM: z.number().nonnegative(),
+  cacheWritePerM: z.number().nonnegative() })).optional()` (shape check; deep
   validation stays at `createRun` preflight).
+  FOUR keys, not two: the engine's `assertPrice` fail-closes on missing cache
+  rates ("omitting them prices the bulk of a run at zero" — budget.ts), so a
+  2-key shape (as the design §17 sketch shows) would make every custom-priced run
+  fail at creation. The §17 sketch is stale; the engine is the authority.
 - `criteria`: NO schema change (already nullable). Verify `parseRunSpec`'s return
   object actually carries `criteria` through (if the return literal drops it, add
   it — accepted-but-dropped today; one line).
@@ -129,9 +134,10 @@ Out of scope (stay out):
   selection inputs (eliteCount/topPct/bottomPct/crossoverPct, prefilled from
   `DEFAULT_CONFIG.selection` — import already exists in the file);
   concurrency input (prefilled 8); pricing textarea, one
-  `modelId inPerM outPerM` per line (mirror the roster parser's style + inline
-  error convention; skip blanks; non-numeric/negative → inline error naming the
-  line).
+  `modelId inPerM outPerM cacheReadPerM cacheWritePerM` per line (mirror the
+  roster parser's style + inline error convention; skip blanks; wrong arity /
+  non-numeric / negative → inline error naming the line; all four rates required
+  per the §4.2 pricing rule — the engine fail-closes without cache rates).
 - Model `<datalist>` fed by `GET /api/models` (fetch on setup mount; failure →
   free text still works — the inputs stay plain text with datalist enhancement,
   never a blocking select). Attach the datalist to BOTH the roster textarea's

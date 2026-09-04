@@ -109,7 +109,7 @@ Gate. Commit: `feat: model discovery endpoint, setup-time RunSpec knobs, PATCH f
 Per spec §5:
 1. `parsePricing(text): { pricing, error }` in `web/src/lib/pricing.ts` (mirror the
    roster parser's style + inline-error convention — grep where the roster parser
-   lives/is tested and co-locate): one `modelId inPerM outPerM` per line, skip
+   lives/is tested and co-locate): one `modelId inPerM outPerM cacheReadPerM cacheWritePerM` per line (FOUR rates — the engine's assertPrice fail-closes without cache rates; spec §4.2), skip
    blanks, non-numeric/negative/wrong-arity → error naming the line number.
    Tests from the root suite (valid line, blank skip, bad-number + line number,
    negative rejection, extra token).
