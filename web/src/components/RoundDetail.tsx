@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getRoundDetail, listModels, rejudge, serverError, type RoundDetail as RoundDetailData, type RejudgeResult } from '../api.js'
+import { effectiveRound, roundOptions } from '../lib/rounds.js'
 import { Markdown } from './Markdown.js'
 
 // Manifest entries are FileEntry { path, bytes } rows, but the endpoint serves
@@ -52,14 +53,13 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
   // be derived from it (a score-less failed round would shift it). lastRoundIdx
   // is the in-flight row's idx by construction — created at startRound before
   // any scores exist — and the detail endpoint serves it with entries [].
-  const completed = rounds.map((r) => r.idx).sort((a, b) => a - b)
-  const inFlight = busy ? lastRoundIdx : null
-  const options = inFlight !== null && !completed.includes(inFlight) ? [...completed, inFlight] : completed
+  const completed = rounds.map((r) => r.idx)
+  const options = roundOptions(completed, busy, lastRoundIdx)
+  // The in-flight round is the one offered but not yet scored; used only to label it.
+  const inFlight = options.find((idx) => !completed.includes(idx)) ?? null
 
   const [selected, setSelected] = useState<number | null>(null)
-  const effective = selected !== null && options.includes(selected)
-    ? selected
-    : options.length > 0 ? options[options.length - 1]! : null
+  const effective = effectiveRound(options, selected)
 
   const [detail, setDetail] = useState<RoundDetailData | null>(null)
   const [loading, setLoading] = useState(true)
