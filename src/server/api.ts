@@ -400,6 +400,26 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     return { ok: true }
   })
 
+  app.post('/api/runs/:runId/rounds/:idx/abort', async (req, reply) => {
+    const { runId, idx } = req.params as { runId: string; idx: string }
+    const run = deps.repos.runs.get(runId)
+    if (!run) return reply.code(404).send({ error: 'no such run' })
+    // The list is small; no dedicated repo getter for a single (runId, idx).
+    const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
+    if (!round) return reply.code(404).send({ error: 'no such round' })
+    if (run.status === 'stopped') return reply.code(409).send({ error: 'run is stopped' })
+    // The engine flag is set via the record's manager if present else the shared
+    // manager — mirrors the POST /rounds manager-resolution line below.
+    const mgr = deps.registry?.get(runId)?.manager ?? deps.manager
+    if (Number(idx) !== deps.repos.rounds.lastIdx(runId) || !mgr.isBusy(runId)) {
+      return reply.code(409).send({ error: 'no round in flight' })
+    }
+    // Honest cooperative semantics: queued agents stop; in-flight agents run to
+    // completion/timeout; completed phases keep their rows and the round ends failed.
+    mgr.abortRound(runId)
+    return reply.code(202).send({ aborted: true })
+  })
+
   app.post('/api/runs/:id/rounds', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = (req.body ?? {}) as { goalMd?: string; criteriaMd?: string | null }

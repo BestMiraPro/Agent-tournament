@@ -38,4 +38,28 @@ describe('runPool', () => {
   test('handles an empty input', async () => {
     expect(await runPool([], 4, async () => 1)).toEqual([])
   })
+
+  test('shouldStop aborts queued items while the in-flight one completes', async () => {
+    let stop = false
+    const started: number[] = []
+    const out = await runPool(
+      [1, 2, 3, 4],
+      1,
+      async (n) => {
+        started.push(n)
+        if (n === 1) {
+          stop = true
+          await sleep(20)
+        }
+        return n
+      },
+      { shouldStop: () => stop },
+    )
+    expect(out[0]).toEqual({ ok: true, value: 1 })
+    expect(started).toEqual([1])
+    for (const r of out.slice(1)) {
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.error.message).toBe('round aborted')
+    }
+  })
 })

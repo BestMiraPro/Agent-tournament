@@ -49,6 +49,9 @@ export class TournamentEngine {
   /** One tracker per run, keyed by run id — `runRound` may be called many times for
    *  the same run, and run-level spend (unlike round-level) must survive across all of them. */
   private budgets = new Map<string, BudgetTracker>()
+  /** Per-run abort flags for cooperative abort — set by `abortRound`, read by the
+   *  pool `shouldStop` gates and the phase gates below. */
+  private aborted = new Set<string>()
 
   constructor(private d: EngineDeps) {}
 
@@ -137,11 +140,23 @@ export class TournamentEngine {
     this.d.reflector = d.reflector
   }
 
+  /**
+   * Flags a run's in-flight round for cooperative abort: pools stop pulling NEW
+   * items and the phase gates below fail the round. In-flight agent calls run to
+   * completion — never killed mid-call, because agent timeouts already bound them.
+   */
+  abortRound(runId: string): void {
+    this.aborted.add(runId)
+  }
+
   async runRound(
     runId: string,
     input: { goalMd: string; criteriaMd: string | null },
   ): Promise<RoundResult> {
     const { repos, config } = this.d
+    // WHY clear here AND in `finally`: a stale flag (abort arriving with no round
+    // in flight) must never kill the next round.
+    this.aborted.delete(runId)
     const roundIdx = repos.rounds.lastIdx(runId) + 1
     const round = repos.rounds.create({ runId, idx: roundIdx, goalMd: input.goalMd })
     repos.rounds.markStarted(round.id)
@@ -180,6 +195,9 @@ export class TournamentEngine {
           serializeGenome(p.genome, { label: p.agent.label }),
         )
         return h
+      }, {
+        // Cooperative abort: queued agents stop; in-flight provisions run out.
+        shouldStop: () => this.aborted.has(runId),
       })
 
       const handles = new Map<string, AgentHandle>()
@@ -324,6 +342,9 @@ export class TournamentEngine {
             // A workspace that cannot be read is handled in COLLECT as a missing capture.
           }
         }
+      }, {
+        // Cooperative abort: queued agents stop; in-flight runs complete/timeout.
+        shouldStop: () => this.aborted.has(runId),
       })
 
       // `record` only happens during RUN above, so nothing after this point changes
@@ -447,6 +468,7 @@ export class TournamentEngine {
       }
 
       // JUDGE
+      if (this.aborted.has(runId)) throw new Error('round aborted by user')
       repos.rounds.setStatus(round.id, 'judging')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'judging' })
       // WHY re-read the row: an override that lands mid-round must win over the
@@ -466,6 +488,7 @@ export class TournamentEngine {
       repos.rounds.setJudgeMode(round.id, judged.mode)
 
       // EVOLVE
+      if (this.aborted.has(runId)) throw new Error('round aborted by user')
       repos.rounds.setStatus(round.id, 'evolving')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'evolving' })
       const plan = planSelection(
@@ -498,6 +521,7 @@ export class TournamentEngine {
       })
 
       // REFLECT
+      if (this.aborted.has(runId)) throw new Error('round aborted by user')
       repos.rounds.setStatus(round.id, 'reflecting')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'reflecting' })
       const mutated = new Map<string, Genome>()
@@ -569,6 +593,9 @@ export class TournamentEngine {
       repos.rounds.setStatus(round.id, 'failed')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'failed' })
       throw e
+    } finally {
+      // WHY: a stale flag must never kill the next round.
+      this.aborted.delete(runId)
     }
   }
 

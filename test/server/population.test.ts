@@ -275,6 +275,72 @@ describe('DELETE /api/runs/:runId/agents/:agentId', () => {
   })
 })
 
+describe('POST /api/runs/:runId/rounds/:idx/abort', () => {
+  const abortable = (isBusy: boolean, called: string[]) =>
+    ({
+      isBusy: () => isBusy,
+      lastError: () => null,
+      startRound: () => {},
+      abortRound: (runId: string) => {
+        called.push(runId)
+        return true
+      },
+    }) as never
+
+  test('busy → 202 + manager.abortRound called with runId', async () => {
+    const { repos, run } = seed()
+    const called: string[] = []
+    const api = appFor(repos, abortable(true, called))
+    const res = await api.inject({ method: 'POST', url: `/api/runs/${run.id}/rounds/1/abort` })
+    expect(res.statusCode).toBe(202)
+    expect(JSON.parse(res.body)).toEqual({ aborted: true })
+    expect(called).toEqual([run.id])
+  })
+
+  test('idle → 409 + manager.abortRound never called', async () => {
+    const { repos, run } = seed()
+    const called: string[] = []
+    const api = appFor(repos, abortable(false, called))
+    const res = await api.inject({ method: 'POST', url: `/api/runs/${run.id}/rounds/1/abort` })
+    expect(res.statusCode).toBe(409)
+    expect(JSON.parse(res.body)).toEqual({ error: 'no round in flight' })
+    expect(called).toEqual([])
+  })
+
+  test('409: idx is not the last round', async () => {
+    const { repos, run } = seed()
+    repos.rounds.create({ runId: run.id, idx: 2, goalMd: 'goal 2' })
+    const called: string[] = []
+    const api = appFor(repos, abortable(true, called))
+    const res = await api.inject({ method: 'POST', url: `/api/runs/${run.id}/rounds/1/abort` })
+    expect(res.statusCode).toBe(409)
+    expect(JSON.parse(res.body)).toEqual({ error: 'no round in flight' })
+    expect(called).toEqual([])
+  })
+
+  test('404: unknown run + unknown round idx', async () => {
+    const { repos, run } = seed()
+    const api = appFor(repos, abortable(true, []))
+    const noRun = await api.inject({ method: 'POST', url: '/api/runs/nope/rounds/1/abort' })
+    expect(noRun.statusCode).toBe(404)
+    expect(JSON.parse(noRun.body)).toEqual({ error: 'no such run' })
+    const noRound = await api.inject({ method: 'POST', url: `/api/runs/${run.id}/rounds/99/abort` })
+    expect(noRound.statusCode).toBe(404)
+    expect(JSON.parse(noRound.body)).toEqual({ error: 'no such round' })
+  })
+
+  test('409: stopped', async () => {
+    const { repos, run } = seed()
+    repos.runs.setStatus(run.id, 'stopped')
+    const called: string[] = []
+    const api = appFor(repos, abortable(true, called))
+    const res = await api.inject({ method: 'POST', url: `/api/runs/${run.id}/rounds/1/abort` })
+    expect(res.statusCode).toBe(409)
+    expect(JSON.parse(res.body)).toEqual({ error: 'run is stopped' })
+    expect(called).toEqual([])
+  })
+})
+
 describe('POST /api/runs/:runId/rounds/:idx/criteria', () => {
   test('200: writes the row criteria + user source', async () => {
     const { repos, run, round } = seed()

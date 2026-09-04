@@ -4,6 +4,9 @@ import { parseGenome } from '../../src/core/genome.js'
 import { Judge } from '../../src/judge/judge.js'
 import { Reflector } from '../../src/evolution/reflect.js'
 import { MockProvider } from '../../src/runtime/mock-provider.js'
+import { MockAgentRunner } from '../../src/runtime/agent-runner.js'
+import type { AgentHandle } from '../../src/runtime/sandbox.js'
+import type { AgentRunContext } from '../../src/runtime/agent-runner.js'
 
 describe('TournamentEngine', () => {
   test('seeds the population from the roster', async () => {
@@ -89,6 +92,81 @@ describe('TournamentEngine', () => {
       expect(r.criteriaSource).toBe('user')
     } finally {
       hook.mockRestore()
+      scoreSpy.mockRestore()
+    }
+  })
+})
+
+describe('cooperative abort', () => {
+  test('abort during PREPARE: queued agents stop, runner and judge never called', async () => {
+    const { engine, repos, sandbox } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('t', 'goal')
+    // Flip the flag inside the first provision call — i.e. after runRound's
+    // start-clear has run, so the abort genuinely lands mid-round. Everything
+    // after that call is synchronous pool setup, so exactly one provision runs.
+    const origProvision = sandbox.provision.bind(sandbox)
+    let provisions = 0
+    const provisionSpy = vi
+      .spyOn(sandbox, 'provision')
+      .mockImplementation(async (agentId, opts) => {
+        provisions++
+        engine.abortRound(run.id)
+        return origProvision(agentId, opts)
+      })
+    const runSpy = vi.spyOn(MockAgentRunner.prototype, 'run')
+    const scoreSpy = vi.spyOn(Judge.prototype, 'score')
+    try {
+      await expect(
+        engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null }),
+      ).rejects.toThrow(/round aborted/)
+      expect(provisions).toBe(1)
+      expect(runSpy).not.toHaveBeenCalled()
+      expect(scoreSpy).not.toHaveBeenCalled()
+      expect(repos.rounds.listForRun(run.id)[0]!.status).toBe('failed')
+    } finally {
+      provisionSpy.mockRestore()
+      runSpy.mockRestore()
+      scoreSpy.mockRestore()
+    }
+  })
+
+  test('a stale flag with no round in flight never kills the next round', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('t', 'goal')
+    // No round running: the manager refuses this, but a direct call must still
+    // be harmless — runRound's start-clear drops it.
+    engine.abortRound(run.id)
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
+  })
+
+  test('abort mid-RUN: queued agents stop while the in-flight one completes', async () => {
+    // hugeTokensFor forces concurrency 1, so flipping the flag inside the first
+    // runner call guarantees agents 2-4 are still queued — a fact, not a race.
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4, hugeTokensFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const orig = MockAgentRunner.prototype.run
+    let calls = 0
+    const runSpy = vi
+      .spyOn(MockAgentRunner.prototype, 'run')
+      .mockImplementation(async function (this: unknown, handle: AgentHandle, ctx: AgentRunContext) {
+        calls++
+        if (calls === 1) engine.abortRound(run.id)
+        return orig.call(this, handle, ctx)
+      })
+    const scoreSpy = vi.spyOn(Judge.prototype, 'score')
+    try {
+      await expect(
+        engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null }),
+      ).rejects.toThrow(/round aborted/)
+      expect(calls).toBe(1)
+      expect(scoreSpy).not.toHaveBeenCalled()
+      expect(repos.rounds.listForRun(run.id)[0]!.status).toBe('failed')
+      // The next round starts clean — the abort flag did not linger.
+      const next = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+      expect(repos.rounds.get(next.roundId)?.status).toBe('complete')
+    } finally {
+      runSpy.mockRestore()
       scoreSpy.mockRestore()
     }
   })
