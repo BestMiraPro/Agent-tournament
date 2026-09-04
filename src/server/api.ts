@@ -105,6 +105,9 @@ function roundStats(repos: Repos, runId: string) {
     fitness: { mean: number; min: number; max: number }
     modelShare: { modelId: string; count: number }[]
     diversity: number
+    criteriaMd: string | null
+    criteriaSource: 'user' | 'generated'
+    metaDigest: string | null
   }[] = []
   for (const round of repos.rounds.listForRun(runId)) {
     const scores = repos.scores.forRound(round.id)
@@ -134,6 +137,10 @@ function roundStats(repos: Repos, runId: string) {
         .sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
         .map(([modelId, count]) => ({ modelId, count })),
       diversity: strategyDiversity(strategies),
+      // Straight from the row: unscored rounds never reach here (skipped above).
+      criteriaMd: round.criteriaMd,
+      criteriaSource: round.criteriaSource === 'user' ? 'user' : 'generated',
+      metaDigest: round.metaDigest,
     })
   }
   return out
@@ -366,6 +373,31 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const { runId } = req.params as { runId: string }
     if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
     return roundStats(deps.repos, runId)
+  })
+
+  app.post('/api/runs/:runId/rounds/:idx/criteria', async (req, reply) => {
+    const { runId, idx } = req.params as { runId: string; idx: string }
+    const run = deps.repos.runs.get(runId)
+    if (!run) return reply.code(404).send({ error: 'no such run' })
+    // The list is small; no dedicated repo getter for a single (runId, idx).
+    const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
+    if (!round) return reply.code(404).send({ error: 'no such round' })
+    if (run.status === 'stopped') return reply.code(409).send({ error: 'run is stopped' })
+    if (round.status === 'complete' || round.status === 'failed') {
+      return reply.code(409).send({ error: 'round already scored' })
+    }
+    let body: { criteriaMd: string }
+    try {
+      body = z.object({ criteriaMd: z.string().min(1) }).parse(req.body ?? {})
+    } catch (e) {
+      return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
+    }
+    // Best-effort before scoring: if JUDGE already resolved criteria, the row still
+    // records the user's text (display shows it) but scoring used the earlier ones.
+    // The API cannot see the judge phase (only the busy boolean), so no finer guard
+    // exists without engine phase reporting (out of scope).
+    deps.repos.rounds.setCriteria(round.id, body.criteriaMd, 'user')
+    return { ok: true }
   })
 
   app.post('/api/runs/:id/rounds', async (req, reply) => {

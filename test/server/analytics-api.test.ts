@@ -165,7 +165,11 @@ test('legacy 3-arg buildApi serves the agent-detail route on a repos-only run', 
 
 describe('GET /api/runs/:runId/rounds', () => {
   test('200: one entry per scored round, asc — fitness, modelShare, diversity, goalMd', async () => {
-    const { app, run } = setup()
+    const { app, repos, run } = setup()
+    // Round 1 carries a user override + digest; the rest stay generated/null.
+    const [first] = repos.rounds.listForRun(run.id)
+    repos.rounds.setCriteria(first!.id, 'user rules', 'user')
+    repos.rounds.setDigest(first!.id, 'winners wrote tests')
     const res = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/rounds` })
     expect(res.statusCode).toBe(200)
     const body = JSON.parse(res.body) as Array<{
@@ -173,6 +177,9 @@ describe('GET /api/runs/:runId/rounds', () => {
       fitness: { mean: number; min: number; max: number }
       modelShare: { modelId: string; count: number }[]
       diversity: number
+      criteriaMd: string | null
+      criteriaSource: 'user' | 'generated'
+      metaDigest: string | null
     }>
     // Round 1: only alpha/beta/gamma are alive; delta (born round 2, model/1) joins from round 2 on.
     expect(body.map((r) => r.idx)).toEqual([1, 2, 3])
@@ -196,6 +203,13 @@ describe('GET /api/runs/:runId/rounds', () => {
       expect(r.diversity).toBeGreaterThan(0)
       expect(r.diversity).toBeLessThanOrEqual(1)
     }
+    // Additive round-detail fields straight from the row.
+    expect(body[0]).toMatchObject({
+      criteriaMd: 'user rules', criteriaSource: 'user', metaDigest: 'winners wrote tests',
+    })
+    expect(body[1]).toMatchObject({
+      criteriaMd: null, criteriaSource: 'generated', metaDigest: null,
+    })
   })
 
   test('a round without score rows (in-flight) is excluded', async () => {

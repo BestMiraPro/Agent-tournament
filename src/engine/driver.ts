@@ -449,9 +449,14 @@ export class TournamentEngine {
       // JUDGE
       repos.rounds.setStatus(round.id, 'judging')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'judging' })
+      // WHY re-read the row: an override that lands mid-round must win over the
+      // POST body. A fresh row defaults to criteriaSource 'generated' (rounds.create),
+      // so the fast path is byte-identical to today.
+      const rowNow = repos.rounds.get(round.id)
+      const effective = rowNow?.criteriaSource === 'user' ? rowNow.criteriaMd : input.criteriaMd
       const { criteriaMd, source } = await this.d.judge.resolveCriteria(
         input.goalMd,
-        input.criteriaMd,
+        effective,
       )
       repos.rounds.setCriteria(round.id, criteriaMd, source)
       const judged = await this.d.judge.score(input.goalMd, criteriaMd, judgeInputs, roundIdx)

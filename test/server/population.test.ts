@@ -90,6 +90,7 @@ describe('POST /api/runs/:runId/agents', () => {
   test.each([
     ['temperature 3', { modelId: 'm', temperature: 3, strategy: { mode: 'blank' } }],
     ['empty pasted text', { modelId: 'm', temperature: 0.5, strategy: { mode: 'pasted', strategyMd: '' } }],
+    ['empty modelId', { modelId: '', temperature: 0.5, strategy: { mode: 'blank' } }],
   ])('400: %s', async (_name, payload) => {
     const { repos, run } = seed()
     const api = appFor(repos, idle())
@@ -188,6 +189,22 @@ describe('POST /api/runs/:runId/agents', () => {
     expect(res.statusCode).toBe(409)
     expect(JSON.parse(res.body)).toEqual({ error: 'run is stopped' })
   })
+
+  test('label collision: a seeded would-be label is suffixed, stays unique', async () => {
+    const { repos, run } = seed()
+    // nextIdx is 2 and 2 agents exist, so the next add would take manual-3: occupy it.
+    repos.agents.create({ runId: run.id, label: 'competitor-r2-manual-3', parentAgentId: null, bornRound: 2 })
+    const api = appFor(repos, idle())
+    const res = await api.inject({
+      method: 'POST', url: `/api/runs/${run.id}/agents`,
+      payload: { modelId: 'mock/model', temperature: 0.7, strategy: { mode: 'blank' } },
+    })
+    expect(res.statusCode).toBe(201)
+    const body = JSON.parse(res.body) as { agentId: string; label: string }
+    expect(body.label).toBe('competitor-r2-manual-4')
+    const labels = repos.agents.listAll(run.id).map((a) => a.label)
+    expect(new Set(labels).size).toBe(labels.length)
+  })
 })
 
 describe('DELETE /api/runs/:runId/agents/:agentId', () => {
@@ -228,7 +245,8 @@ describe('DELETE /api/runs/:runId/agents/:agentId', () => {
     const busyRes = await busyApi.inject({ method: 'DELETE', url: `/api/runs/${run.id}/agents/${a.agent.id}` })
     expect(busyRes.statusCode).toBe(409)
     expect(JSON.parse(busyRes.body)).toEqual({ error: 'run is busy' })
-    expect(b.agent.id).toBeDefined()
+    // The busy refusal retired nothing: b is still active.
+    expect(repos.agents.listAll(run.id).find((x) => x.id === b.agent.id)!.status).toBe('active')
     repos.runs.setStatus(run.id, 'stopped')
     const idleApi = appFor(repos, idle())
     const stoppedRes = await idleApi.inject({ method: 'DELETE', url: `/api/runs/${run.id}/agents/${a.agent.id}` })
@@ -254,5 +272,77 @@ describe('DELETE /api/runs/:runId/agents/:agentId', () => {
     const res = await api.inject({ method: 'DELETE', url: `/api/runs/${run.id}/agents/${solo.id}` })
     expect(res.statusCode).toBe(409)
     expect(JSON.parse(res.body)).toEqual({ error: 'cannot retire the last active agent' })
+  })
+})
+
+describe('POST /api/runs/:runId/rounds/:idx/criteria', () => {
+  test('200: writes the row criteria + user source', async () => {
+    const { repos, run, round } = seed()
+    const api = appFor(repos, idle())
+    const res = await api.inject({
+      method: 'POST', url: `/api/runs/${run.id}/rounds/1/criteria`,
+      payload: { criteriaMd: 'my rules' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ ok: true })
+    const row = repos.rounds.get(round.id)!
+    expect(row.criteriaMd).toBe('my rules')
+    expect(row.criteriaSource).toBe('user')
+  })
+
+  test('400: empty criteriaMd', async () => {
+    const { repos, run } = seed()
+    const api = appFor(repos, idle())
+    const res = await api.inject({
+      method: 'POST', url: `/api/runs/${run.id}/rounds/1/criteria`,
+      payload: { criteriaMd: '' },
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  test('404: unknown run', async () => {
+    const { repos } = seed()
+    const api = appFor(repos, idle())
+    const res = await api.inject({
+      method: 'POST', url: '/api/runs/nope/rounds/1/criteria',
+      payload: { criteriaMd: 'my rules' },
+    })
+    expect(res.statusCode).toBe(404)
+    expect(JSON.parse(res.body)).toEqual({ error: 'no such run' })
+  })
+
+  test('404: unknown round idx', async () => {
+    const { repos, run } = seed()
+    const api = appFor(repos, idle())
+    const res = await api.inject({
+      method: 'POST', url: `/api/runs/${run.id}/rounds/99/criteria`,
+      payload: { criteriaMd: 'my rules' },
+    })
+    expect(res.statusCode).toBe(404)
+    expect(JSON.parse(res.body)).toEqual({ error: 'no such round' })
+  })
+
+  test('409: round already scored', async () => {
+    const { repos, run, round } = seed()
+    repos.rounds.setStatus(round.id, 'complete')
+    const api = appFor(repos, idle())
+    const res = await api.inject({
+      method: 'POST', url: `/api/runs/${run.id}/rounds/1/criteria`,
+      payload: { criteriaMd: 'too late' },
+    })
+    expect(res.statusCode).toBe(409)
+    expect(JSON.parse(res.body)).toEqual({ error: 'round already scored' })
+  })
+
+  test('409: stopped', async () => {
+    const { repos, run } = seed()
+    repos.runs.setStatus(run.id, 'stopped')
+    const api = appFor(repos, idle())
+    const res = await api.inject({
+      method: 'POST', url: `/api/runs/${run.id}/rounds/1/criteria`,
+      payload: { criteriaMd: 'my rules' },
+    })
+    expect(res.statusCode).toBe(409)
+    expect(JSON.parse(res.body)).toEqual({ error: 'run is stopped' })
   })
 })
