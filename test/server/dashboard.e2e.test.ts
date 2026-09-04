@@ -12,6 +12,8 @@ import { MockAgentRunner } from '../../src/runtime/agent-runner.js'
 import { MockProvider } from '../../src/runtime/mock-provider.js'
 import { MockSandbox } from '../../src/runtime/mock-sandbox.js'
 import { buildApi } from '../../src/server/api.js'
+import { composeRun } from '../../src/server/compose-run.js'
+import { RunRegistry } from '../../src/server/runs.js'
 import { RunManager } from '../../src/server/run-manager.js'
 import { EventBroadcaster } from '../../src/server/ws.js'
 
@@ -298,6 +300,69 @@ describe('dashboard end to end', () => {
     expect(only.criteriaMd).not.toBeNull()
     expect(['user', 'generated']).toContain(only.criteriaSource)
     expect('metaDigest' in only).toBe(true)
+
+    await app.close()
+  }, 60_000)
+
+  test('phase4e guard: POST accepts the extended run spec; snapshot unaffected', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    // Mock sandbox composes with no daemon, so the extended spec flows through
+    // the real runConfigFor derivation. Setup criteria rides to round 1 via the
+    // client in production — pin 201 acceptance + snapshot shape, not that flow.
+    const app = buildApi({
+      repos,
+      registry,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (name: string) => repos.runs.create({ name, config: DEFAULT_CONFIG, seedDir: null }).id,
+      composeWith: (spec, opts) => composeRun(spec, {}, opts),
+    })
+
+    const created = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: {
+        name: 'e2e-extended', goal: 'g',
+        sandbox: 'mock',
+        roster: [{ modelId: 'mock/model', count: 4, temperature: 0.7 }],
+        criteria: 'prefer short answers',
+        selection: { eliteCount: 1, topPct: 0.5 },
+        concurrency: 4,
+        pricing: { 'mock/model': { inPerM: 1, outPerM: 2, cacheReadPerM: 0.5, cacheWritePerM: 0.5 } },
+      },
+    })
+    expect(created.statusCode).toBe(201)
+    const { runId }: { runId: string } = JSON.parse(created.body)
+
+    // One derivation pin: the composed config (runConfigFor output) carries the knobs.
+    const record = registry.get(runId)
+    expect(record?.spec.criteria).toBe('prefer short answers')
+    expect(record?.composed.config.concurrency).toBe(4)
+    expect(record?.composed.config.selection.eliteCount).toBe(1)
+    expect(record?.composed.config.selection.topPct).toBe(0.5)
+    expect(record?.composed.config.pricing['mock/model']).toEqual(
+      { inPerM: 1, outPerM: 2, cacheReadPerM: 0.5, cacheWritePerM: 0.5 },
+    )
+
+    // A cache-less pricing entry is a schema 400 (the engine fail-closes without cache rates).
+    const twoKey = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: {
+        name: 'e2e-2key', goal: 'g',
+        sandbox: 'mock',
+        roster: [{ modelId: 'mock/model', count: 4, temperature: 0.7 }],
+        pricing: { 'mock/model': { inPerM: 1, outPerM: 2 } },
+      },
+    })
+    expect(twoKey.statusCode).toBe(400)
+
+    // Snapshot unaffected: fresh run, no rounds yet — the seed population stands.
+    const snapshot = await app.inject({ method: 'GET', url: `/api/runs/${runId}` })
+    expect(snapshot.statusCode).toBe(200)
+    const body = JSON.parse(snapshot.body)
+    expect(body.name).toBe('e2e-extended')
+    expect(body.lastRoundIdx).toBe(0)
+    expect(body.agents).toHaveLength(4)
 
     await app.close()
   }, 60_000)
