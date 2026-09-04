@@ -94,3 +94,17 @@ circle.chart-line--min { fill: #ef4444; }
 .tree { margin: 0; padding-left: 1.2rem; font-size: .85rem; }
 .tree ul { padding-left: 1.2rem; }
 .tree__node { background: none; border: none; padding: 0; font: inherit; color: inherit; text-decoration: underline; }
+.summary__strip { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1rem; border: 1px solid #8882; border-radius: .5rem; padding: .5rem .7rem; margin-bottom: 1rem; font-size: .85rem; }
+.summary__name { font-weight: 600; }
+.rounddetail { display: grid; gap: .75rem; margin-top: 1.5rem; }
+.rounddetail h2 { font-size: .9rem; margin: 0; }
+.rounddetail select { font: inherit; padding: .4rem; }
+.rounddetail__head { display: flex; align-items: center; gap: .5rem; }
+.rounddetail__header { display: grid; gap: .4rem; border: 1px solid #8882; border-radius: .5rem; padding: .6rem; font-size: .85rem; }
+.rounddetail__goal { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.rounddetail__header .muted { margin: 0; }
+.rounddetail__entries { display: grid; gap: .5rem; }
+.rounddetail__entry { border: 1px solid #8882; border-radius: .5rem; padding: .6rem; display: grid; gap: .4rem; font-size: .85rem; }
+.rounddetail__entry-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.rounddetail__label { font-weight: 600; }
+.rounddetail__entry details summary { cursor: pointer; font-size: .8rem; }

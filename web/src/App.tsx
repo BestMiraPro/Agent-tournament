@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import './styles.css'
-import { abortRound, createAgent, createRunFull, deleteRun, getRoundStats, getRun, overrideCriteria, serverError, startRound, type FullRunSpec, type RunSnapshot } from './api.js'
+import { abortRound, createAgent, createRunFull, deleteRun, getRoundStats, getRun, overrideCriteria, serverError, startRound, type FullRunSpec, type RoundStats, type RunSnapshot } from './api.js'
 import { parsePricing } from './lib/pricing.js'
 import { useLiveRun } from './useLiveRun.js'
 import { AgentDrawer } from './components/AgentDrawer.js'
 import { AnalyticsPanel } from './components/AnalyticsPanel.js'
+import { RoundDetail } from './components/RoundDetail.js'
+import { RunSummary } from './components/RunSummary.js'
 import { AgentGrid } from './components/AgentGrid.js'
 import { Leaderboard } from './components/Leaderboard.js'
 import { RoundControls } from './components/RoundControls.js'
@@ -47,6 +49,9 @@ export function App() {
     criteriaSource: 'user' | 'generated' | null
     metaDigest: string | null
   } | null>(null)
+  // The same round-stats fetch feeds the summary strip + round-detail selector —
+  // retained, not refetched, so no new polling beyond this existing call.
+  const [roundStats, setRoundStats] = useState<RoundStats[]>([])
   // Setup criteria is a single-session default for round 1 only — rounds own
   // criteria after that, so a reload before round 1 loses it (no persistence).
   const [pendingCriteria, setPendingCriteria] = useState<string | null>(null)
@@ -136,12 +141,13 @@ export function App() {
     getRoundStats(runIdForRounds)
       .then((rounds) => {
         if (!alive) return
+        setRoundStats(rounds)
         const last = rounds.find((r) => r.idx === lastRoundIdx) ?? null
         setLastRound(last
           ? { criteriaMd: last.criteriaMd, criteriaSource: last.criteriaSource, metaDigest: last.metaDigest }
           : { criteriaMd: null, criteriaSource: null, metaDigest: null })
       })
-      .catch(() => { if (alive) setLastRound(null) })
+      .catch(() => { if (alive) { setRoundStats([]); setLastRound(null) } })
     return () => { alive = false }
   }, [runIdForRounds, lastRoundIdx])
   // A stop cannot be undone server-side, but a fresh round means this run is
@@ -186,6 +192,7 @@ export function App() {
       {stopped && <p className="muted">Run stopped.</p>}
       {stopError && <p className="error">{stopError}</p>}
       {snapshot.warnings.length > 0 && <p className="muted">{snapshot.warnings.join(' · ')}</p>}
+      <RunSummary snapshot={snapshot} busy={busy} roundStats={roundStats} />
       <div className="layout">
         <AgentGrid agents={snapshot.agents} live={live} onSelect={setSelectedAgentId} />
         <aside>
@@ -228,6 +235,12 @@ export function App() {
         runId={snapshot.runId}
         agents={snapshot.agents}
         onOpenAgent={setSelectedAgentId}
+        refreshKey={snapshot.lastRoundIdx}
+      />
+      <RoundDetail
+        runId={snapshot.runId}
+        rounds={roundStats}
+        busy={busy}
         refreshKey={snapshot.lastRoundIdx}
       />
       {selectedAgentId && (

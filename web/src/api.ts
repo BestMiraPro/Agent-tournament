@@ -144,6 +144,40 @@ export interface RoundStats {
 export const getRoundStats = (runId: string): Promise<RoundStats[]> =>
   fetch(`/api/runs/${runId}/rounds`).then(json)
 
+// Mirrors GET /api/runs/:runId/rounds/:idx verbatim (spec §3): header fields +
+// entries ASC by rank, submission-or-null per entry (same join as agent history).
+export interface RoundDetail {
+  idx: number
+  goalMd: string
+  criteriaMd: string | null
+  criteriaSource: 'user' | 'generated'
+  metaDigest: string | null
+  costUsd: number
+  status: string
+  judgeMode: string
+  entries: {
+    agentId: string
+    label: string
+    modelId: string
+    score: number
+    rank: number
+    band: string | null
+    rationaleMd: string
+    submission: {
+      status: string
+      errorText: string | null
+      submissionMd: string | null
+      fileManifest: unknown
+      costUsd: number
+      durationMs: number | null
+      tokens: { in: number; out: number; cacheRead: number; cacheWrite: number }
+    } | null
+  }[]
+}
+
+export const getRoundDetail = (runId: string, idx: number): Promise<RoundDetail> =>
+  fetch(`/api/runs/${runId}/rounds/${idx}`).then(json)
+
 export const deleteRun = (runId: string): Promise<{ stopped: boolean }> =>
   fetch(`/api/runs/${runId}`, { method: 'DELETE' }).then(json)
 
