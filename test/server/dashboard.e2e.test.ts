@@ -720,4 +720,76 @@ describe('dashboard end to end', () => {
 
     await app.close()
   }, 60_000)
+
+  test('phase4j guard: rejudge round with a different model (non-destructive dry-run)', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    const population = 3
+    // Mock sandbox composes with no daemon; the composed run registers a record
+    // whose provider (MockProvider) the rejudge endpoint reuses — no seam needed.
+    const app = buildApi({
+      repos,
+      registry,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (name: string) => repos.runs.create({ name, config: DEFAULT_CONFIG, seedDir: null }).id,
+      composeWith: (spec, opts) => composeRun(spec, {}, opts),
+    })
+
+    const created = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: {
+        name: 'rejudge-run', goal: 'g',
+        sandbox: 'mock',
+        roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
+      },
+    })
+    expect(created.statusCode).toBe(201)
+    const { runId }: { runId: string } = JSON.parse(created.body)
+    const record = registry.get(runId)
+    expect(record).not.toBeNull()
+
+    const started = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'write a good answer' },
+    })
+    expect(started.statusCode).toBe(202)
+    await record!.manager.waitForIdle(runId)
+
+    const res = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds/1/rejudge`,
+      payload: { judgeModelId: 'mock/model' },
+    })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body.entries).toHaveLength(population)
+    for (const e of body.entries) {
+      expect(typeof e.oldScore).toBe('number')
+      expect(typeof e.newScore).toBe('number')
+      expect(typeof e.oldRank).toBe('number')
+      expect(typeof e.newRank).toBe('number')
+      expect(typeof e.rankChanged).toBe('boolean')
+    }
+    expect(typeof body.metaDigest).toBe('string')
+    expect(typeof body.mode).toBe('string')
+
+    // 404 for a non-existent round idx.
+    const nope = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds/99/rejudge`,
+      payload: { judgeModelId: 'mock/model' },
+    })
+    expect(nope.statusCode).toBe(404)
+
+    // 409 for a legacy run (no record → no live provider).
+    const legacyId = repos.runs.create({ name: 'legacy', config: DEFAULT_CONFIG, seedDir: null }).id
+    const lr = repos.rounds.create({ runId: legacyId, idx: 1, goalMd: 'goal' })
+    repos.rounds.setStatus(lr.id, 'complete')
+    const legacyRes = await app.inject({
+      method: 'POST', url: `/api/runs/${legacyId}/rounds/1/rejudge`,
+      payload: { judgeModelId: 'mock/model' },
+    })
+    expect(legacyRes.statusCode).toBe(409)
+    expect(JSON.parse(legacyRes.body).error).toMatch('no live provider')
+
+    await app.close()
+  }, 60_000)
 })

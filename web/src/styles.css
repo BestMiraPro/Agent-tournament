@@ -122,6 +122,12 @@ circle.chart-line--min { fill: #ef4444; }
 .rounddetail__entry-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .rounddetail__label { font-weight: 600; }
 .rounddetail__entry details summary { cursor: pointer; font-size: .8rem; }
+.rounddetail__rejudge { display: flex; gap: .4rem; align-items: center; }
+.rounddetail__rejudge input { font: inherit; padding: .35rem; flex: 1; min-width: 0; }
+.rounddetail__rejudge-result { border: 1px solid #8882; border-radius: .5rem; padding: .6rem; font-size: .85rem; display: grid; gap: .4rem; }
+.rounddetail__rejudge-head { display: flex; align-items: center; justify-content: space-between; }
+.rounddetail__rejudge-result table { width: 100%; }
+.rounddetail__rejudge-result th, .rounddetail__rejudge-result td { text-align: left; padding: .25rem .4rem; border-bottom: 1px solid #8882; vertical-align: top; }
 
 .grid__pager { display: flex; align-items: center; justify-content: center; gap: .75rem; margin-top: .75rem; }
 .pager__btn { background: #1f2937; color: #e5e7eb; border: 1px solid #374151; border-radius: .25rem; padding: .25rem .75rem; cursor: pointer; }

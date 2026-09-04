@@ -276,3 +276,27 @@ export const overrideCriteria = (runId: string, idx: number, criteriaMd: string)
 
 export const abortRound = (runId: string, idx: number): Promise<{ aborted: boolean }> =>
   fetch(`/api/runs/${runId}/rounds/${idx}/abort`, { method: 'POST' }).then(json)
+
+export interface RejudgeEntry {
+  agentId: string
+  label: string
+  oldScore: number
+  oldRank: number
+  newScore: number
+  newRank: number
+  newRationaleMd: string
+  rankChanged: boolean
+}
+
+export interface RejudgeResult {
+  entries: RejudgeEntry[]
+  metaDigest: string
+  mode: string
+}
+
+export const rejudge = (runId: string, idx: number, judgeModelId: string): Promise<RejudgeResult> =>
+  fetch(`/api/runs/${runId}/rounds/${idx}/rejudge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ judgeModelId }),
+  }).then(json)

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getRoundDetail, serverError, type RoundDetail as RoundDetailData } from '../api.js'
+import { getRoundDetail, listModels, rejudge, serverError, type RoundDetail as RoundDetailData, type RejudgeResult } from '../api.js'
 import { Markdown } from './Markdown.js'
 
 // Manifest entries are FileEntry { path, bytes } rows, but the endpoint serves
@@ -64,18 +64,36 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
   const [detail, setDetail] = useState<RoundDetailData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [models, setModels] = useState<string[]>([])
+  const [judgeModel, setJudgeModel] = useState('')
+  const [rejudging, setRejudging] = useState(false)
+  const [rejudgeResult, setRejudgeResult] = useState<RejudgeResult | null>(null)
+  const [rejudgeError, setRejudgeError] = useState<string | null>(null)
 
   // First load shows a line; later refreshes stay silent so a flaky fetch never
   // wipes the entries — the arena's own refresh already surfaces connection problems.
   useEffect(() => {
     if (effective === null) return
     let alive = true
+    setRejudgeResult(null)
+    setRejudgeError(null)
     getRoundDetail(runId, effective)
       .then((d) => { if (alive) { setDetail(d); setLoading(false); setError(null) } })
       .catch((e) => { if (alive) { setError(serverError(e)); setLoading(false) } })
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, effective, refreshKey])
+
+  // Known-models is a copy-paste aid only: failure or an empty list hides the
+  // datalist options and free-text input keeps working (mirrors RunSetup).
+  useEffect(() => {
+    let alive = true
+    listModels().then(
+      (m) => { if (alive) setModels(m) },
+      () => { if (alive) setModels([]) },
+    )
+    return () => { alive = false }
+  }, [])
 
   if (options.length === 0) return null
 
@@ -86,6 +104,22 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
     setDetail(null)
     setLoading(true)
     setError(null)
+    setRejudgeResult(null)
+    setRejudgeError(null)
+  }
+
+  const handleRejudge = async () => {
+    if (effective === null) return
+    setRejudging(true)
+    setRejudgeError(null)
+    setRejudgeResult(null)
+    try {
+      setRejudgeResult(await rejudge(runId, effective, judgeModel.trim()))
+    } catch (e) {
+      setRejudgeError(serverError(e))
+    } finally {
+      setRejudging(false)
+    }
   }
 
   return (
@@ -118,6 +152,51 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
             </p>
             {detail.metaDigest !== null && <Markdown text={detail.metaDigest} />}
           </div>
+          <form className="rounddetail__rejudge" onSubmit={(e) => { e.preventDefault(); void handleRejudge() }}>
+            <input
+              list="rejudge-models"
+              value={judgeModel}
+              onChange={(e) => setJudgeModel(e.target.value)}
+              placeholder="judge model id"
+              disabled={busy || rejudging}
+              aria-label="Judge model"
+            />
+            <datalist id="rejudge-models">
+              {models.map((m) => <option key={m} value={m} />)}
+            </datalist>
+            <button
+              type="submit"
+              disabled={busy || rejudging || !judgeModel.trim() || detail.status !== 'complete'}
+            >
+              {rejudging ? 'Rejudging…' : 'Rejudge'}
+            </button>
+          </form>
+          {rejudgeError && <p className="error">{rejudgeError}</p>}
+          {rejudgeResult && (
+            <div className="rounddetail__rejudge-result">
+              <div className="rounddetail__rejudge-head">
+                <span className="muted">Rejudge ({rejudgeResult.mode})</span>
+                <button type="button" onClick={() => setRejudgeResult(null)}>Clear</button>
+              </div>
+              <table>
+                <thead>
+                  <tr><th>Agent</th><th>Old</th><th>New</th><th></th><th>New rationale</th></tr>
+                </thead>
+                <tbody>
+                  {rejudgeResult.entries.map((e) => (
+                    <tr key={e.agentId}>
+                      <td>{e.label}</td>
+                      <td>#{e.oldRank}</td>
+                      <td>#{e.newRank}</td>
+                      <td>{e.rankChanged ? <span className="badge">changed</span> : <span className="muted">—</span>}</td>
+                      <td>{e.newRationaleMd}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {rejudgeResult.metaDigest && <Markdown text={rejudgeResult.metaDigest} />}
+            </div>
+          )}
           {detail.entries.length === 0 ? (
             <p className="muted">Scoring in progress — entries appear after judging.</p>
           ) : (

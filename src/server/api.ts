@@ -1,11 +1,11 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { DEFAULT_CONFIG, type AgentRow, type RunConfig } from '../core/types.js'
+import { DEFAULT_CONFIG, type AgentRow, type FileEntry, type RunConfig } from '../core/types.js'
 import type { Repos, RoundRow } from '../db/repos.js'
 import { TournamentEngine } from '../engine/driver.js'
 import type { EventSink } from '../engine/events.js'
 import { Reflector } from '../evolution/reflect.js'
-import { Judge } from '../judge/judge.js'
+import { Judge, type JudgeInput, type JudgeOutput } from '../judge/judge.js'
 import { runConfigFor, type ComposedRun, type RunIdHolder } from './compose-run.js'
 import { startEventBridge } from './event-bridge.js'
 import { disposeRunRecord, type RunRecord, type RunRegistry } from './runs.js'
@@ -537,6 +537,58 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     // aborted; completed phases keep their rows and the round ends failed.
     mgr.abortRound(runId)
     return reply.code(202).send({ aborted: true })
+  })
+
+  app.post('/api/runs/:runId/rounds/:idx/rejudge', async (req, reply) => {
+    const { runId, idx } = req.params as { runId: string; idx: string }
+    const run = deps.repos.runs.get(runId)
+    if (!run) return reply.code(404).send({ error: 'no such run' })
+    const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
+    if (!round) return reply.code(404).send({ error: 'no such round' })
+    if (round.status !== 'complete') return reply.code(409).send({ error: 'round is not complete' })
+    const record = deps.registry?.get(runId)
+    if ((record?.manager ?? deps.manager).isBusy(runId)) return reply.code(409).send({ error: 'run is busy' })
+    let body: { judgeModelId: string }
+    try {
+      body = z.object({ judgeModelId: z.string().min(1) }).parse(req.body ?? {})
+    } catch (e) {
+      return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
+    }
+    // A live record carries the run's composed provider (mock or real); a legacy
+    // run has no record and no stored workspaceRoot, so a fresh opencode server
+    // cannot be reconstructed — 409 is honest rather than a half-built provider.
+    const provider = record?.composed.provider
+    if (!provider) return reply.code(409).send({ error: 'no live provider for this run' })
+    const judge = new Judge(provider, { ...run.config.judge, modelId: body.judgeModelId }, 42)
+    const agents = deps.repos.agents.listAll(runId)
+    const byId = new Map(agents.map((a) => [a.id, a]))
+    const inputs: JudgeInput[] = deps.repos.submissions.forRound(round.id).map((sub) => ({
+      agentId: sub.agentId,
+      submissionMd: sub.submissionMd ?? '',
+      files: (Array.isArray(sub.fileManifest) ? sub.fileManifest : []) as FileEntry[],
+      status: sub.status,
+    }))
+    let output: JudgeOutput
+    try {
+      output = await judge.score(round.goalMd, round.criteriaMd ?? '', inputs, round.idx)
+    } catch (e) {
+      return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
+    }
+    const oldByAgent = new Map(deps.repos.scores.forRound(round.id).map((s) => [s.agentId, s]))
+    const entries = output.scores.map((ns) => {
+      const old = oldByAgent.get(ns.agentId)
+      return {
+        agentId: ns.agentId,
+        label: byId.get(ns.agentId)?.label ?? '',
+        oldScore: old?.score ?? 0,
+        oldRank: old?.rank ?? 0,
+        newScore: ns.score,
+        newRank: ns.rank,
+        newRationaleMd: ns.rationaleMd,
+        rankChanged: old ? old.rank !== ns.rank : true,
+      }
+    })
+    return { entries, metaDigest: output.metaDigest, mode: output.mode }
   })
 
   app.post('/api/runs/:id/rounds', async (req, reply) => {
