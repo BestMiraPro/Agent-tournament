@@ -220,6 +220,18 @@ textarea:focus-visible, .cell--selectable:focus-visible {
 .cell--done .cell__rank[data-rank='2'], .cell--done .cell__rank[data-rank='3'] { color: var(--text); }
 
 .cell__model { margin-top: .1rem; font-size: .68rem; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The score is the largest thing on a scored cell: it is what selection acts on. */
+.cell__score {
+  margin-top: .3rem;
+  font-family: var(--font-mono);
+  font-size: 1.15rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.cell--done .cell__score { color: var(--done); }
 .cell__status { margin-top: .4rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); }
 .cell--running .cell__status { color: var(--running); }
 .cell--done .cell__status { color: var(--done); }
@@ -246,6 +258,29 @@ textarea:focus-visible, .cell--selectable:focus-visible {
   border-radius: var(--r-lg);
 }
 .summary__name { font-family: var(--font-sans); font-weight: 600; font-size: .85rem; color: var(--text); letter-spacing: -0.01em; }
+
+/* Every number in the strip carries its own label, so "0.43" is never ambiguous. */
+.stat { display: inline-flex; align-items: baseline; gap: .35rem; color: var(--text); }
+.stat em {
+  font-family: var(--font-sans); font-style: normal;
+  font-size: .62rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .09em;
+  color: var(--text-faint);
+}
+.stat small { color: var(--text-faint); font-size: .72rem; }
+
+.badge--live { color: var(--running); border-color: rgba(242, 177, 52, .5); background: rgba(242, 177, 52, .1); }
+
+/* Fitness sparkline: the answer to "is this working" at a glance. */
+.spark { display: inline-flex; align-items: center; gap: .4rem; }
+.spark svg { display: block; overflow: visible; }
+.spark__line { fill: none; stroke: var(--accent); stroke-width: 1.4; stroke-linejoin: round; stroke-linecap: round; }
+.spark__dot { fill: var(--accent); }
+.spark__trend { font-family: var(--font-mono); font-size: .7rem; font-weight: 600; }
+.spark__trend--up { color: var(--done); }
+.spark__trend--down { color: var(--failed); }
+/* Flat is the failure this chart exists to reveal, so it is warned, not neutral. */
+.spark__trend--flat { color: var(--running); }
 
 .badge {
   font-size: .68rem;

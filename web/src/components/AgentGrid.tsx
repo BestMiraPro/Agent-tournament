@@ -17,6 +17,10 @@ export function AgentGrid({ agents, live, onSelect }: {
   onSelect?: (agentId: string) => void
 }) {
   const rankOf = new Map(live.scores.map((s) => [s.agentId, s.rank]))
+  // Rank alone shows the order but not the gap, so the strength of selection
+  // pressure — whether #1 is barely ahead or running away with it — was invisible
+  // without opening each agent's drawer.
+  const scoreOf = new Map(live.scores.map((s) => [s.agentId, s.score]))
   const [page, setPage] = useState(1)
   useEffect(() => { setPage(1) }, [agents.length])
   const totalPages = Math.ceil(agents.length / PAGE_SIZE)
@@ -29,6 +33,7 @@ export function AgentGrid({ agents, live, onSelect }: {
           const l = live.agents[a.agentId]
           const status = l?.status ?? 'pending'
           const rank = rankOf.get(a.agentId)
+          const score = scoreOf.get(a.agentId)
           return (
             <div
               key={a.agentId}
@@ -54,6 +59,9 @@ export function AgentGrid({ agents, live, onSelect }: {
                 )}
               </div>
               <div className="cell__model" title={a.modelId}>{a.modelId}</div>
+              {score !== undefined && (
+                <div className="cell__score">{score.toFixed(1)}</div>
+              )}
               <div className="cell__status">{STATUS_LABEL[status] ?? status}</div>
               <div className="cell__activity">{l?.activity || ' '}</div>
               <div className="cell__usage">
