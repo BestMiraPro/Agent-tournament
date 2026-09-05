@@ -1,24 +1,5 @@
-import { WebSocketServer } from 'ws'
 import { parseArgs } from 'node:util'
-import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
-import { openDb } from '../db/open.js'
-import { makeRepos } from '../db/repos.js'
-import { recoverIncompleteRounds } from '../db/recover.js'
-import { TournamentEngine } from '../engine/driver.js'
-import { defaultSeedStrategy } from '../engine/seed-strategy.js'
-import type { EngineEvent } from '../engine/events.js'
-import { Judge } from '../judge/judge.js'
-import { Reflector } from '../evolution/reflect.js'
-import { MockAgentRunner } from '../runtime/agent-runner.js'
-import { MockProvider } from '../runtime/mock-provider.js'
-import { MockSandbox } from '../runtime/mock-sandbox.js'
-import { buildApi } from './api.js'
-import { RunManager } from './run-manager.js'
-import { EventBroadcaster } from './ws.js'
-import { composeRun, defaultSeams, type ComposedRun, type RunIdHolder } from './compose-run.js'
-import { RunRegistry, disposeRunRecord } from './runs.js'
-import type { RunSpec } from './run-spec.js'
-import { sweepOrphanContainers } from '../runtime/docker/sweep.js'
+import { createDashboard } from './create-dashboard.js'
 
 const { values } = parseArgs({
   options: {
@@ -34,83 +15,31 @@ const { values } = parseArgs({
 })
 
 const port = Number(values.port)
-const db = openDb(values.db!)
-const repos = makeRepos(db)
-const recovered = recoverIncompleteRounds(db)
-if (recovered > 0) console.log(`recovered ${recovered} interrupted round(s)`)
 
-const config: RunConfig = {
-  ...DEFAULT_CONFIG,
-  populationSize: Number(values.population),
-  sandbox: 'mock',
-  roster: [{ modelId: 'mock/model', count: Number(values.population), temperature: 0.7 }],
+// All wiring lives in createDashboard so this entry point and the end-to-end tests
+// exercise the same object graph. They used to build it separately, which is how the
+// servers kept a keyword-free seed strategy long after the CLI was fixed.
+const dashboard = createDashboard({
+  dbPath: values.db,
+  population: Number(values.population),
+  workspaceRoot: values['workspace-root'] ?? null,
+  authFile: values['auth-file'] ?? null,
+  serverUrl: values['server-url'] ?? null,
+})
+
+if (dashboard.recovered > 0) {
+  console.log(`recovered ${dashboard.recovered} interrupted round(s)`)
 }
 
-const broadcaster = new EventBroadcaster()
-const emit = (e: EngineEvent) => broadcaster.broadcast(e)
+dashboard.attachWebSocket()
 
-const provider = new MockProvider(42)
-const sandbox = new MockSandbox()
-const engine = new TournamentEngine({
-  repos,
-  config,
-  sandbox,
-  runner: new MockAgentRunner(sandbox, 42),
-  judge: new Judge(provider, config.judge, 42),
-  reflector: new Reflector(provider, config.reflect, config.roster.map((r) => r.modelId)),
-  seedStrategy: defaultSeedStrategy,
-  onEvent: emit,
-})
-
-const manager = new RunManager(engine, emit)
-const registry = new RunRegistry()
-// Real-mode composition for spec POSTs. Flags fill in whatever the spec omits
-// (per-spec values win); seams are defaultSeams, so local/docker compose
-// exactly as the CLI does.
-const composeWith = (spec: RunSpec, opts?: { runIdHolder?: RunIdHolder }): Promise<ComposedRun> =>
-  composeRun(
-    {
-      ...spec,
-      workspaceRoot: spec.workspaceRoot ?? values['workspace-root'] ?? null,
-      authFile: spec.authFile ?? values['auth-file'] ?? null,
-      serverUrl: spec.serverUrl ?? values['server-url'] ?? null,
-    },
-    defaultSeams,
-    opts ?? {},
-  )
-const app = buildApi({
-  repos,
-  manager,
-  createRun: (name) => engine.createRun(name, '').id,
-  registry,
-  composeWith,
-  emit,
-  sweepWith: (config, runId, onWarning) => {
-    // Every registered docker run owns live containers; excluding only the new run would
-    // let its sweep destroy a concurrent run mid-tournament.
-    const activeRunIds = [
-      ...registry.list().filter((r) => r.composed.config.sandbox === 'docker').map((r) => r.runId),
-      runId,
-    ]
-    return sweepOrphanContainers({ activeRunIds, onWarning })
-  },
-})
-
-const server = app.server
-const wss = new WebSocketServer({ server, path: '/ws' })
-broadcaster.attach(wss)
-
-await app.listen({ port, host: '127.0.0.1' })
+await dashboard.app.listen({ port, host: '127.0.0.1' })
 console.log(`dashboard API on http://127.0.0.1:${port}`)
 console.log(`websocket on ws://127.0.0.1:${port}/ws`)
 console.log(`run the UI with: npm run web:dev`)
 
 const shutdown = async () => {
-  for (const record of registry.list()) {
-    await disposeRunRecord(record).catch(() => {})
-  }
-  await manager.disposeAll().catch(() => {})
-  await app.close().catch(() => {})
+  await dashboard.shutdown().catch(() => {})
   process.exit(0)
 }
 process.on('SIGINT', shutdown)

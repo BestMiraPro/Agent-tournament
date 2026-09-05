@@ -165,16 +165,45 @@ export interface RunListItem {
 export const getRuns = (): Promise<{ runs: RunListItem[] }> =>
   fetch('/api/runs').then(json)
 
+/**
+ * The provider catalogue, cached for the session.
+ *
+ * Two components fetch it independently and each refetched on every mount, so
+ * opening the round-detail panel repeatedly re-requested a list that only changes
+ * when the operator authenticates a new provider. In-flight calls share one promise
+ * so concurrent mounts collapse to a single request.
+ *
+ * Failures are never cached — a models endpoint that was briefly down would
+ * otherwise leave the pickers empty for the rest of the session.
+ */
+let modelsCache: string[] | null = null
+let modelsInFlight: Promise<string[]> | null = null
+
+export const clearModelsCache = (): void => {
+  modelsCache = null
+  modelsInFlight = null
+}
+
 // Throws the server's 502 message verbatim (via the shared serverError
 // unwrap); callers treat any failure as "no known-models list".
 export const listModels = async (): Promise<string[]> => {
-  let body: { models: string[] }
-  try {
-    body = (await fetch('/api/models').then(json)) as { models: string[] }
-  } catch (e) {
-    throw new Error(serverError(e))
-  }
-  return body.models
+  if (modelsCache) return modelsCache
+  if (modelsInFlight) return modelsInFlight
+
+  modelsInFlight = (async () => {
+    let body: { models: string[] }
+    try {
+      body = (await fetch('/api/models').then(json)) as { models: string[] }
+    } catch (e) {
+      throw new Error(serverError(e))
+    }
+    modelsCache = body.models
+    return body.models
+  })().finally(() => {
+    modelsInFlight = null
+  })
+
+  return modelsInFlight
 }
 
 export const getAgentDetail = (runId: string, agentId: string): Promise<AgentDetail> =>
