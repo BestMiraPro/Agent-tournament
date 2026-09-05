@@ -501,3 +501,7 @@ circle.chart-line--min { fill: var(--failed); }
     transition-duration: .001ms !important;
   }
 }
+
+/* Rounds whose scores are rank-derived rather than judged: same axis, different
+   meaning, so the chart marks them rather than implying comparability. */
+.chart-scalemark { fill: rgba(242, 177, 52, .12); stroke: rgba(242, 177, 52, .3); stroke-width: 1; }

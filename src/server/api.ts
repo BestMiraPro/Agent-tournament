@@ -127,6 +127,17 @@ function roundStats(repos: Repos, runId: string) {
     criteriaMd: string | null
     criteriaSource: 'user' | 'generated'
     metaDigest: string | null
+    /**
+     * Which judging mode produced this round's scores, and therefore what scale they
+     * are on. `single_call` scores come from the judge directly (0-100). Above
+     * `singleCallMaxPopulation` the judge switches to `batched_finals`, where scores
+     * are derived from final ordering as ((n-i)/n)*100 rather than judged values.
+     * The two are not comparable, so a fitness chart that plots them on one axis
+     * silently changes meaning when a population crosses the threshold. Exposed so
+     * the chart can say so instead of pretending otherwise.
+     */
+    judgeMode: string
+    scoreScale: 'judge' | 'rank'
   }[] = []
   for (const round of repos.rounds.listForRun(runId)) {
     const scores = repos.scores.forRound(round.id)
@@ -160,6 +171,8 @@ function roundStats(repos: Repos, runId: string) {
       criteriaMd: round.criteriaMd,
       criteriaSource: round.criteriaSource === 'user' ? 'user' : 'generated',
       metaDigest: round.metaDigest,
+      judgeMode: round.judgeMode,
+      scoreScale: round.judgeMode === 'batched_finals' ? 'rank' : 'judge',
     })
   }
   return out

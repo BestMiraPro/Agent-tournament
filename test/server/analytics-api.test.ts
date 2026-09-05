@@ -164,6 +164,23 @@ test('legacy 3-arg buildApi serves the agent-detail route on a repos-only run', 
 })
 
 describe('GET /api/runs/:runId/rounds', () => {
+  test('reports the judging mode and the score scale it implies', async () => {
+    // Batched judging derives scores from final ordering, not from the judge, so the
+    // two modes are not on the same scale. A fitness chart that plots them on one
+    // axis silently changes meaning when a population crosses the threshold; the
+    // client needs to know which rounds are which in order to say so.
+    const { app, repos, run } = setup()
+    const rounds = repos.rounds.listForRun(run.id)
+    repos.rounds.setJudgeMode(rounds[1]!.id, 'batched_finals')
+
+    const res = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/rounds` })
+    const body = JSON.parse(res.body) as Array<{ idx: number; judgeMode: string; scoreScale: string }>
+
+    expect(body.map((r) => r.judgeMode)).toEqual(['single_call', 'batched_finals', 'single_call'])
+    expect(body.map((r) => r.scoreScale)).toEqual(['judge', 'rank', 'judge'])
+  })
+
+
   test('200: one entry per scored round, asc — fitness, modelShare, diversity, goalMd', async () => {
     const { app, repos, run } = setup()
     // Round 1 carries a user override + digest; the rest stay generated/null.

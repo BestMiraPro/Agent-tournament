@@ -90,12 +90,29 @@ function FitnessChart({ rounds }: { rounds: RoundStats[] }) {
         {rounds.map((r, i) => (
           <text key={r.idx} x={x(i)} y={H - 6} textAnchor="middle" className="chart-tick">{r.idx}</text>
         ))}
+        {/*
+          Rounds judged in batched mode have rank-derived scores, not judge scores, so
+          they sit on a different scale from the rest of the line. Marking them keeps
+          the axis honest instead of letting the curve imply a comparison that is not
+          there.
+        */}
+        {rounds.map((r, i) => (
+          r.scoreScale === 'rank'
+            ? <rect key={`sc-${r.idx}`} className="chart-scalemark" x={x(i) - 4} y={0} width={8} height={H - 16} />
+            : null
+        ))}
       </svg>
       <figcaption className="analytics__legend">
         <span className="legend-swatch legend-swatch--mean" /> mean
         <span className="legend-swatch legend-swatch--max" /> max
         <span className="legend-swatch legend-swatch--min" /> min
         {flags.some(Boolean) && <span className="muted"> · line breaks where the goal changed</span>}
+        {rounds.some((r) => r.scoreScale === 'rank') && (
+          <span className="muted">
+            {' '}· shaded rounds were judged in batches, so their scores are derived from
+            rank rather than the judge and are not comparable with the rest
+          </span>
+        )}
       </figcaption>
     </figure>
   )

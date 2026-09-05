@@ -190,6 +190,13 @@ export interface RoundStats {
   criteriaMd: string | null
   criteriaSource: 'user' | 'generated'
   metaDigest: string | null
+  judgeMode: string
+  /**
+   * 'judge' = scores came from the judge (0-100, comparable across rounds).
+   * 'rank'  = batched mode derived them from final ordering, so they are NOT
+   *           comparable with judge scores. The chart marks these rounds.
+   */
+  scoreScale: 'judge' | 'rank'
 }
 
 export const getRoundStats = (runId: string): Promise<RoundStats[]> =>
