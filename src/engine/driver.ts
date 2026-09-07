@@ -179,9 +179,31 @@ export class TournamentEngine {
       repos.rounds.setStatus(round.id, 'preparing')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'preparing' })
       const agents = repos.agents.listActive(runId)
-      const prepared = agents.flatMap((a) => {
-        const genome = repos.genomes.forRound(a.id, roundIdx)
-        return genome ? [{ agent: a, genome }] : []
+      const prepared = agents.map((agent) => {
+        const exact = repos.genomes.forRound(agent.id, roundIdx)
+        if (exact) return { agent, genome: exact }
+
+        const source = repos.genomes.forAgent(agent.id)
+          .filter((genome) => genome.roundIdx < roundIdx)
+          .at(-1)
+        if (!source) {
+          throw new Error(`active agent ${agent.id} has no genome history before round ${roundIdx}`)
+        }
+
+        // A failed round has no evolution output for its successor. `clone` records a
+        // byte-identical, persisted carry-forward while retaining the source lineage.
+        // An exact genome above always wins, preserving any partial evolution output.
+        const genome = repos.genomes.create({
+          agentId: agent.id,
+          roundIdx,
+          strategyMd: source.strategyMd,
+          notesMd: source.notesMd,
+          modelId: source.modelId,
+          temperature: source.temperature,
+          parentGenomeId: source.id,
+          origin: 'clone',
+        })
+        return { agent, genome }
       })
 
       // One provisioning failure (port exhaustion, image pull, OOM under Docker) must

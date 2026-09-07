@@ -213,6 +213,8 @@ describe('cooperative abort', () => {
       // The next round starts clean — the abort flag did not linger.
       const next = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
       expect(repos.rounds.get(next.roundId)?.status).toBe('complete')
+      expect(repos.submissions.forRound(next.roundId)).toHaveLength(4)
+      expect(repos.scores.forRound(next.roundId)).toHaveLength(4)
     } finally {
       runSpy.mockRestore()
       scoreSpy.mockRestore()
@@ -564,26 +566,85 @@ describe('driver budget enforcement', () => {
     expect(recombineSpy).toHaveBeenCalledTimes(2)
   })
 
-  test('a judge failure closes the round with the known submission cost', async () => {
+  test('two judge failures recover a full population in the third round', async () => {
     const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4 })
     const run = engine.createRun('t', 'goal')
+    const originalAgents = repos.agents.listActive(run.id)
     const originalRun = MockAgentRunner.prototype.run
     const runnerSpy = vi.spyOn(MockAgentRunner.prototype, 'run').mockImplementation(async function (this: MockAgentRunner, handle, ctx) {
       const result = await originalRun.call(this, handle, ctx)
       return { ...result, costUsd: 0.25 }
     })
-    const judgeSpy = vi.spyOn(Judge.prototype, 'score').mockRejectedValueOnce(new Error('judge failed'))
+    const judgeSpy = vi.spyOn(Judge.prototype, 'score')
+      .mockRejectedValueOnce(new Error('first judge failure'))
+      .mockRejectedValueOnce(new Error('second judge failure'))
     try {
-      await expect(engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })).rejects.toThrow('judge failed')
+      await expect(engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null }))
+        .rejects.toThrow('first judge failure')
       const failed = repos.rounds.listForRun(run.id)[0]!
       expect(failed.status).toBe('failed')
       expect(failed.endedAt).not.toBeNull()
       expect(failed.endedAt!).toBeGreaterThanOrEqual(failed.startedAt!)
       expect(failed.costUsd).toBe(1)
+
+      await expect(engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null }))
+        .rejects.toThrow('second judge failure')
+      const third = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+      expect(repos.submissions.forRound(third.roundId)).toHaveLength(4)
+      expect(repos.scores.forRound(third.roundId)).toHaveLength(4)
+      for (const agent of originalAgents) {
+        const recovered = repos.genomes.forRound(agent.id, third.roundIdx)!
+        const previous = repos.genomes.forRound(agent.id, third.roundIdx - 1)!
+        expect(recovered.parentGenomeId).toBe(previous.id)
+        expect(repos.submissions.forRound(third.roundId)
+          .find((submission) => submission.agentId === agent.id)?.genomeId).toBe(recovered.id)
+      }
     } finally {
       runnerSpy.mockRestore()
       judgeSpy.mockRestore()
     }
+  })
+
+  test('PREPARE preserves an exact next-round genome during recovery', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 2 })
+    const run = engine.createRun('t', 'goal')
+    const judgeSpy = vi.spyOn(Judge.prototype, 'score').mockRejectedValueOnce(new Error('judge failed'))
+    try {
+      await expect(engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })).rejects.toThrow('judge failed')
+      const agent = repos.agents.listActive(run.id)[0]!
+      const seed = repos.genomes.forRound(agent.id, 1)!
+      const exact = repos.genomes.create({
+        agentId: agent.id,
+        roundIdx: 2,
+        strategyMd: 'already evolved strategy',
+        notesMd: 'already evolved notes',
+        modelId: seed.modelId,
+        temperature: seed.temperature,
+        parentGenomeId: seed.id,
+        origin: 'mutation',
+      })
+
+      const recovered = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+      expect(repos.genomes.forRound(agent.id, recovered.roundIdx)).toEqual(exact)
+      expect(repos.submissions.forRound(recovered.roundId)
+        .find((submission) => submission.agentId === agent.id)?.genomeId).toBe(exact.id)
+    } finally {
+      judgeSpy.mockRestore()
+    }
+  })
+
+  test('PREPARE fails clearly for an active agent without genome history', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 2 })
+    const run = engine.createRun('t', 'goal')
+    const orphan = repos.agents.create({
+      runId: run.id,
+      label: 'orphan',
+      parentAgentId: null,
+      bornRound: 1,
+    })
+
+    await expect(engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null }))
+      .rejects.toThrow(`active agent ${orphan.id} has no genome history`)
   })
 
   test('failed-round end bookkeeping cannot mask the original judge error', async () => {
