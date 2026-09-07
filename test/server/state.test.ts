@@ -7,7 +7,7 @@ import { DEFAULT_CONFIG } from '../../src/core/types.js'
 const setup = () => {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
-  const run = repos.runs.create({ name: 'demo', config: DEFAULT_CONFIG, seedDir: null })
+  const run = repos.runs.create({ name: 'demo', initialGoal: 'initial dashboard goal', config: DEFAULT_CONFIG, seedDir: null })
   const a1 = repos.agents.create({ runId: run.id, label: 'competitor-01', parentAgentId: null, bornRound: 1 })
   const a2 = repos.agents.create({ runId: run.id, label: 'competitor-02', parentAgentId: null, bornRound: 1 })
   for (const a of [a1, a2]) {
@@ -41,7 +41,9 @@ describe('buildRunSnapshot', () => {
 
   test('reports round zero before any round has run', () => {
     const { repos, run } = setup()
-    expect(buildRunSnapshot(repos, run.id)!.lastRoundIdx).toBe(0)
+    const snapshot = buildRunSnapshot(repos, run.id)!
+    expect(snapshot.lastRoundIdx).toBe(0)
+    expect(snapshot.goalMd).toBe('initial dashboard goal')
   })
 
   test('includes scores from the latest completed round', () => {
@@ -55,6 +57,7 @@ describe('buildRunSnapshot', () => {
     expect(s.lastRoundIdx).toBe(1)
     expect(s.scores[0]!.rank).toBe(1)
     expect(s.scores[0]!.agentId).toBe(a2.id)
+    expect(s.goalMd).toBe('g')
   })
 
   test('is JSON-serializable', () => {

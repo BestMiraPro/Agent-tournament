@@ -1,8 +1,11 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, test } from 'vitest'
 import { openDb } from '../../src/db/open.js'
+import { makeRepos } from '../../src/db/repos.js'
+import { DEFAULT_CONFIG } from '../../src/core/types.js'
 
 describe('openDb', () => {
   test('creates all tables in memory', () => {
@@ -53,6 +56,45 @@ describe('openDb', () => {
     } finally {
       // Best-effort: a lingering file lock here must not mask a real assertion
       // failure from above by throwing in this `finally` block.
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  test('preserves an initial goal across a file-backed reopen', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-tournament-goal-test-'))
+    const dbPath = join(dir, 'goal.sqlite')
+    try {
+      const first = openDb(dbPath)
+      const run = makeRepos(first).runs.create({
+        name: 'goal test', initialGoal: 'persist this goal', config: DEFAULT_CONFIG, seedDir: null,
+      })
+      first.close()
+
+      const second = openDb(dbPath)
+      expect(makeRepos(second).runs.get(run.id)!.initialGoal).toBe('persist this goal')
+      second.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  test('migrates an old runs table with a nullable initial goal', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-tournament-migrate-goal-test-'))
+    const dbPath = join(dir, 'old.sqlite')
+    try {
+      const old = new DatabaseSync(dbPath)
+      old.exec(`CREATE TABLE runs (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
+        status TEXT NOT NULL, config_json TEXT NOT NULL, seed_dir TEXT
+      )`)
+      old.prepare('INSERT INTO runs VALUES (?,?,?,?,?,?)')
+        .run('old-run', 'old run', Date.now(), 'active', '{}', null)
+      old.close()
+
+      const migrated = openDb(dbPath)
+      expect(makeRepos(migrated).runs.get('old-run')!.initialGoal).toBeNull()
+      migrated.close()
+    } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {})
     }
   })

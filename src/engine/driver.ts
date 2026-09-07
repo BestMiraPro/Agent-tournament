@@ -86,7 +86,7 @@ export class TournamentEngine {
       models: config.roster.map((r) => r.modelId),
     })
 
-    const run = repos.runs.create({ name, config, seedDir: config.seedDir })
+    const run = repos.runs.create({ name, initialGoal, config, seedDir: config.seedDir })
     this.budgets.set(run.id, budget)
 
     let index = 0

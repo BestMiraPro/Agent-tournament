@@ -102,7 +102,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
   const app = buildApi({
     repos,
     manager,
-    createRun: (name) => engine.createRun(name, '').id,
+    createRun: (name, goal) => engine.createRun(name, goal).id,
     registry,
     composeWith,
     emit,

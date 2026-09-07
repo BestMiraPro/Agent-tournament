@@ -6,6 +6,7 @@ import type { Db } from './open.js'
  * must be added explicitly or older run databases fail to open.
  */
 const ADDITIONS: { table: string; column: string; ddl: string }[] = [
+  { table: 'runs', column: 'initial_goal', ddl: 'TEXT' },
   { table: 'submissions', column: 'tokens_cache_read', ddl: 'INTEGER DEFAULT 0' },
   { table: 'submissions', column: 'tokens_cache_write', ddl: 'INTEGER DEFAULT 0' },
 ]

@@ -14,6 +14,7 @@ export interface RunRow {
   status: string
   config: RunConfig
   seedDir: string | null
+  initialGoal: string | null
 }
 
 export interface RoundRow {
@@ -50,14 +51,14 @@ function decodeConfig(json: string): RunConfig {
 export function makeRepos(db: Db) {
   return {
     runs: {
-      create(input: { name: string; config: RunConfig; seedDir: string | null }): RunRow {
+      create(input: { name: string; initialGoal?: string | null; config: RunConfig; seedDir: string | null }): RunRow {
         const row: RunRow = {
           id: id(), name: input.name, createdAt: now(),
-          status: 'active', config: input.config, seedDir: input.seedDir,
+          status: 'active', config: input.config, seedDir: input.seedDir, initialGoal: input.initialGoal ?? null,
         }
         db.prepare(
-          'INSERT INTO runs (id, name, created_at, status, config_json, seed_dir) VALUES (?,?,?,?,?,?)',
-        ).run(row.id, row.name, row.createdAt, row.status, encodeConfig(row.config), row.seedDir)
+          'INSERT INTO runs (id, name, created_at, status, config_json, seed_dir, initial_goal) VALUES (?,?,?,?,?,?,?)',
+        ).run(row.id, row.name, row.createdAt, row.status, encodeConfig(row.config), row.seedDir, row.initialGoal)
         return row
       },
       get(runId: string): RunRow | null {
@@ -65,7 +66,7 @@ export function makeRepos(db: Db) {
         if (!r) return null
         return {
           id: r.id, name: r.name, createdAt: r.created_at, status: r.status,
-          config: decodeConfig(r.config_json), seedDir: r.seed_dir,
+          config: decodeConfig(r.config_json), seedDir: r.seed_dir, initialGoal: r.initial_goal,
         }
       },
       updateConfig(runId: string, config: RunConfig): void {

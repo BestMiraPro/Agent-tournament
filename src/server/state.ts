@@ -63,7 +63,7 @@ export function buildRunSnapshot(repos: Repos, runId: string, extra?: RunSnapsho
   })
 
   let scores: SnapshotScore[] = []
-  let goalMd: string | null = null
+  let goalMd: string | null = run.initialGoal
   if (lastRoundIdx > 0) {
     const rounds = repos.rounds.listForRun?.(runId) ?? []
     const last = rounds.find((r) => r.idx === lastRoundIdx)
