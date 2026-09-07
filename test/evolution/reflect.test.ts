@@ -31,6 +31,36 @@ describe('Reflector', () => {
     expect(out.strategyMd.length).toBeLessThanOrEqual(100)
   })
 
+  test('caps a long recombined strategy while preserving its notes', async () => {
+    const long: Provider = {
+      complete: async () => JSON.stringify({ strategy_md: 'x'.repeat(5000), notes_md: 'lineage notes' }),
+    }
+    const r = new Reflector(long, { ...cfg, strategyCharCap: 100 }, ['m'])
+
+    const out = await r.recombine('parent a', 'parent b', 'goal')
+    expect(out.notesMd).toBe('lineage notes')
+    expect(out.strategyMd.length).toBeLessThanOrEqual(100)
+  })
+
+  test('keeps a short recombined strategy unchanged', async () => {
+    const short: Provider = {
+      complete: async () => JSON.stringify({ strategy_md: 'combined approach', notes_md: 'lineage notes' }),
+    }
+    const r = new Reflector(short, { ...cfg, strategyCharCap: 100 }, ['m'])
+
+    await expect(r.recombine('parent a', 'parent b', 'goal')).resolves.toEqual({
+      strategyMd: 'combined approach',
+      notesMd: 'lineage notes',
+    })
+  })
+
+  test('leaves failed recombination available for breed fallback handling', async () => {
+    const broken: Provider = { complete: async () => { throw new Error('provider unavailable') } }
+    const r = new Reflector(broken, cfg, ['m'])
+
+    await expect(r.recombine('parent a', 'parent b', 'goal')).rejects.toThrow('provider unavailable')
+  })
+
   test('clamps temperature into range', async () => {
     const wild: Provider = { complete: async () => JSON.stringify({ strategy_md: 'ok', notes_md: '', temperature: 9 }) }
     const r = new Reflector(wild, cfg, ['m'])

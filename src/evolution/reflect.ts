@@ -95,6 +95,16 @@ export class Reflector {
     strategyB: string,
     goalMd: string,
   ): Promise<{ strategyMd: string; notesMd: string }> {
-    return recombineStrategies(this.provider, this.cfg.modelId, strategyA, strategyB, goalMd)
+    const recombined = await recombineStrategies(
+      this.provider,
+      this.cfg.modelId,
+      strategyA,
+      strategyB,
+      goalMd,
+    )
+    return {
+      strategyMd: capStrategy(recombined.strategyMd, this.cfg.strategyCharCap),
+      notesMd: recombined.notesMd,
+    }
   }
 }

@@ -122,7 +122,11 @@ describe('cooperative abort', () => {
       expect(provisions).toBe(1)
       expect(runSpy).not.toHaveBeenCalled()
       expect(scoreSpy).not.toHaveBeenCalled()
-      expect(repos.rounds.listForRun(run.id)[0]!.status).toBe('failed')
+      const failed = repos.rounds.listForRun(run.id)[0]!
+      expect(failed.status).toBe('failed')
+      expect(failed.endedAt).not.toBeNull()
+      expect(failed.endedAt!).toBeGreaterThanOrEqual(failed.startedAt!)
+      expect(failed.costUsd).toBe(0)
     } finally {
       provisionSpy.mockRestore()
       runSpy.mockRestore()
@@ -523,6 +527,96 @@ describe('driver budget enforcement', () => {
     expect(after.notesMd).toBe(before.notesMd)
     expect(after.modelId).toBe(before.modelId)
     expect(after.temperature).toBe(before.temperature)
+  })
+
+  test('a budget breach skips paid crossover recombination and still persists a full next population', async () => {
+    const { engine, repos, reflector, config } = makeMockEngine({
+      seed: 1,
+      populationSize: 4,
+      hugeTokensFor: 0,
+    })
+    config.selection = { ...config.selection, eliteCount: 1, topPct: 0.5, bottomPct: 0.5, crossoverPct: 1 }
+    const run = engine.createRun('t', 'goal')
+    const reflectSpy = vi.spyOn(reflector, 'reflect')
+    const recombineSpy = vi.spyOn(reflector, 'recombine')
+
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    expect(round.budgetBreach).not.toBeNull()
+    expect(reflectSpy).not.toHaveBeenCalled()
+    expect(recombineSpy).not.toHaveBeenCalled()
+    const active = repos.agents.listActive(run.id)
+    expect(active).toHaveLength(4)
+    for (const agent of active) {
+      expect(repos.genomes.forRound(agent.id, round.roundIdx + 1)).not.toBeNull()
+    }
+  })
+
+  test('a within-budget crossover uses paid recombination', async () => {
+    const { engine, reflector, config } = makeMockEngine({ seed: 1, populationSize: 4 })
+    config.selection = { ...config.selection, eliteCount: 1, topPct: 0.5, bottomPct: 0.5, crossoverPct: 1 }
+    const run = engine.createRun('t', 'goal')
+    const recombineSpy = vi.spyOn(reflector, 'recombine')
+
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    expect(round.budgetBreach).toBeNull()
+    expect(recombineSpy).toHaveBeenCalledTimes(2)
+  })
+
+  test('a judge failure closes the round with the known submission cost', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4 })
+    const run = engine.createRun('t', 'goal')
+    const originalRun = MockAgentRunner.prototype.run
+    const runnerSpy = vi.spyOn(MockAgentRunner.prototype, 'run').mockImplementation(async function (this: MockAgentRunner, handle, ctx) {
+      const result = await originalRun.call(this, handle, ctx)
+      return { ...result, costUsd: 0.25 }
+    })
+    const judgeSpy = vi.spyOn(Judge.prototype, 'score').mockRejectedValueOnce(new Error('judge failed'))
+    try {
+      await expect(engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })).rejects.toThrow('judge failed')
+      const failed = repos.rounds.listForRun(run.id)[0]!
+      expect(failed.status).toBe('failed')
+      expect(failed.endedAt).not.toBeNull()
+      expect(failed.endedAt!).toBeGreaterThanOrEqual(failed.startedAt!)
+      expect(failed.costUsd).toBe(1)
+    } finally {
+      runnerSpy.mockRestore()
+      judgeSpy.mockRestore()
+    }
+  })
+
+  test('failed-round end bookkeeping cannot mask the original judge error', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 2 })
+    const run = engine.createRun('t', 'goal')
+    const judgeSpy = vi.spyOn(Judge.prototype, 'score').mockRejectedValueOnce(new Error('judge failed'))
+    const endSpy = vi.spyOn(repos.rounds, 'markEnded').mockImplementation(() => {
+      throw new Error('end bookkeeping failed')
+    })
+    try {
+      await expect(engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })).rejects.toThrow('judge failed')
+      expect(repos.rounds.listForRun(run.id)[0]!.status).toBe('failed')
+    } finally {
+      endSpy.mockRestore()
+      judgeSpy.mockRestore()
+    }
+  })
+
+  test('failed-round status bookkeeping cannot mask the original judge error', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 2 })
+    const run = engine.createRun('t', 'goal')
+    const judgeSpy = vi.spyOn(Judge.prototype, 'score').mockRejectedValueOnce(new Error('judge failed'))
+    const setStatus = repos.rounds.setStatus.bind(repos.rounds)
+    const statusSpy = vi.spyOn(repos.rounds, 'setStatus').mockImplementation((id, status) => {
+      if (status === 'failed') throw new Error('failed-status bookkeeping failed')
+      setStatus(id, status)
+    })
+    try {
+      await expect(engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })).rejects.toThrow('judge failed')
+    } finally {
+      statusSpy.mockRestore()
+      judgeSpy.mockRestore()
+    }
   })
 
   test('a run under budget behaves exactly as before', async () => {

@@ -591,7 +591,9 @@ export class TournamentEngine {
       // id and no provider of its own, only this closure.
       await breed({
         repos, runId, nextRoundIdx: roundIdx + 1, plan, mutated,
-        recombine: (a, b) => this.d.reflector.recombine(a, b, input.goalMd),
+        recombine: budgetBreach === null
+          ? (a, b) => this.d.reflector.recombine(a, b, input.goalMd)
+          : undefined,
       })
 
       repos.rounds.markEnded(round.id, repos.submissions.totalCost(round.id))
@@ -605,7 +607,18 @@ export class TournamentEngine {
       })
       return { roundId: round.id, roundIdx, metaDigest: judged.metaDigest, budgetBreach }
     } catch (e) {
-      repos.rounds.setStatus(round.id, 'failed')
+      // The primary failure remains authoritative: a secondary persistence problem
+      // must not replace it, but a failed round should still retain its known spend.
+      try {
+        repos.rounds.markEnded(round.id, repos.submissions.totalCost(round.id))
+      } catch {
+        // Preserve the original error below.
+      }
+      try {
+        repos.rounds.setStatus(round.id, 'failed')
+      } catch {
+        // Preserve the original error below.
+      }
       this.emit({ type: 'round.status', runId, roundIdx, status: 'failed' })
       throw e
     } finally {
