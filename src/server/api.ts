@@ -54,6 +54,13 @@ function specErrorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
+const nonBlankString = z.string().refine((value) => value.trim().length > 0, 'must not be blank')
+const legacyRunBodySchema = z.object({ name: nonBlankString, goal: nonBlankString })
+const roundBodySchema = z.object({
+  goalMd: nonBlankString,
+  criteriaMd: z.string().nullable().optional(),
+})
+
 /** Shared submission join: the agent-detail `history` and the round-detail
  * `entries` serve the identical submission shape (spec §3) — one parser, one
  * guard, so the two views cannot drift apart. */
@@ -217,8 +224,17 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
   const app = Fastify({ logger: false })
 
   app.post('/api/runs', async (req, reply) => {
-    const body = (req.body ?? {}) as { name?: string; goal?: string; sandbox?: unknown; roster?: unknown }
+    const rawBody = req.body
+    if (typeof rawBody !== 'object' || rawBody === null || Array.isArray(rawBody)) {
+      return reply.code(400).send({ error: 'request body must be an object' })
+    }
+    const body = rawBody as Record<string, unknown>
     if (body.sandbox !== undefined || body.roster !== undefined) {
+      try {
+        legacyRunBodySchema.parse(body)
+      } catch (e) {
+        return reply.code(400).send({ error: e instanceof z.ZodError ? e.issues[0]?.message ?? 'invalid request body' : String(e) })
+      }
       let spec: RunSpec
       try {
         spec = parseRunSpec(body)
@@ -293,10 +309,13 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       }
       return reply.code(201).send({ runId, warnings: composed.warnings })
     }
-    if (!body.name || !body.goal) {
+    let legacy: { name: string; goal: string }
+    try {
+      legacy = legacyRunBodySchema.parse(body)
+    } catch {
       return reply.code(400).send({ error: 'name and goal are required' })
     }
-    const runId = deps.createRun(body.name, body.goal)
+    const runId = deps.createRun(legacy.name, legacy.goal)
     return reply.code(201).send({ runId })
   })
 
@@ -607,12 +626,16 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
 
   app.post('/api/runs/:id/rounds', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = (req.body ?? {}) as { goalMd?: string; criteriaMd?: string | null }
+    let body: { goalMd: string; criteriaMd?: string | null }
     const run = deps.repos.runs.get(id)
     if (!run) return reply.code(404).send({ error: 'no such run' })
     // The db-backed stop marker, so a stopped run stays stopped across restarts.
     if (run.status === 'stopped') return reply.code(409).send({ error: 'run is stopped' })
-    if (!body.goalMd) return reply.code(400).send({ error: 'goalMd is required' })
+    try {
+      body = roundBodySchema.parse(req.body)
+    } catch {
+      return reply.code(400).send({ error: 'goalMd is required' })
+    }
     const mgr = deps.registry?.get(id)?.manager ?? deps.manager
     try {
       mgr.startRound(id, { goalMd: body.goalMd, criteriaMd: body.criteriaMd ?? null })

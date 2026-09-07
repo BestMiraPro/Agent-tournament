@@ -16,13 +16,15 @@ import { RunRegistry } from '../../src/server/runs.js'
 const setup = () => {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
-  const started: { runId: string; goalMd: string }[] = []
+  const started: { runId: string; goalMd: string; criteriaMd: string | null }[] = []
   const app = buildApi({
     repos,
     manager: {
       isBusy: () => false,
       lastError: () => null,
-      startRound: (runId: string, input: { goalMd: string }) => { started.push({ runId, goalMd: input.goalMd }) },
+      startRound: (runId: string, input: { goalMd: string; criteriaMd?: string | null }) => {
+        started.push({ runId, goalMd: input.goalMd, criteriaMd: input.criteriaMd ?? null })
+      },
     } as never,
     createRun: (name: string, goal: string) => {
       const r = repos.runs.create({ name, config: DEFAULT_CONFIG, seedDir: null })
@@ -120,6 +122,68 @@ describe('API', () => {
     const { app } = setup()
     const res = await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })
     expect(res.statusCode).toBe(201)
+  })
+
+  test.each([
+    ['name', { name: 42, goal: 'g' }],
+    ['goal', { name: 'demo', goal: {} }],
+    ['array body', []],
+    ['null body', 'null'],
+    ['blank name', { name: ' \n\t', goal: 'g' }],
+    ['blank goal', { name: 'demo', goal: ' \n\t' }],
+  ])('POST /api/runs rejects malformed %s without creating a run', async (_label, payload) => {
+    const { app, repos } = setup()
+    const before = repos.runs.list?.().length ?? 0
+    const res = await app.inject({
+      method: 'POST', url: '/api/runs', payload,
+      headers: typeof payload === 'string' ? { 'content-type': 'application/json' } : undefined,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(repos.runs.list?.().length ?? 0).toBe(before)
+  })
+
+  test('POST /api/runs preserves multiline legacy values', async () => {
+    const { app, repos } = setup()
+    const res = await app.inject({ method: 'POST', url: '/api/runs', payload: { name: ' demo ', goal: 'line 1\n\nline 2 ' } })
+    expect(res.statusCode).toBe(201)
+    expect(repos.runs.list?.()[0]?.name).toBe(' demo ')
+  })
+})
+
+describe('API round input validation', () => {
+  test.each([
+    ['number', { goalMd: 42 }],
+    ['object', { goalMd: {} }],
+    ['array', { goalMd: [] }],
+    ['null', { goalMd: null }],
+    ['missing', {}],
+    ['whitespace', { goalMd: ' \n\t' }],
+    ['criteria number', { goalMd: 'g', criteriaMd: 42 }],
+    ['criteria object', { goalMd: 'g', criteriaMd: {} }],
+    ['criteria array', { goalMd: 'g', criteriaMd: [] }],
+  ])('rejects %s without scheduling work', async (_label, payload) => {
+    const { app, started, repos } = setup()
+    const created = JSON.parse((await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body)
+    const before = repos.rounds.listForRun(created.runId).length
+    const res = await app.inject({ method: 'POST', url: `/api/runs/${created.runId}/rounds`, payload })
+    expect(res.statusCode).toBe(400)
+    expect(started).toHaveLength(0)
+    expect(repos.rounds.listForRun(created.runId).length).toBe(before)
+  })
+
+  test.each([
+    ['string', { goalMd: 'line 1\n\nline 2 ', criteriaMd: 'criteria\n' }],
+    ['null criteria', { goalMd: 'g', criteriaMd: null }],
+    ['omitted criteria', { goalMd: 'g' }],
+  ])('accepts %s and preserves values', async (_label, payload) => {
+    const { app, started } = setup()
+    const created = JSON.parse((await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body)
+    const res = await app.inject({ method: 'POST', url: `/api/runs/${created.runId}/rounds`, payload })
+    expect(res.statusCode).toBe(202)
+    expect(started[0]).toMatchObject({
+      goalMd: payload.goalMd,
+      criteriaMd: 'criteriaMd' in payload ? payload.criteriaMd ?? null : null,
+    })
   })
 })
 
