@@ -95,7 +95,7 @@ export function RoundControls({
           <button onClick={() => { void onOverrideCriteria(criteriaText).then(setOverrideMsg) }}>
             Override running round
           </button>
-          <p className="muted">Best-effort: applies if judging hasn&apos;t started.</p>
+          <p className="muted">Criteria can be changed until judging starts.</p>
           {overrideMsg && <p className="muted">{overrideMsg}</p>}
         </>
       )}

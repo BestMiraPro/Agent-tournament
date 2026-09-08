@@ -535,8 +535,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
     if (!round) return reply.code(404).send({ error: 'no such round' })
     if (run.status === 'stopped') return reply.code(409).send({ error: 'run is stopped' })
-    if (round.status === 'complete' || round.status === 'failed') {
-      return reply.code(409).send({ error: 'round already scored' })
+    if (!['pending', 'preparing', 'running', 'collecting'].includes(round.status)) {
+      return reply.code(409).send({ error: 'criteria are frozen once judging starts' })
     }
     let body: { criteriaMd: string }
     try {
@@ -544,10 +544,6 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     } catch (e) {
       return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
     }
-    // Best-effort before scoring: if JUDGE already resolved criteria, the row still
-    // records the user's text (display shows it) but scoring used the earlier ones.
-    // The API cannot see the judge phase (only the busy boolean), so no finer guard
-    // exists without engine phase reporting (out of scope).
     deps.repos.rounds.setCriteria(round.id, body.criteriaMd, 'user')
     return { ok: true }
   })

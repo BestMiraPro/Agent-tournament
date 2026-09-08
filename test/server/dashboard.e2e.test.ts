@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { WebSocket } from 'ws'
 import { WebSocketServer } from 'ws'
 import { DEFAULT_CONFIG, type RunConfig } from '../../src/core/types.js'
@@ -16,8 +16,51 @@ import { composeRun } from '../../src/server/compose-run.js'
 import { RunRegistry } from '../../src/server/runs.js'
 import { RunManager } from '../../src/server/run-manager.js'
 import { EventBroadcaster } from '../../src/server/ws.js'
+import { createDashboard } from '../../src/server/create-dashboard.js'
 
 describe('dashboard end to end', () => {
+  test('criteria cannot change after judging starts, so the recorded criteria match scoring', async () => {
+    const dashboard = createDashboard({ population: 2 })
+    let releaseCriteria!: () => void
+    const criteriaGate = new Promise<void>((resolve) => { releaseCriteria = resolve })
+    let enteredJudging!: () => void
+    const judgingStarted = new Promise<void>((resolve) => { enteredJudging = resolve })
+    const resolveSpy = vi.spyOn(Judge.prototype, 'resolveCriteria').mockImplementation(async () => {
+      enteredJudging()
+      await criteriaGate
+      return { criteriaMd: 'resolved scoring criteria', source: 'generated' }
+    })
+    const scoreSpy = vi.spyOn(Judge.prototype, 'score')
+
+    try {
+      const created = await dashboard.app.inject({
+        method: 'POST', url: '/api/runs', payload: { name: 'criteria freeze', goal: 'g' },
+      })
+      const { runId } = JSON.parse(created.body) as { runId: string }
+      const started = await dashboard.app.inject({
+        method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'g' },
+      })
+      expect(started.statusCode).toBe(202)
+
+      await judgingStarted
+      const override = await dashboard.app.inject({
+        method: 'POST', url: `/api/runs/${runId}/rounds/1/criteria`, payload: { criteriaMd: 'late criteria' },
+      })
+      expect(override.statusCode).toBe(409)
+
+      releaseCriteria()
+      await dashboard.manager.waitForIdle(runId)
+      const round = dashboard.repos.rounds.listForRun(runId)[0]!
+      expect(round.criteriaMd).toBe('resolved scoring criteria')
+      expect(scoreSpy).toHaveBeenCalledWith('g', 'resolved scoring criteria', expect.anything(), 1)
+    } finally {
+      releaseCriteria?.()
+      resolveSpy.mockRestore()
+      scoreSpy.mockRestore()
+      await dashboard.shutdown()
+    }
+  })
+
   test('a browser client sees a round play out over the websocket', async () => {
     const db = openDb(':memory:')
     const repos = makeRepos(db)

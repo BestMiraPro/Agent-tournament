@@ -342,7 +342,7 @@ describe('POST /api/runs/:runId/rounds/:idx/abort', () => {
 })
 
 describe('POST /api/runs/:runId/rounds/:idx/criteria', () => {
-  test('200: writes the row criteria + user source', async () => {
+  test('200: writes criteria before judging and records the user source', async () => {
     const { repos, run, round } = seed()
     const api = appFor(repos, idle())
     const res = await api.inject({
@@ -388,16 +388,16 @@ describe('POST /api/runs/:runId/rounds/:idx/criteria', () => {
     expect(JSON.parse(res.body)).toEqual({ error: 'no such round' })
   })
 
-  test('409: round already scored', async () => {
+  test.each(['complete', 'failed'] as const)('409: %s round criteria are frozen', async (status) => {
     const { repos, run, round } = seed()
-    repos.rounds.setStatus(round.id, 'complete')
+    repos.rounds.setStatus(round.id, status)
     const api = appFor(repos, idle())
     const res = await api.inject({
       method: 'POST', url: `/api/runs/${run.id}/rounds/1/criteria`,
       payload: { criteriaMd: 'too late' },
     })
     expect(res.statusCode).toBe(409)
-    expect(JSON.parse(res.body)).toEqual({ error: 'round already scored' })
+    expect(JSON.parse(res.body)).toEqual({ error: 'criteria are frozen once judging starts' })
   })
 
   test('409: stopped', async () => {

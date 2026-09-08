@@ -72,15 +72,15 @@ describe('TournamentEngine', () => {
     expect(r.criteriaSource).toBe('user')
   })
 
-  test('a mid-round user criteria override wins over the POST body', async () => {
+  test('a user criteria override before judging wins over the POST body', async () => {
     const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 4 })
     const run = engine.createRun('test', 'goal')
     // Simulate the override endpoint landing after the round row exists but before
-    // JUDGE resolves: hook the judging transition and write user criteria first.
+    // judging begins: hook the preparing transition and write user criteria first.
     const setStatus = repos.rounds.setStatus.bind(repos.rounds)
     const hook = vi.spyOn(repos.rounds, 'setStatus').mockImplementation((id, status) => {
       setStatus(id, status)
-      if (status === 'judging') repos.rounds.setCriteria(id, 'row rules', 'user')
+      if (status === 'preparing') repos.rounds.setCriteria(id, 'row rules', 'user')
     })
     const scoreSpy = vi.spyOn(Judge.prototype, 'score')
     try {
