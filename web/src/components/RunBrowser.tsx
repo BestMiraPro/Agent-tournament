@@ -74,6 +74,7 @@ export function RunBrowser({ onOpen, onCreate, onCompare }: {
                 aria-label={`Open run ${r.name}`}
                 onClick={() => onOpen(r.id)}
                 onKeyDown={(e: KeyboardEvent) => {
+                  if (e.currentTarget !== e.target) return
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault()
                     onOpen(r.id)
@@ -91,7 +92,7 @@ export function RunBrowser({ onOpen, onCreate, onCompare }: {
                 <td>{r.name}</td>
                 <td>{new Date(r.createdAt).toLocaleString()}</td>
                 <td>{r.rounds}</td>
-                <td>{r.bestScore ? r.bestScore.toFixed(2) : '—'}</td>
+                <td>{r.bestScore !== null ? r.bestScore.toFixed(2) : '—'}</td>
                 <td>${r.costUsd.toFixed(4)}</td>
               </tr>
             ))}

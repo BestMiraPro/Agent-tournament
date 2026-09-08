@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { liveReducer, initialLiveState } from '../../web/src/useLiveRun.js'
+import { applyLiveEvent, createLiveSession, liveReducer, initialLiveState } from '../../web/src/useLiveRun.js'
 import { nextDelay } from '../../web/src/useLiveRun.js'
 
 describe('liveReducer', () => {
@@ -110,5 +110,41 @@ describe('hydrate from snapshot', () => {
     })
     s = liveReducer(s, { type: 'hydrate', scores: [{ agentId: 'a', rank: 1, score: 5 }], roundIdx: 1 })
     expect(s.agents['a']?.status).toBe('running')
+  })
+})
+
+describe('scoped live session', () => {
+  test('ignores events from another run before reducing them', () => {
+    const session = createLiveSession('chosen', { ...initialLiveState, scores: [] })
+    session.event({ type: 'round.status', runId: 'other', roundIdx: 9, status: 'running' })
+    expect(session.state).toEqual({ ...initialLiveState, scores: [] })
+  })
+
+  test('switching to an unscored run clears the prior run state', () => {
+    const session = createLiveSession('old', { ...initialLiveState, scores: [{ agentId: 'a', rank: 1, score: 4 }], busy: true })
+    session.switchRun('fresh')
+    expect(session.state.scores).toEqual([])
+    expect(session.state.busy).toBe(false)
+  })
+
+  test('a completion event prevents an older in-flight fetch from restoring busy', () => {
+    const session = createLiveSession('r', { ...initialLiveState, busy: true, roundIdx: 1 })
+    const request = session.beginRefresh()
+    session.event({ type: 'round.complete', runId: 'r', roundIdx: 1, budgetBreach: null })
+    session.snapshot({ ...initialLiveState, busy: true, roundIdx: 1 }, request)
+    expect(session.state.busy).toBe(false)
+  })
+
+  test('ignores an old-run fetch after switching runs', () => {
+    const session = createLiveSession('old', initialLiveState)
+    const request = session.beginRefresh()
+    session.switchRun('new')
+    session.snapshot({ ...initialLiveState, busy: true }, request)
+    expect(session.state.busy).toBe(false)
+  })
+
+  test('uses the active live round for actions while the snapshot still says zero', () => {
+    const s = applyLiveEvent({ ...initialLiveState, roundIdx: 0 }, 'r', { type: 'round.status', runId: 'r', roundIdx: 1, status: 'running' })
+    expect(s.roundIdx).toBe(1)
   })
 })

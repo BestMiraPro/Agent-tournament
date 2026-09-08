@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { shouldHydrateCriteria } from '../lib/lifecycle.js'
 import { Markdown } from './Markdown.js'
 import type { AddAgentStrategy } from '../api.js'
 
@@ -11,13 +12,14 @@ export interface AddAgentFormInput {
 // Presentational: App owns every fetch; this component takes display data +
 // callbacks. All new props are optional so existing usages keep compiling.
 export function RoundControls({
-  goal, busy, roundIdx, onRun,
+  goal, busy, starting = false, roundIdx, onRun,
   criteria, criteriaSource, metaDigest,
   rosterModels, agents,
   onOverrideCriteria, onAddAgent, onAbort,
 }: {
   goal: string
   busy: boolean
+  starting?: boolean
   roundIdx: number
   onRun: (goalMd: string, criteriaMd: string | null) => void
   criteria?: string | null
@@ -32,7 +34,8 @@ export function RoundControls({
   const [text, setText] = useState(goal)
   // Prefill arrives async (round-stats fetch), so sync when the prop changes.
   const [criteriaText, setCriteriaText] = useState(criteria ?? '')
-  useEffect(() => { setCriteriaText(criteria ?? '') }, [criteria])
+  const criteriaDirty = useRef(false)
+  useEffect(() => { if (shouldHydrateCriteria(criteriaDirty.current)) setCriteriaText(criteria ?? '') }, [criteria])
   const [overrideMsg, setOverrideMsg] = useState<string | null>(null)
   const [aborting, setAborting] = useState(false)
   const [abortMsg, setAbortMsg] = useState<string | null>(null)
@@ -68,7 +71,7 @@ export function RoundControls({
 
   return (
     <div className="controls">
-      <label htmlFor="goal">Goal for round {roundIdx + 1}</label>
+      <label htmlFor="goal">Goal for round {busy ? roundIdx : roundIdx + 1}</label>
       <textarea
         id="goal"
         value={text}
@@ -76,8 +79,8 @@ export function RoundControls({
         onChange={(e) => setText(e.target.value)}
         disabled={busy}
       />
-      <button onClick={() => onRun(text, trimmedCriteria === '' ? null : criteriaText)} disabled={busy || text.trim().length === 0}>
-        {busy ? 'Round in progress…' : `Run round ${roundIdx + 1}`}
+      <button onClick={() => onRun(text, trimmedCriteria === '' ? null : criteriaText)} disabled={busy || starting || text.trim().length === 0}>
+        {busy ? `Round ${roundIdx} in progress…` : starting ? 'Starting round…' : `Run round ${roundIdx + 1}`}
       </button>
       <label htmlFor="criteria">Judging criteria (empty = auto-generate from goal)</label>
       <textarea
@@ -85,7 +88,7 @@ export function RoundControls({
         value={criteriaText}
         rows={3}
         placeholder="auto-generate from goal"
-        onChange={(e) => setCriteriaText(e.target.value)}
+        onChange={(e) => { criteriaDirty.current = true; setCriteriaText(e.target.value) }}
       />
       {busy && onOverrideCriteria && (
         <>

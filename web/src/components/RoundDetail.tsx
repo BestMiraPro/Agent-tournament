@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getRoundDetail, listModels, rejudge, serverError, type RoundDetail as RoundDetailData, type RejudgeResult } from '../api.js'
 import { effectiveRound, roundOptions } from '../lib/rounds.js'
+import { createSelectionGuard } from '../lib/lifecycle.js'
 import { Markdown } from './Markdown.js'
 
 // Manifest entries are FileEntry { path, bytes } rows, but the endpoint serves
@@ -69,6 +70,15 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
   const [rejudging, setRejudging] = useState(false)
   const [rejudgeResult, setRejudgeResult] = useState<RejudgeResult | null>(null)
   const [rejudgeError, setRejudgeError] = useState<string | null>(null)
+  const rejudgeGuard = useRef(createSelectionGuard())
+  const rejudgeIdentity = `${runId}:${effective ?? ''}`
+
+  useEffect(() => {
+    rejudgeGuard.current.select(rejudgeIdentity)
+    setRejudging(false)
+    setRejudgeResult(null)
+    setRejudgeError(null)
+  }, [runId, effective])
 
   // First load shows a line; later refreshes stay silent so a flaky fetch never
   // wipes the entries — the arena's own refresh already surfaces connection problems.
@@ -110,15 +120,18 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
 
   const handleRejudge = async () => {
     if (effective === null) return
+    const request = rejudgeGuard.current.begin(rejudgeIdentity)
+    const roundIdx = effective
     setRejudging(true)
     setRejudgeError(null)
     setRejudgeResult(null)
     try {
-      setRejudgeResult(await rejudge(runId, effective, judgeModel.trim()))
+      const result = await rejudge(runId, roundIdx, judgeModel.trim())
+      if (rejudgeGuard.current.current(`${runId}:${roundIdx}`, request)) setRejudgeResult(result)
     } catch (e) {
-      setRejudgeError(serverError(e))
+      if (rejudgeGuard.current.current(`${runId}:${roundIdx}`, request)) setRejudgeError(serverError(e))
     } finally {
-      setRejudging(false)
+      if (rejudgeGuard.current.current(`${runId}:${roundIdx}`, request)) setRejudging(false)
     }
   }
 

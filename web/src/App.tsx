@@ -3,6 +3,7 @@ import './styles.css'
 import { abortRound, createAgent, createRunFull, deleteRun, getRoundStats, getRun, overrideCriteria, serverError, startRound, type FullRunSpec, type RoundStats, type RunSnapshot } from './api.js'
 import { parsePricing } from './lib/pricing.js'
 import { summarizeRoster } from './lib/roster.js'
+import { createStartGate, isCurrentRunRequest } from './lib/lifecycle.js'
 import { useLiveRun } from './useLiveRun.js'
 import { AgentDrawer } from './components/AgentDrawer.js'
 import { AnalyticsPanel } from './components/AnalyticsPanel.js'
@@ -37,18 +38,27 @@ export function App() {
   // Setup criteria is a single-session default for round 1 only — rounds own
   // criteria after that, so a reload before round 1 loses it (no persistence).
   const [pendingCriteria, setPendingCriteria] = useState<string | null>(null)
+  const [starting, setStarting] = useState(false)
   const live = useLiveRun(snapshot)
   const gridRef = useRef<HTMLDivElement>(null)
+  const navigation = useRef(0)
+  const selectedRun = useRef<string | null>(null)
+  const refreshGeneration = useRef(0)
+  const startGate = useRef(createStartGate())
 
   const refresh = useCallback(async (runId: string) => {
+    const request = navigation.current
+    const generation = ++refreshGeneration.current
     try {
-      setSnapshot(await getRun(runId))
+      const next = await getRun(runId)
+      if (isCurrentRunRequest(selectedRun.current, runId, navigation.current, request) && refreshGeneration.current === generation) { setSnapshot(next); setError(null) }
     } catch (e) {
-      setError(serverError(e))
+      if (isCurrentRunRequest(selectedRun.current, runId, navigation.current, request) && refreshGeneration.current === generation) setError(serverError(e))
     }
   }, [])
 
   const handleCreate = useCallback(async (value: RunSetupValue) => {
+    const createNavigation = navigation.current
     let roster: FullRunSpec['roster']
     let pricing: FullRunSpec['pricing']
     try {
@@ -104,13 +114,19 @@ export function App() {
       setCreating(false)
       return
     }
+    if (navigation.current !== createNavigation) { setCreating(false); return }
     setPendingCriteria(value.criteria)
+    selectedRun.current = runId
+    navigation.current++
+    const initialNavigation = navigation.current
     try {
-      setSnapshot(await getRun(runId))
-      setView('run')
+      const initial = await getRun(runId)
+      if (isCurrentRunRequest(selectedRun.current, runId, navigation.current, initialNavigation)) { setSnapshot(initial); setView('run') }
     } catch {
       // The run exists on the server; a failed first read should not look like a clean form.
-      setSetupError(`Run created, but loading it failed - reload the page.`)
+      if (isCurrentRunRequest(selectedRun.current, runId, navigation.current, initialNavigation)) {
+        setSetupError(`Run created, but loading it failed - reload the page.`)
+      }
     } finally {
       setCreating(false)
     }
@@ -164,10 +180,19 @@ export function App() {
     return (
       <>
         <h1>Agent Tournament — runs</h1>
+        {error && <p className="error">{error}</p>}
         <RunBrowser
-          onOpen={(id) => { setError(null); void refresh(id).then(() => setView('run')) }}
-          onCreate={() => setView('setup')}
-          onCompare={(a, b) => { setCompareIds([a, b]); setView('compare') }}
+          onOpen={(id) => {
+            const request = ++navigation.current
+            selectedRun.current = id
+            setError(null)
+            void getRun(id).then(
+              (next) => { if (request === navigation.current && selectedRun.current === id) { setSnapshot(next); setView('run') } },
+              (e) => { if (request === navigation.current) setError(serverError(e)) },
+            )
+          }}
+          onCreate={() => { navigation.current++; selectedRun.current = null; setView('setup') }}
+          onCompare={(a, b) => { navigation.current++; selectedRun.current = null; setCompareIds([a, b]); setView('compare') }}
         />
       </>
     )
@@ -183,7 +208,7 @@ export function App() {
       <>
         <div className="arena-head">
           <h1>Agent Tournament — new run</h1>
-          <button onClick={() => setView('browser')}>Browse runs</button>
+          <button onClick={() => { navigation.current++; selectedRun.current = null; setView('browser') }}>Browse runs</button>
         </div>
         <RunSetup busy={creating} error={setupError} onCreate={handleCreate} />
       </>
@@ -191,15 +216,15 @@ export function App() {
   }
 
   if (!snapshot) return <p className="error">{error ?? 'Loading run…'}</p>
-  if (error) return <p className="error">{error}</p>
 
-  const busy = live.busy || snapshot.busy
+  const busy = live.roundIdx >= snapshot.lastRoundIdx ? live.busy : snapshot.busy
+  const activeRoundIdx = live.busy ? live.roundIdx : snapshot.lastRoundIdx
 
   return (
     <>
       <div className="arena-head">
         <h1>Agent Tournament — {snapshot.name}</h1>
-        <button onClick={() => setView('browser')}>Back to runs</button>
+        <button onClick={() => { navigation.current++; selectedRun.current = null; setView('browser') }}>Back to runs</button>
         {!stopped && (
           <button className="stop" disabled={stopping} onClick={() => handleStop(snapshot.runId)}>
             {stopping ? 'Stopping…' : 'Stop run'}
@@ -208,6 +233,7 @@ export function App() {
       </div>
       {stopped && <p className="muted">Run stopped.</p>}
       {stopError && <p className="error">{stopError}</p>}
+      {error && <p className="error">{error} <button onClick={() => { void refresh(snapshot.runId) }}>Retry</button></p>}
       {snapshot.warnings.length > 0 && <p className="muted">{snapshot.warnings.join(' · ')}</p>}
       {live.wsStatus === 'reconnecting' && <p className="muted reconnect-banner">Reconnecting…</p>}
       <RunSummary snapshot={snapshot} busy={busy} roundStats={roundStats} />
@@ -231,16 +257,23 @@ export function App() {
         <AgentGrid agents={snapshot.agents} live={live} onSelect={setSelectedAgentId} />
         <aside>
           <RoundControls
+            key={snapshot.runId}
             goal={snapshot.goalMd ?? 'Produce the best possible answer.'}
             busy={busy}
-            roundIdx={snapshot.lastRoundIdx}
+            starting={starting}
+            roundIdx={activeRoundIdx}
             onRun={(goalMd, criteriaMd) => {
+              if (!startGate.current.tryStart()) return
               // First round after a setup-created run carries the setup
               // criteria (blank = null = auto-generate); an explicit
               // RoundControls entry always wins, and later rounds fall back to
               // null/auto — the RoundControls path below is untouched.
               const first = pendingCriteria?.trim() ? pendingCriteria : null
-              void startRound(snapshot.runId, goalMd, criteriaMd ?? first).then(() => setPendingCriteria(null)).catch((e) => setError(serverError(e)))
+              setStarting(true)
+              void startRound(snapshot.runId, goalMd, criteriaMd ?? first)
+                .then(() => { setPendingCriteria(null); void refresh(snapshot.runId) })
+                .catch((e) => setError(serverError(e)))
+                .finally(() => { startGate.current.finish(); setStarting(false) })
             }}
             criteria={lastRound?.criteriaMd ?? null}
             criteriaSource={lastRound?.criteriaSource ?? null}
@@ -248,7 +281,7 @@ export function App() {
             rosterModels={[...new Set(snapshot.roster.map((r) => r.modelId))]}
             agents={snapshot.agents.map((a) => ({ agentId: a.agentId, label: a.label }))}
             onOverrideCriteria={(text) =>
-              overrideCriteria(snapshot.runId, snapshot.lastRoundIdx, text)
+              overrideCriteria(snapshot.runId, activeRoundIdx, text)
                 .then(() => 'Criteria override recorded.')
                 .catch((e) => serverError(e))}
             onAddAgent={(input) =>
@@ -256,7 +289,7 @@ export function App() {
                 .then((r) => { void refresh(snapshot.runId); return { ok: true as const, message: `Added ${r.label}.` } })
                 .catch((e) => ({ ok: false as const, message: serverError(e) }))}
             onAbort={() =>
-              abortRound(snapshot.runId, snapshot.lastRoundIdx)
+              abortRound(snapshot.runId, activeRoundIdx)
                 .then(() => 'Abort requested. Running agents are stopped; the round is marked failed.')
                 .catch((e) => serverError(e))}
           />
@@ -275,7 +308,7 @@ export function App() {
         runId={snapshot.runId}
         rounds={roundStats}
         busy={busy}
-        lastRoundIdx={snapshot.lastRoundIdx}
+        lastRoundIdx={activeRoundIdx}
         refreshKey={snapshot.lastRoundIdx}
       />
       {selectedAgentId && (

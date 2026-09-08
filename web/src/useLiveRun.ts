@@ -1,5 +1,5 @@
-import { useEffect, useReducer } from 'react'
-import type { RunSnapshot } from './api.js'
+import { useEffect, useRef, useState } from 'react'
+import { getRun, type RunSnapshot } from './api.js'
 
 export interface LiveAgent {
   status: 'pending' | 'running' | 'done' | 'failed'
@@ -27,6 +27,15 @@ export const initialLiveState: LiveState = {
   busy: false,
   lastBreach: null,
   wsStatus: 'connected',
+}
+
+function stateFromSnapshot(snapshot: RunSnapshot): LiveState {
+  return {
+    ...initialLiveState,
+    scores: snapshot.scores.map(({ agentId, rank, score }) => ({ agentId, rank, score })).sort((a, b) => a.rank - b.rank),
+    roundIdx: snapshot.lastRoundIdx,
+    busy: snapshot.busy,
+  }
 }
 
 const blank: LiveAgent = { status: 'pending', activity: '', tokensIn: 0, tokensOut: 0, costUsd: 0 }
@@ -101,6 +110,34 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
   }
 }
 
+/** The production hook uses this small controller so tests can cover socket/fetch races without a DOM. */
+export function applyLiveEvent(state: LiveState, runId: string, event: { type: string } & Record<string, unknown>): LiveState {
+  return event.runId !== runId ? state : liveReducer(state, event)
+}
+
+export function createLiveSession(runId: string, seed: LiveState) {
+  let currentRunId = runId
+  let current = seed
+  let revision = 0
+  let refreshId = 0
+  return {
+    get state() { return current },
+    beginRefresh(requestedRunId = currentRunId) { return { runId: currentRunId, requestedRunId, revision, refreshId: ++refreshId } },
+    switchRun(nextRunId: string, snapshot?: RunSnapshot) {
+      currentRunId = nextRunId
+      revision++
+      current = snapshot ? stateFromSnapshot(snapshot) : initialLiveState
+    },
+    event(event: { type: string } & Record<string, unknown>) {
+      const next = applyLiveEvent(current, currentRunId, event)
+      if (next !== current) { current = next; revision++ }
+    },
+    snapshot(next: LiveState, request: { runId: string; requestedRunId: string; revision: number; refreshId: number }) {
+      if (request.runId === currentRunId && request.requestedRunId === currentRunId && request.revision === revision && request.refreshId === refreshId) current = next
+    },
+  }
+}
+
 /** Exponential backoff in ms: 1s -> 2s -> 4s -> ... capped at 30s. Pure so it can be tested without a socket. */
 export function nextDelay(attempt: number): number {
   const ms = 1000 * 2 ** attempt
@@ -108,7 +145,17 @@ export function nextDelay(attempt: number): number {
 }
 
 export function useLiveRun(snapshot: RunSnapshot | null): LiveState {
-  const [state, dispatch] = useReducer(liveReducer, initialLiveState)
+  const [state, setState] = useState<LiveState>(initialLiveState)
+  const session = useRef(createLiveSession(snapshot?.runId ?? '', snapshot ? stateFromSnapshot(snapshot) : initialLiveState))
+  const runId = snapshot?.runId ?? ''
+
+  const publish = () => setState({ ...session.current.state, agents: { ...session.current.state.agents }, scores: [...session.current.state.scores] })
+
+  useEffect(() => {
+    session.current.switchRun(runId, snapshot ?? undefined)
+    publish()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId])
 
   useEffect(() => {
     let socket: WebSocket | null = null
@@ -120,19 +167,24 @@ export function useLiveRun(snapshot: RunSnapshot | null): LiveState {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws'
       socket = new WebSocket(`${proto}://${location.host}/ws`)
       socket.onopen = () => {
+        if (closed) return
         attempt = 0
-        dispatch({ type: 'ws.status', status: 'connected' })
+        session.current.event({ type: 'ws.status', runId, status: 'connected' })
+        const request = session.current.beginRefresh(runId)
+        void getRun(runId).then((fresh) => { if (!closed) { session.current.snapshot(stateFromSnapshot(fresh), request); publish() } }, () => undefined)
       }
       socket.onmessage = (m) => {
+        if (closed) return
         try {
-          dispatch(JSON.parse(m.data as string))
+          session.current.event(JSON.parse(m.data as string))
+          publish()
         } catch {
           /* ignore malformed frames rather than killing the stream */
         }
       }
       socket.onclose = () => {
         if (closed) return
-        dispatch({ type: 'ws.status', status: 'reconnecting' })
+        session.current.event({ type: 'ws.status', runId, status: 'reconnecting' }); publish()
         timer = setTimeout(() => { attempt++; open() }, nextDelay(attempt))
       }
     }
@@ -143,19 +195,7 @@ export function useLiveRun(snapshot: RunSnapshot | null): LiveState {
       if (timer) clearTimeout(timer)
       socket?.close()
     }
-  }, [])
-
-  // Hydrate from the snapshot whenever it moves to a run/round the live state has
-  // not seen. Guarded on roundIdx so an in-flight round's fresher websocket scores
-  // are never overwritten by the older snapshot the arena polls alongside it.
-  const snapRunId = snapshot?.runId ?? null
-  const snapRoundIdx = snapshot?.lastRoundIdx ?? 0
-  useEffect(() => {
-    if (!snapshot) return
-    if (snapshot.scores.length === 0) return
-    dispatch({ type: 'hydrate', scores: snapshot.scores, roundIdx: snapshot.lastRoundIdx })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapRunId, snapRoundIdx])
+  }, [runId])
 
   return state
 }
