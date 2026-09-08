@@ -12,9 +12,9 @@ Main handoff: [2026-09-06-code-review-and-implementation-handoff.md](2026-09-06-
 - Do not rerun the whole review. Read this progress file, then the active task brief/report and `git status`.
 - Full baseline previously: 809 passed, 3 gated skips. Run focused tests during work; all three AGENTS gates are required at integration before claiming completion.
 - No paid provider runs, dependency upgrades, or broad visual redesign have been performed.
-- Latest verified code checkpoint: `bec120b` (Task 7 B20). Full gates: 857 passed / 3 skipped; typecheck and web build pass; scoped review approved. Previous UI `bbe2a0e`, B07 `9774e1f`, B08 `3ed6bd6` retained.
-- Next active work: Task 8 B19 criteria freeze, agent impl_criteria_freeze. Brief `.superpowers/sdd/review-fixes/task-8-brief.md`. Do not repeat completed tickets.
-- Remaining confirmed-bug order: Task 7 B20 summary comparability; Task 8 B19 criteria freeze; Task 6 B12–B14 Docker; Task 9 B15 remote termination; Task 10 B17/B18 server lifecycle; Task 11 B16 filesystem links. All briefs saved locally. This keeps cheaper work first despite nonsequential task numbers.
+- Latest verified code checkpoint: `2898bca` (Task 8 B19). Full gates: 859 passed / 3 skipped; typecheck and web build pass; scoped review approved. Previous B20 `bec120b`, UI `bbe2a0e`, B07 `9774e1f`, B08 `3ed6bd6` retained.
+- Next active work: Task 6 B12–B14 Docker lifecycle, agent impl_docker_lifecycle (sol/high). Brief `.superpowers/sdd/review-fixes/task-6-brief.md`. Do not repeat completed tickets.
+- Remaining confirmed-bug order: Task 6 B12–B14 Docker; Task 9 B15 remote termination; Task 10 B17/B18 server lifecycle; Task 11 B16 filesystem links. All briefs saved locally. This keeps cheaper work first despite nonsequential task numbers.
 
 ## Ticket status
 
@@ -26,9 +26,10 @@ Main handoff: [2026-09-06-code-review-and-implementation-handoff.md](2026-09-06-
 | B07 | Complete | Commit `9774e1f`; RED 3 regressions; GREEN 48 driver tests; scoped review and full 842-test gate passed. |
 | B08 | Complete | Commit `3ed6bd6`; 58 focused tests; scoped review, typecheck and full 842-test gate passed. |
 | B09–B11 | Complete | Commit `bbe2a0e`; 46 focused tests, three review fix rounds, full 853-test gate. Real-browser lifecycle acceptance still pending. |
-| B12–B15 | Pending | Docker and remote execution lifecycle. |
+| B12–B14 | In progress | Task 6, impl_docker_lifecycle; daemon-free regressions only. |
+| B15 | Pending | Task 9 remote execution evidence, after Docker lifecycle. |
 | B16–B18 | Pending | Runtime isolation/platform fixes after Task 6/9. |
-| B19 | In progress | Task 8, impl_criteria_freeze; use server-owned judging status as cutoff. |
+| B19 | Complete | Commit `2898bca`;95 focused tests, scoped review/full859-test gate passed. Server rejects overrides from judging onward. |
 | B20 | Complete | Commit `bec120b`;31 focused tests including rendered summary; scoped review and full857-test gate pass. Browser layout check pending. |
 | I01–I14, U01–U08 | Not started | Investigations/optional improvements; confirm scope and trigger first. |
 | Full test/typecheck/build; browser; optional real-mode | Pending | Integrated gates last. Real provider use is not automatically authorized. |
@@ -57,3 +58,4 @@ Main handoff: [2026-09-06-code-review-and-implementation-handoff.md](2026-09-06-
 - Task 5 round 2 full gates: 853 tests passed / 3 skipped; typecheck/build exit 0; diffcheck clean. Reviewer approved both P1s, found one P2 stale setup-error catch. Fix round 3 is a narrow guard; tests/re-review pending for that final change.
 - Task 5 final checkpoint after round 3 guard: scoped re-review approved; all three gates rerun, 853 passed / 3 skipped, typecheck/build exit 0, diffcheck clean. Committed `bbe2a0e`. Historical pending notes above are superseded by this checkpoint.
 - Task 7 B20: RED4 regressions; GREEN31 focused tests; scoped review approved. Full857 passed/3skip, typecheck/build pass. Commit `bec120b`.
+- Task 8 B19: RED1 regression (14 pass); GREEN95 focused tests; scoped review approved. Full859 passed/3skip, typecheck/build/diffcheck pass. Commit `2898bca`.
