@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getRoundStats, type RoundStats } from '../api.js'
-import { goalChangeFlags } from '../lib/goals.js'
+import { comparableRoundSegments } from '../lib/goals.js'
 
 export interface AnalyticsAgent {
   agentId: string
@@ -38,7 +38,7 @@ const PAD_T = 8
 const PAD_B = 20
 
 function FitnessChart({ rounds }: { rounds: RoundStats[] }) {
-  const flags = goalChangeFlags(rounds.map((r) => r.goalMd))
+  const segments = comparableRoundSegments(rounds).map((segment) => segment.map((round) => rounds.indexOf(round)))
   let lo = Math.min(...rounds.map((r) => r.fitness.min))
   let hi = Math.max(...rounds.map((r) => r.fitness.max))
   // Flat scale: equal values would divide by zero, so pad the domain.
@@ -50,12 +50,6 @@ function FitnessChart({ rounds }: { rounds: RoundStats[] }) {
   const x = (i: number): number => (n === 1 ? W / 2 : PAD_L + (i / (n - 1)) * (W - PAD_L - PAD_R))
   const y = (v: number): number => PAD_T + (1 - (v - lo) / (hi - lo)) * (H - PAD_T - PAD_B)
 
-  // Line segments break wherever the goal changed between consecutive rounds.
-  const segments: number[][] = [[]]
-  rounds.forEach((_r, i) => {
-    if (i > 0 && flags[i]) segments.push([])
-    segments[segments.length - 1]!.push(i)
-  })
   const series = [
     { key: 'mean', cls: 'chart-line chart-line--mean', get: (r: RoundStats) => r.fitness.mean, label: 'mean' },
     { key: 'max', cls: 'chart-line chart-line--max', get: (r: RoundStats) => r.fitness.max, label: 'max' },
@@ -106,7 +100,7 @@ function FitnessChart({ rounds }: { rounds: RoundStats[] }) {
         <span className="legend-swatch legend-swatch--mean" /> mean
         <span className="legend-swatch legend-swatch--max" /> max
         <span className="legend-swatch legend-swatch--min" /> min
-        {flags.some(Boolean) && <span className="muted"> · line breaks where the goal changed</span>}
+        {segments.length > 1 && <span className="muted"> · line breaks where the goal or score scale changed</span>}
         {rounds.some((r) => r.scoreScale === 'rank') && (
           <span className="muted">
             {' '}· shaded rounds were judged in batches, so their scores are derived from

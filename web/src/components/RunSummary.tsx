@@ -1,4 +1,5 @@
 import type { RoundStats, RunSnapshot } from '../api.js'
+import { latestComparableSegment } from '../lib/goals.js'
 import { formatTrend, sparkGeometry } from '../lib/sparkline.js'
 
 const SPARK_W = 68
@@ -53,8 +54,9 @@ export function RunSummary({ snapshot, busy, roundStats }: {
   busy: boolean
   roundStats: RoundStats[]
 }) {
+  const comparableRounds = latestComparableSegment(roundStats)
   let best: { score: number; idx: number } | null = null
-  for (const r of roundStats) {
+  for (const r of comparableRounds) {
     if (!best || r.fitness.max > best.score) best = { score: r.fitness.max, idx: r.idx }
   }
   const totalCost = roundStats.reduce((sum, r) => sum + (Number.isFinite(r.costUsd) ? r.costUsd : 0), 0)
@@ -70,7 +72,10 @@ export function RunSummary({ snapshot, busy, roundStats }: {
         <em>best</em>{best ? `${best.score.toFixed(2)}` : '—'}
         {best && <small> r{best.idx}</small>}
       </span>
-      <FitnessSpark rounds={roundStats} />
+      <span className="stat" title="Best score and trend use only consecutive rounds with the same goal and score scale.">
+        <em>scope</em>latest comparable segment <small>{comparableRounds.length} rounds</small>
+      </span>
+      <FitnessSpark rounds={comparableRounds} />
       <span className="stat"><em>cost</em>${totalCost.toFixed(4)}</span>
       <span className="stat"><em>agents</em>{snapshot.agents.length}<small> / {rostered}</small></span>
     </section>
