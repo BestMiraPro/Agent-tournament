@@ -11,10 +11,11 @@ Main handoff: [2026-09-06-code-review-and-implementation-handoff.md](2026-09-06-
 - Detailed local ledger and task artifacts: `.superpowers/sdd/review-fixes/` (gitignored; do not commit).
 - Do not rerun the whole review. Read this progress file, then the active task brief/report and `git status`.
 - Full baseline previously: 809 passed, 3 gated skips. Run focused tests during work; all three AGENTS gates are required at integration before claiming completion.
+- The third expected skip is `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`), alongside local and Docker real-mode suites. AGENTS.md still quotes the older 767/2 baseline; refresh its counts/skip list at final integration, preserving all three gates.
 - No paid provider runs, dependency upgrades, or broad visual redesign have been performed.
-- Latest verified code checkpoint: `2898bca` (Task 8 B19). Full gates: 859 passed / 3 skipped; typecheck and web build pass; scoped review approved. Previous B20 `bec120b`, UI `bbe2a0e`, B07 `9774e1f`, B08 `3ed6bd6` retained.
-- Next active work: Task 6 B12–B14 Docker lifecycle, agent impl_docker_lifecycle (sol/high). Brief `.superpowers/sdd/review-fixes/task-6-brief.md`. Do not repeat completed tickets.
-- Remaining confirmed-bug order: Task 6 B12–B14 Docker; Task 9 B15 remote termination; Task 10 B17/B18 server lifecycle; Task 11 B16 filesystem links. All briefs saved locally. This keeps cheaper work first despite nonsequential task numbers.
+- Latest verified code checkpoint: `34d705d` (Task 6 B12–B14). Final gates: 870 passed / 3 skipped; typecheck/build/diffcheck pass; scoped re-review approved. Earlier engine/UI/criteria/comparability commits retained.
+- Next active work: Task 9 B15 remote termination evidence, agent impl_remote_quiescence (astra/high for lifecycle design). Brief `.superpowers/sdd/review-fixes/task-9-brief.md`, including guard before workspace reset. Do not repeat completed tickets.
+- Remaining confirmed-bug order: Task 9 B15 remote termination; Task 10 B17/B18 server lifecycle; Task 11 B16 filesystem links. All briefs saved locally. This keeps cheaper work first despite nonsequential task numbers.
 
 ## Ticket status
 
@@ -26,8 +27,8 @@ Main handoff: [2026-09-06-code-review-and-implementation-handoff.md](2026-09-06-
 | B07 | Complete | Commit `9774e1f`; RED 3 regressions; GREEN 48 driver tests; scoped review and full 842-test gate passed. |
 | B08 | Complete | Commit `3ed6bd6`; 58 focused tests; scoped review, typecheck and full 842-test gate passed. |
 | B09–B11 | Complete | Commit `bbe2a0e`; 46 focused tests, three review fix rounds, full 853-test gate. Real-browser lifecycle acceptance still pending. |
-| B12–B14 | In progress | Task 6, impl_docker_lifecycle; daemon-free regressions only. |
-| B15 | Pending | Task 9 remote execution evidence, after Docker lifecycle. |
+| B12–B14 | Complete | Commit `34d705d`; scoped re-review approved; final870-test gate passes. Both test review findings corrected; real-mode acceptance pending. |
+| B15 | In progress | Task 9, impl_remote_quiescence; deferred/fake-fetch tests only. |
 | B16–B18 | Pending | Runtime isolation/platform fixes after Task 6/9. |
 | B19 | Complete | Commit `2898bca`;95 focused tests, scoped review/full859-test gate passed. Server rejects overrides from judging onward. |
 | B20 | Complete | Commit `bec120b`;31 focused tests including rendered summary; scoped review and full857-test gate pass. Browser layout check pending. |
@@ -59,3 +60,7 @@ Main handoff: [2026-09-06-code-review-and-implementation-handoff.md](2026-09-06-
 - Task 5 final checkpoint after round 3 guard: scoped re-review approved; all three gates rerun, 853 passed / 3 skipped, typecheck/build exit 0, diffcheck clean. Committed `bbe2a0e`. Historical pending notes above are superseded by this checkpoint.
 - Task 7 B20: RED4 regressions; GREEN31 focused tests; scoped review approved. Full857 passed/3skip, typecheck/build pass. Commit `bec120b`.
 - Task 8 B19: RED1 regression (14 pass); GREEN95 focused tests; scoped review approved. Full859 passed/3skip, typecheck/build/diffcheck pass. Commit `2898bca`.
+- Task 6 2026-09-09: contract saved in task-6-report.md; RED7 expected failures/102 pass across engine, sandbox and real-mode composition tests. Implementation active. Preserve working regression tests; do not report this batch passing yet.
+- Task 6 GREEN: combined139 focused tests/6files, typecheck/diffcheck clean. Implementation finished; scoped review and integrated gates active. Runtime remains daemon-free in this validation.
+- Task 6 review correction: new compose test passed `stopContainerFn` instead of `removeContainerFn`, allowing real Docker cleanup attempts for fixture names. Earlier daemon-free claim is inaccurate. Current read-only sandbox check denies Docker config/daemon access; no successful removal observed. Fix mock before further tests and assert cleanup. Reviewer also requests actual API-created two-round population regression. Full869/3skip,typecheck/build passed before this finding; final fix gate pending.
+- Task 6 final checkpoint: typed start/removal fakes + cleanup assertions corrected isolation; API-created two-round planner test added and shown sensitive to missing wiring. Affected32 tests/typecheck pass; scoped re-review approved; final full870/3skip,typecheck/build/diffcheck pass. Commit `34d705d`. Prior pending/test-isolation notes above are superseded by this corrected checkpoint; historical accidental cleanup attempts remain documented.
