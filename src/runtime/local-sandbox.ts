@@ -1,7 +1,8 @@
-import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, relative, sep } from 'node:path'
 import type { FileEntry } from '../core/types.js'
 import type { AgentHandle, ProvisionOpts, Sandbox } from './sandbox.js'
+import { resolveInWorkspace, seedWorkspace } from './workspace-path.js'
 
 /**
  * Real-filesystem sandbox. Each agent gets `<root>/<agentId>` as its workspace.
@@ -24,39 +25,38 @@ export class LocalSandbox implements Sandbox {
     }
   }
 
-  /** Guards against an agent-supplied relative path escaping its workspace. */
-  private safeJoin(h: AgentHandle, relPath: string): string {
-    const base = resolve(h.workspacePath)
-    const target = resolve(base, relPath)
-    if (target !== base && !target.startsWith(base + sep)) {
-      throw new Error(`path "${relPath}" escapes the workspace`)
-    }
-    return target
-  }
-
-  private async seed(dir: string, opts: ProvisionOpts): Promise<void> {
-    await mkdir(dir, { recursive: true })
-    if (opts.seedDir) {
-      await cp(opts.seedDir, dir, { recursive: true })
-    }
+  /**
+   * Rejects an agent-supplied path that escapes the workspace textually or crosses a
+   * link on any component. Anchored at the sandbox root so the agent's own workspace
+   * directory is checked too. See `resolveInWorkspace` for the residual race.
+   */
+  private safeJoin(h: AgentHandle, relPath: string): Promise<string> {
+    return resolveInWorkspace(h.workspacePath, relPath, this.root)
   }
 
   async provision(agentId: string, opts: ProvisionOpts): Promise<AgentHandle> {
     const dir = this.dirFor(agentId)
-    await this.seed(dir, opts)
+    await seedWorkspace(dir, opts.seedDir)
     this.live.add(agentId)
     return { agentId, workspacePath: dir, baseUrl: '' }
   }
 
+  /**
+   * Deliberately does NOT go through `safeJoin`: if the workspace directory has itself
+   * been replaced by a link, refusing here would let one agent fail the round for
+   * everyone. `rm` unlinks a link rather than following it, so removing the link and
+   * recreating a real directory both repairs the workspace and destroys nothing outside
+   * it — a strictly better outcome than a thrown round.
+   */
   async reset(handle: AgentHandle, opts: ProvisionOpts): Promise<void> {
     this.assertLive(handle)
     await rm(handle.workspacePath, { recursive: true, force: true })
-    await this.seed(handle.workspacePath, opts)
+    await seedWorkspace(handle.workspacePath, opts.seedDir)
   }
 
   async writeFile(handle: AgentHandle, relPath: string, content: string): Promise<void> {
     this.assertLive(handle)
-    const target = this.safeJoin(handle, relPath)
+    const target = await this.safeJoin(handle, relPath)
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, content, 'utf8')
   }
@@ -64,7 +64,7 @@ export class LocalSandbox implements Sandbox {
   async readFile(handle: AgentHandle, relPath: string): Promise<string | null> {
     this.assertLive(handle)
     try {
-      return await readFile(this.safeJoin(handle, relPath), 'utf8')
+      return await readFile(await this.safeJoin(handle, relPath), 'utf8')
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw e
@@ -75,6 +75,7 @@ export class LocalSandbox implements Sandbox {
     this.assertLive(handle)
     const out: FileEntry[] = []
     const walk = async (dir: string): Promise<void> => {
+      await this.safeJoin(handle, relative(handle.workspacePath, dir))
       let entries
       try {
         entries = await readdir(dir, { withFileTypes: true })
@@ -90,10 +91,11 @@ export class LocalSandbox implements Sandbox {
         // other dotfiles (.gitignore, .env.example, ...) are real agent output and stay.
         if (e.isDirectory() && e.name === '.opencode') continue
         const full = join(dir, e.name)
+        // Existing links are omitted; traversed entries are checked again below.
         if (e.isDirectory()) {
           await walk(full)
         } else if (e.isFile()) {
-          const s = await stat(full)
+          const s = await stat(await this.safeJoin(handle, relative(handle.workspacePath, full)))
           out.push({
             path: relative(handle.workspacePath, full).split(sep).join('/'),
             bytes: s.size,

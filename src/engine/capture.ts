@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { FileEntry } from '../core/types.js'
 import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
+import { WorkspaceEscapeError } from '../runtime/workspace-path.js'
 
 export const SUBMISSION_FILE = 'SUBMISSION.md'
 
@@ -178,7 +179,23 @@ export async function verifyCapture(
   const missing: string[] = []
   const modified: string[] = []
   for (const [path, digest] of Object.entries(capture.hashes)) {
-    const now = await sandbox.readFile(handle, path)
+    let now: string | null
+    try {
+      now = await sandbox.readFile(handle, path)
+    } catch (e) {
+      // Narrow on purpose. The path WAS a readable file inside the workspace when it was
+      // hashed, so the workspace refusing it now means it is no longer that file — a link
+      // swapped in, most obviously — which is a change to report rather than an exception
+      // to fail the round with. Left to propagate, replacing one's own captured file with
+      // a symlink at collect time would abort everyone's round.
+      //
+      // Anything else (EIO, EACCES, a full disk) is NOT evidence of interference, and
+      // reporting it as tampering would accuse an agent of something never observed. Those
+      // still propagate.
+      if (!(e instanceof WorkspaceEscapeError)) throw e
+      modified.push(path)
+      continue
+    }
     if (now === null) missing.push(path)
     else if (hash(now) !== digest) modified.push(path)
   }

@@ -1,7 +1,8 @@
-import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, relative, sep } from 'node:path'
 import type { FileEntry } from '../../core/types.js'
 import type { AgentHandle, ProvisionOpts, Sandbox } from '../sandbox.js'
+import { resolveInWorkspace, seedWorkspace } from '../workspace-path.js'
 import { planShards, shardIndexOf, type Shard } from './shard.js'
 
 export interface StartedContainer {
@@ -29,8 +30,9 @@ export interface DockerSandboxOptions {
  * Runs agents inside Docker containers, sharded.
  *
  * Agents in one shard share a container and can reach each other's workspaces; agents in
- * different shards cannot, because each shard bind-mounts only its own directory. No agent
- * can reach the host. Set maxContainers equal to the population for full isolation.
+ * different shards have separate bind mounts. Host filesystem operations reject links
+ * under a stable-path assumption; see workspace-path.ts for the remaining race.
+ * Set maxContainers equal to the population to avoid shared-shard writers.
  *
  * The critical distinction in this file: `AgentHandle.workspacePath` is the CONTAINER path
  * (`/work/<agentId>`), because it becomes OpenCode's `?directory=` parameter. Orchestrator
@@ -116,18 +118,14 @@ export class DockerSandbox implements Sandbox {
     }
   }
 
-  private safeJoin(agentId: string, relPath: string): string {
-    const base = resolve(this.hostDirFor(agentId))
-    const target = resolve(base, relPath)
-    if (target !== base && !target.startsWith(base + sep)) {
-      throw new Error(`path "${relPath}" escapes the workspace`)
-    }
-    return target
-  }
-
-  private async seed(dir: string, opts: ProvisionOpts): Promise<void> {
-    await mkdir(dir, { recursive: true })
-    if (opts.seedDir) await cp(opts.seedDir, dir, { recursive: true })
+  /**
+   * The container sees `/work/<id>`; every host read and write goes through the bind
+   * mount instead, so a link an agent creates inside the container is followed by the
+   * HOST at capture time. Anchored at the shard root, because co-tenants share the mount
+   * and can replace a sibling's workspace directory with a link.
+   */
+  private safeJoin(agentId: string, relPath: string): Promise<string> {
+    return resolveInWorkspace(this.hostDirFor(agentId), relPath, this.opts.root)
   }
 
   private startShard(shardIndex: number): Promise<StartedContainer> {
@@ -169,7 +167,7 @@ export class DockerSandbox implements Sandbox {
   async provision(agentId: string, opts: ProvisionOpts): Promise<AgentHandle> {
     if (this.disposed) throw new Error('docker sandbox has been disposed')
     const shardIndex = this.shardFor(agentId)
-    await this.seed(this.hostDirFor(agentId), opts)
+    await seedWorkspace(this.hostDirFor(agentId), opts.seedDir)
     if (this.disposed) throw new Error('docker sandbox has been disposed')
     const container = await this.startShard(shardIndex)
     if (this.disposed) throw new Error('docker sandbox has been disposed')
@@ -183,16 +181,21 @@ export class DockerSandbox implements Sandbox {
     }
   }
 
+  /**
+   * Not via `safeJoin`: a co-tenant that replaced this workspace directory with a link
+   * must not be able to fail the round by doing so. `rm` unlinks a link instead of
+   * following it, so this repairs the workspace without touching the link's target.
+   */
   async reset(handle: AgentHandle, opts: ProvisionOpts): Promise<void> {
     this.assertLive(handle)
     const dir = this.hostDirFor(handle.agentId)
     await rm(dir, { recursive: true, force: true })
-    await this.seed(dir, opts)
+    await seedWorkspace(dir, opts.seedDir)
   }
 
   async writeFile(handle: AgentHandle, relPath: string, content: string): Promise<void> {
     this.assertLive(handle)
-    const target = this.safeJoin(handle.agentId, relPath)
+    const target = await this.safeJoin(handle.agentId, relPath)
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, content, 'utf8')
   }
@@ -200,7 +203,7 @@ export class DockerSandbox implements Sandbox {
   async readFile(handle: AgentHandle, relPath: string): Promise<string | null> {
     this.assertLive(handle)
     try {
-      return await readFile(this.safeJoin(handle.agentId, relPath), 'utf8')
+      return await readFile(await this.safeJoin(handle.agentId, relPath), 'utf8')
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw e
@@ -212,6 +215,7 @@ export class DockerSandbox implements Sandbox {
     const base = this.hostDirFor(handle.agentId)
     const out: FileEntry[] = []
     const walk = async (dir: string): Promise<void> => {
+      await this.safeJoin(handle.agentId, relative(base, dir))
       let entries
       try {
         entries = await readdir(dir, { withFileTypes: true })
@@ -223,9 +227,10 @@ export class DockerSandbox implements Sandbox {
         // the judge's file manifest with node_modules.
         if (e.isDirectory() && e.name === '.opencode') continue
         const full = join(dir, e.name)
+        // Existing links are omitted; traversed entries are checked again below.
         if (e.isDirectory()) await walk(full)
         else if (e.isFile()) {
-          const s = await stat(full)
+          const s = await stat(await this.safeJoin(handle.agentId, relative(base, full)))
           out.push({ path: relative(base, full).split(sep).join('/'), bytes: s.size })
         }
       }
