@@ -95,56 +95,114 @@ export async function attachServer(
   return { baseUrl, client, stop: async () => {} }
 }
 
+/** Raised when termination could not be established, rather than reported as success. */
+export class ServerStopError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'ServerStopError'
+  }
+}
+
+const TIMED_OUT = Symbol('timed out')
+
+/** Resolves the promise's value, or TIMED_OUT. Never rejects, never leaves a timer. */
+async function within<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      p,
+      new Promise<typeof TIMED_OUT>((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), ms) }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Runs the tree killer and resolves its failure, or null on success. Never rejects. */
+function taskkillTree(pid: number): Promise<Error | null> {
+  return new Promise((resolve) => {
+    // A number we spawned ourselves — never a process name, and execFile runs no shell.
+    execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, (error) =>
+      resolve(error ?? null),
+    )
+  })
+}
+
 /**
  * Terminates the process we spawned and everything it started.
  *
- * On win32 the launch goes through a shell so `opencode` can resolve its `.cmd` shim,
- * and `child.kill()` then kills only that shell: the server keeps running, holding its
- * port, with nothing left pointing at it. `taskkill /T` walks down from our own child's
- * PID, so it reaches the grandchild and touches nothing else — the PID is a number we
- * spawned ourselves, never a process name, and `execFile` runs no shell.
+ * On win32 the launch goes through a shell so `opencode` can resolve its `.cmd` shim, and
+ * `child.kill()` then kills only that shell: the server keeps running, holding its port,
+ * with nothing left pointing at it. `taskkill /T` walks down from our own child's PID, so
+ * it reaches the grandchild.
  *
- * Bounded on purpose: if the tree does not go away, escalate once, then return rather
- * than let shutdown hang. If our child has already exited, its descendants have been
- * reparented and are no longer reachable by this PID — that residue is out of scope here.
+ * Two things this deliberately does NOT do. It does not treat the shell's exit as proof on
+ * its own — the helper is awaited (with its own deadline) before the root's exit is taken
+ * as confirmation. And it does not fall back to `child.kill('SIGKILL')` on win32, because
+ * that kills the shell and leaves the grandchild: reporting success after it would be
+ * exactly the bug this function exists to fix. When termination cannot be established it
+ * raises `ServerStopError` instead. On POSIX there is no shell layer, so signalling the
+ * child IS signalling the server, and SIGTERM→SIGKILL is a real escalation.
+ *
+ * OWNERSHIP LIMIT: if our own child has already exited, any descendant it left has been
+ * reparented and is no longer reachable from this PID — and that PID may by then belong
+ * to something else, so it must not be signalled. That case returns without claiming the
+ * descendants are gone.
  */
 function stopChild(child: ChildProcess): Promise<void> {
   const dead = (): boolean => child.exitCode !== null || child.signalCode !== null
-  if (dead() || child.pid === undefined) return Promise.resolve()
-
-  const exited = new Promise<void>((resolve) => {
-    if (dead()) resolve()
-    else child.once('exit', () => resolve())
-  })
-
-  if (process.platform === 'win32') {
-    execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {
-      /* the wait below, not this exit code, decides whether the tree is gone */
-    })
-  } else {
-    child.kill()
-  }
-
-  const bounded = async (): Promise<boolean> => {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        exited.then(() => true),
-        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), STOP_GRACE_MS) }),
-      ])
-    } finally {
-      clearTimeout(timer)
-    }
-  }
 
   return (async () => {
-    if (await bounded()) return
+    if (dead() || child.pid === undefined) return
+    const pid = child.pid
+
+    let detach = (): void => {}
+    const exited = new Promise<void>((resolve) => {
+      const onExit = (): void => resolve()
+      child.once('exit', onExit)
+      detach = () => { child.off('exit', onExit) }
+      if (dead()) resolve()
+    })
+    const gone = async (ms: number): Promise<boolean> => (await within(exited, ms)) !== TIMED_OUT
+
     try {
-      child.kill('SIGKILL')
-    } catch {
-      /* nothing left to signal */
+      if (process.platform !== 'win32') {
+        child.kill()
+        if (await gone(STOP_GRACE_MS)) return
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          /* nothing left to signal */
+        }
+        if (await gone(STOP_GRACE_MS)) return
+        throw new ServerStopError(`server process ${pid} did not exit after SIGKILL`)
+      }
+
+      // On win32 the ONLY thing that evidences a stopped tree is the helper reporting
+      // success. The shell's own exit says the launcher is gone and nothing about the
+      // server it started, so it is never accepted in the helper's place.
+      const failure = await within(taskkillTree(pid), STOP_GRACE_MS)
+      if (failure === TIMED_OUT) {
+        throw new ServerStopError(
+          `taskkill for ${pid} did not finish within ${STOP_GRACE_MS}ms; the server tree may still be running`,
+        )
+      }
+      if (failure !== null) {
+        const launcherGone = await gone(0)
+        throw new ServerStopError(
+          launcherGone
+            ? `taskkill for ${pid} failed after the launcher had already exited; its descendants cannot be confirmed stopped`
+            : `taskkill for ${pid} failed`,
+          { cause: failure },
+        )
+      }
+      // The helper reported terminating the tree. Our own child's exit is then a
+      // consistency check on what we believed we owned, not the primary evidence.
+      if (await gone(STOP_GRACE_MS)) return
+      throw new ServerStopError(`server process ${pid} survived taskkill /T`)
+    } finally {
+      detach()
     }
-    await bounded()
   })()
 }
 
@@ -194,16 +252,33 @@ export async function startServer(opts: StartServerOptions = {}): Promise<Server
     const out = createLineScanner(onLine)
     const err = createLineScanner(onLine)
 
+    let exited = false
+
     const onOut = (buf: Buffer): void => out.push(buf.toString())
     const onErr = (buf: Buffer): void => err.push(buf.toString())
-    const onOutEnd = (): void => out.flush()
-    const onErrEnd = (): void => err.flush()
+
+    /**
+     * A stream closing is a line delimiter only while the writer is still alive.
+     *
+     * A dying process leaves whatever bytes it had already pushed, so flushing then can
+     * turn `...127.0.0.1:45` into a resolved port 45 and hand back a handle to a process
+     * that is already gone — the truncated-port bug, arriving by a different route. The
+     * turn's delay is what lets an `exit` that follows `end` be seen first; when the two
+     * arrive further apart than that, the check below is still what decides.
+     */
+    const flushIfAlive = (scanner: { flush(): void }) => (): void => {
+      setImmediate(() => {
+        if (!exited && !settled) scanner.flush()
+      })
+    }
+    const onOutEnd = flushIfAlive(out)
+    const onErrEnd = flushIfAlive(err)
+
     const onError = (e: Error): void => { if (finish()) reject(e) }
     const onExit = (code: number | null): void => {
-      // A process that printed its banner without a trailing newline and then exited
-      // still told us where it listened; flush before deciding it never started.
-      out.flush()
-      err.flush()
+      // Deliberately no flush: process exit is not the stream-end delimiter that makes
+      // an unterminated final line trustworthy.
+      exited = true
       if (finish()) reject(new Error(`startServer: process exited with code ${code} before starting`))
     }
 
@@ -226,10 +301,14 @@ export async function startServer(opts: StartServerOptions = {}): Promise<Server
 
     timer = setTimeout(() => {
       if (!finish()) return
-      // Reject only once the tree is actually gone, so a caller that gives up on
-      // startup is not racing a server that still holds the port.
-      void stop().finally(() =>
-        reject(new Error('startServer: timed out waiting for the startup banner')),
+      const message = 'startServer: timed out waiting for the startup banner'
+      // Reject only once the tree is actually gone, so a caller that gives up on startup
+      // is not racing a server that still holds the port. A cleanup failure is attached
+      // rather than discarded — and rather than left as an unhandled rejection, which is
+      // what awaiting this with `void` would produce once stop() can reject.
+      stop().then(
+        () => reject(new Error(message)),
+        (cause: unknown) => reject(new Error(`${message} (cleanup also failed)`, { cause })),
       )
     }, startupTimeoutMs)
 

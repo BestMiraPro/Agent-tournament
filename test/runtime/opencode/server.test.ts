@@ -10,6 +10,21 @@ import { attachServer, createLineScanner, parseServerPort, startServer } from '.
 
 const spawned = vi.hoisted(() => ({ children: [] as ChildProcess[], options: [] as unknown[] }))
 
+/**
+ * The process-tree killer's boundary, and it fails closed.
+ *
+ * `taskkill /PID <n> /T /F` force-kills whatever owns that PID and everything under it.
+ * A fake child carrying an invented PID must therefore never reach the real helper: on
+ * the machine running these tests that number belongs to someone else's process, or to
+ * nobody, and only one of those is harmless. So the default mode is `blocked` — the call
+ * is recorded and answered with an error, never executed — and a test that genuinely
+ * needs real termination has to opt in with `real` alongside a PID from a real spawn.
+ */
+const helper = vi.hoisted(() => ({
+  mode: 'blocked' as 'blocked' | 'real' | 'ok' | 'fail' | 'hang',
+  calls: [] as string[][],
+}))
+
 // Capture the real child so the tests can assert kill delivery on the handle
 // (passthrough — the child still really spawns).
 vi.mock('node:child_process', async (importOriginal) => {
@@ -21,6 +36,22 @@ vi.mock('node:child_process', async (importOriginal) => {
       spawned.children.push(child)
       spawned.options.push(args[2])
       return child
+    },
+    execFile: (...args: unknown[]) => {
+      const [file, argv, , callback] = args as [string, string[], unknown, (e: Error | null) => void]
+      helper.calls.push([file, ...argv])
+      if (helper.mode === 'real') return (orig.execFile as (...a: unknown[]) => unknown)(...args)
+      if (helper.mode === 'hang') return {}
+      const error =
+        helper.mode === 'ok'
+          ? null
+          : new Error(
+              helper.mode === 'fail'
+                ? 'taskkill: simulated failure'
+                : `blocked: ${file} ${argv.join(' ')} — a test reached the real process killer`,
+            )
+      setTimeout(() => callback(error), 0)
+      return {}
     },
   }
 })
@@ -82,18 +113,35 @@ function reap(dir: string): void {
   rmSync(dir, { recursive: true, force: true })
 }
 
-/** A child whose streams the test drives chunk by chunk. */
+/**
+ * A child whose streams the test drives chunk by chunk.
+ *
+ * `pid: undefined` is load-bearing, not an omission: this object owns no OS process, so
+ * there is no PID that could legitimately be handed to a process killer. `stopChild`
+ * returns immediately for a child without one.
+ */
 function fakeChild() {
   const child = new EventEmitter() as ChildProcess
   const stdout = new PassThrough()
   const stderr = new PassThrough()
-  Object.assign(child, { stdout, stderr, pid: 4321, exitCode: null, signalCode: null, kill: vi.fn(() => true) })
+  Object.assign(child, {
+    stdout, stderr, pid: undefined, exitCode: null, signalCode: null, kill: vi.fn(() => true),
+  })
   return { child, stdout, stderr }
+}
+
+/** A child that claims a PID, for termination paths — only ever with a mocked helper. */
+function fakeOwnedChild(pid: number) {
+  const made = fakeChild()
+  Object.assign(made.child, { pid })
+  return made
 }
 
 afterEach(() => {
   spawned.children.length = 0
   spawned.options.length = 0
+  helper.mode = 'blocked'
+  helper.calls.length = 0
 })
 
 describe('parseServerPort', () => {
@@ -216,17 +264,114 @@ describe('startServer banner parsing', () => {
     child.emit('exit', 3)
     await expect(handle).rejects.toThrow('process exited with code 3')
   })
+
+  test('a partial port left by a dying process is not a resolved port', async () => {
+    const { child, stdout } = fakeChild()
+    const handle = startServer({ spawnFn: () => child, startupTimeoutMs: 2000 })
+    stdout.write('opencode server listening on http://127.0.0.1:45')
+    await new Promise((r) => setImmediate(r))
+    child.emit('exit', 1)
+    // Not "port 45": exit is not the delimiter that makes a final line trustworthy.
+    await expect(handle).rejects.toThrow('process exited with code 1')
+  })
+
+  test('a complete unterminated banner from a process that then dies yields no handle', async () => {
+    const { child, stdout } = fakeChild()
+    const handle = startServer({ spawnFn: () => child, startupTimeoutMs: 2000 })
+    stdout.write('opencode server listening on http://127.0.0.1:4599')
+    await new Promise((r) => setImmediate(r))
+    child.emit('exit', 0)
+    // Whatever it managed to print, there is nothing listening to hand back.
+    await expect(handle).rejects.toThrow('process exited with code 0')
+  })
+
+  test('the helper is never invoked for a child that owns no process', async () => {
+    const { child, stdout, stderr } = fakeChild()
+    const handle = startServer({ spawnFn: () => child, startupTimeoutMs: 150 })
+    stdout.write('opencode server listening on http://127.0.0.1:45')
+    stderr.write('99\n')
+    await expect(handle).rejects.toThrow('timed out waiting for the startup banner')
+    expect(helper.calls).toEqual([])
+  })
+})
+
+/**
+ * The mocked-helper paths describe `taskkill`, which only exists on Windows. The POSIX
+ * branch has no shell layer and no helper; it is covered by the real-fixture tests below,
+ * which run everywhere. POSIX termination remains unvalidated on this machine.
+ */
+describe.skipIf(process.platform !== 'win32')('startServer termination evidence (win32)', () => {
+  test('a hung helper is bounded and is not reported as a stopped tree', async () => {
+    helper.mode = 'hang'
+    const { child, stdout } = fakeOwnedChild(999_999)
+    const pending = startServer({ spawnFn: () => child, startupTimeoutMs: 2000 })
+    stdout.write('opencode server listening on http://127.0.0.1:4599\n')
+    const handle = await pending
+
+    const stopped = handle.stop().then(() => 'resolved', (e: Error) => e)
+    // The launcher exiting must not stand in for the helper's answer.
+    child.emit('exit', 0)
+    await new Promise((r) => setImmediate(r))
+    expect(await Promise.race([stopped, Promise.resolve('pending')])).toBe('pending')
+
+    const outcome = await stopped
+    expect(outcome).toBeInstanceOf(Error)
+    expect(String(outcome)).toMatch(/did not finish within/)
+  }, 20_000)
+
+  test('a failing helper surfaces the failure instead of a shell-only kill', async () => {
+    helper.mode = 'fail'
+    const { child, stdout } = fakeOwnedChild(999_999)
+    const pending = startServer({ spawnFn: () => child, startupTimeoutMs: 2000 })
+    stdout.write('opencode server listening on http://127.0.0.1:4599\n')
+    const handle = await pending
+    await expect(handle.stop()).rejects.toThrow(/taskkill for 999999 failed/)
+    // Killing the launcher would leave the grandchild; it must not be tried as a fallback.
+    expect(child.kill).not.toHaveBeenCalled()
+  }, 20_000)
+
+  test('a successful helper plus the launcher exiting is a stopped tree, once', async () => {
+    helper.mode = 'ok'
+    const { child, stdout } = fakeOwnedChild(999_999)
+    const pending = startServer({ spawnFn: () => child, startupTimeoutMs: 2000 })
+    stdout.write('opencode server listening on http://127.0.0.1:4599\n')
+    const handle = await pending
+    const first = handle.stop()
+    const second = handle.stop()
+    child.emit('exit', 0)
+    await expect(first).resolves.toBeUndefined()
+    await expect(second).resolves.toBeUndefined()
+    // Repeated stops share the one attempt rather than killing twice.
+    expect(helper.calls).toHaveLength(1)
+  }, 20_000)
+
+  test('a launcher that already exited is not killed by its stale PID', async () => {
+    helper.mode = 'ok'
+    const { child, stdout } = fakeOwnedChild(999_999)
+    const pending = startServer({ spawnFn: () => child, startupTimeoutMs: 2000 })
+    stdout.write('opencode server listening on http://127.0.0.1:4599\n')
+    const handle = await pending
+    Object.assign(child, { exitCode: 0 })
+    await expect(handle.stop()).resolves.toBeUndefined()
+    // That PID may belong to something else by now; signalling it would be reckless.
+    expect(helper.calls).toEqual([])
+    expect(child.kill).not.toHaveBeenCalled()
+  }, 20_000)
 })
 
 describe('startServer process ownership', () => {
   test('stop terminates the process we started, not just its launcher', async () => {
+    // A PID from a real spawn is the only kind that may reach the real killer.
+    helper.mode = 'real'
     const dir = mkdtempSync(join(tmpdir(), 'startserver-stop-'))
     try {
       const handle = await startServer({ ...serverCommand(join(dir, 'pid')), startupTimeoutMs: 10_000 })
       const pid = readPid(dir)
       expect(alive(pid)).toBe(true)
       await handle.stop()
-      await vi.waitFor(() => expect(alive(pid)).toBe(false), { timeout: 5000 })
+      // Immediately, not eventually: stop() promises the tree is gone when it resolves,
+      // and polling afterwards would only establish that it dies sometime later.
+      expect(alive(pid)).toBe(false)
       // Repeated stop is safe and stays resolved.
       await handle.stop()
     } finally {
@@ -237,12 +382,13 @@ describe('startServer process ownership', () => {
   test('the startup timeout terminates the process we started', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'startserver-timeout-'))
     try {
+      helper.mode = 'real'
       await expect(
         // Long enough for the fixture to boot and record its PID, then time out.
         startServer({ ...sleeperCommand(join(dir, 'pid')), startupTimeoutMs: 3000 }),
       ).rejects.toThrow('timed out waiting for the startup banner')
-      const pid = readPid(dir)
-      await vi.waitFor(() => expect(alive(pid)).toBe(false), { timeout: 5000 })
+      // The rejection waits on cleanup, so the process is already gone by now.
+      expect(alive(readPid(dir))).toBe(false)
     } finally {
       reap(dir)
     }
