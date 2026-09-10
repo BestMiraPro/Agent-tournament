@@ -39,17 +39,20 @@ export interface DockerSandboxOptions {
 export class DockerSandbox implements Sandbox {
   private shards: Shard[] = []
   private containers = new Map<number, StartedContainer>()
+  private pendingStarts = new Map<number, Promise<StartedContainer>>()
   private live = new Set<string>()
   /** Every container ever started, keyed by name. Never pruned by `teardown`, so
    *  `disposeAll` can clean up a container even after its per-shard bookkeeping
    *  in `containers` has been removed. */
   private everStarted = new Map<string, StartedContainer>()
   private stoppedNames = new Set<string>()
+  private disposed = false
 
   constructor(private opts: DockerSandboxOptions) {}
 
   /** Must be called once with the full population before provisioning. */
   async planFor(agentIds: readonly string[]): Promise<void> {
+    if (this.disposed) throw new Error('docker sandbox has been disposed')
     this.shards = planShards(agentIds, this.opts.maxContainers)
   }
 
@@ -127,17 +130,49 @@ export class DockerSandbox implements Sandbox {
     if (opts.seedDir) await cp(opts.seedDir, dir, { recursive: true })
   }
 
-  async provision(agentId: string, opts: ProvisionOpts): Promise<AgentHandle> {
-    const shardIndex = this.shardFor(agentId)
-    await this.seed(this.hostDirFor(agentId), opts)
+  private startShard(shardIndex: number): Promise<StartedContainer> {
+    const existing = this.containers.get(shardIndex)
+    if (existing) return Promise.resolve(existing)
 
-    let container = this.containers.get(shardIndex)
-    if (!container) {
+    const pending = this.pendingStarts.get(shardIndex)
+    if (pending) return pending
+
+    const start = (async () => {
       await mkdir(this.shardHostDir(shardIndex), { recursive: true })
-      container = await this.opts.startContainer(shardIndex, this.shardHostDir(shardIndex))
+      const container = await this.opts.startContainer(
+        shardIndex,
+        this.shardHostDir(shardIndex),
+      )
+      // A container name can be reused after teardown. It is a newly owned
+      // resource and therefore must be eligible for one new stop.
+      this.stoppedNames.delete(container.name)
       this.containers.set(shardIndex, container)
       this.everStarted.set(container.name, container)
-    }
+      return container
+    })()
+    this.pendingStarts.set(shardIndex, start)
+    void start.then(
+      () => {
+        if (this.pendingStarts.get(shardIndex) === start) {
+          this.pendingStarts.delete(shardIndex)
+        }
+      },
+      () => {
+        if (this.pendingStarts.get(shardIndex) === start) {
+          this.pendingStarts.delete(shardIndex)
+        }
+      },
+    )
+    return start
+  }
+
+  async provision(agentId: string, opts: ProvisionOpts): Promise<AgentHandle> {
+    if (this.disposed) throw new Error('docker sandbox has been disposed')
+    const shardIndex = this.shardFor(agentId)
+    await this.seed(this.hostDirFor(agentId), opts)
+    if (this.disposed) throw new Error('docker sandbox has been disposed')
+    const container = await this.startShard(shardIndex)
+    if (this.disposed) throw new Error('docker sandbox has been disposed')
 
     this.live.add(agentId)
     return {
@@ -258,9 +293,14 @@ export class DockerSandbox implements Sandbox {
    * at most once.
    */
   async disposeAll(): Promise<void> {
+    this.disposed = true
+    // Starts already handed to the container boundary are ours even if they have
+    // not returned yet. Wait for them to register so disposal cannot lose them.
+    await Promise.allSettled([...this.pendingStarts.values()])
     for (const container of this.everStarted.values()) {
       await this.stopOnce(container)
     }
+    this.pendingStarts.clear()
     this.containers.clear()
     this.live.clear()
   }

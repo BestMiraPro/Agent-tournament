@@ -7,8 +7,8 @@ import { defaultSeedStrategy } from '../engine/seed-strategy.js'
 import type { EventSink } from '../engine/events.js'
 import { Reflector } from '../evolution/reflect.js'
 import { Judge, type JudgeInput, type JudgeOutput } from '../judge/judge.js'
-import { runConfigFor, type ComposedRun, type RunIdHolder } from './compose-run.js'
-import { startEventBridge } from './event-bridge.js'
+import { runConfigFor, type ComposedRun, type RunIdHolder, type ShardServer } from './compose-run.js'
+import { startEventBridge, type BridgeHandle } from './event-bridge.js'
 import { disposeRunRecord, type RunRecord, type RunRegistry } from './runs.js'
 import { strategyDiversity } from '../core/analytics.js'
 import { parseRunSpec, type RunSpec } from './run-spec.js'
@@ -38,6 +38,41 @@ let modelsCache: { at: number; models: string[] } | null = null
 /** Test seam reset: each buildApi otherwise shares the process cache. */
 export function _resetModelsCacheForTests(): void {
   modelsCache = null
+}
+
+function startDockerShardBridges(opts: {
+  composed: ComposedRun
+  runId: string
+  lookupAgent: (sessionId: string) => string | null
+  emit: EventSink
+}): BridgeHandle {
+  const active = new Map<number, { baseUrl: string; bridge: BridgeHandle }>()
+  let stopped = false
+  const attach = (server: ShardServer) => {
+    if (stopped) return
+    const current = active.get(server.shardIndex)
+    if (current?.baseUrl === server.baseUrl) return
+    current?.bridge.stop()
+    active.set(server.shardIndex, {
+      baseUrl: server.baseUrl,
+      bridge: startEventBridge({
+        baseUrl: server.baseUrl,
+        runId: opts.runId,
+        lookupAgent: opts.lookupAgent,
+        emit: opts.emit,
+      }),
+    })
+  }
+  const unsubscribe = opts.composed.onShardServer!(attach)
+  return {
+    stop() {
+      if (stopped) return
+      stopped = true
+      unsubscribe()
+      for (const current of active.values()) current.bridge.stop()
+      active.clear()
+    },
+  }
 }
 
 /** Compose/create failures are client or contention problems, never 500s. */
@@ -272,6 +307,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         ),
         seedStrategy: defaultSeedStrategy,
         onEvent: emit,
+        preparePopulation: composed.planFor ?? undefined,
       })
       let runId: string
       try {
@@ -301,10 +337,15 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           runId, lookupAgent, emit,
         }))
       } else if (spec.sandbox === 'docker') {
-        for (const shard of composed.shardServers) {
-          record.bridges.push(startEventBridge({
-            baseUrl: shard.baseUrl, runId, lookupAgent, emit,
-          }))
+        if (composed.onShardServer) {
+          record.bridges.push(startDockerShardBridges({ composed, runId, lookupAgent, emit }))
+        } else {
+          // Compatibility for injected compositions that expose a fixed list.
+          for (const shard of composed.shardServers) {
+            record.bridges.push(startEventBridge({
+              baseUrl: shard.baseUrl, runId, lookupAgent, emit,
+            }))
+          }
         }
       }
       return reply.code(201).send({ runId, warnings: composed.warnings })

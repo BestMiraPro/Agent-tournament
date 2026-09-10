@@ -189,6 +189,175 @@ describe('real-mode wiring', () => {
     expect(mock.registry.get(mid)!.bridges).toHaveLength(0)
   })
 
+  test('docker bridges follow shard endpoints that appear after run creation', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    let publish!: (server: { shardIndex: number; baseUrl: string }) => void
+    let subscribed = true
+    const stoppedSignals: AbortSignal[] = []
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal
+      stoppedSignals.push(signal)
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const composed = {
+      config: {
+        ...DEFAULT_CONFIG,
+        populationSize: 1,
+        sandbox: 'docker',
+        roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
+      },
+      sandbox: new MockSandbox(),
+      provider: new MockProvider(42),
+      runner: new MockAgentRunner(new MockSandbox(), 42),
+      planFor: async () => {},
+      serverHandle: null,
+      shardServers: [],
+      onShardServer: (listener: (server: { shardIndex: number; baseUrl: string }) => void) => {
+        publish = listener
+        return () => { subscribed = false }
+      },
+      sessionMap: new Map(), sessionHook: () => {}, warnings: [], capacity: null,
+      cleanup: vi.fn(async () => {}),
+    } as unknown as ComposedRun
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('must not be called for specs') }) as never,
+      registry,
+      composeWith: async () => composed,
+    })
+
+    try {
+      const res = await app.inject({
+        method: 'POST', url: '/api/runs',
+        payload: {
+          name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
+          roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
+        },
+      })
+      expect(res.statusCode).toBe(201)
+      const runId = (JSON.parse(res.body) as { runId: string }).runId
+      const record = registry.get(runId)!
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      publish({ shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' })
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+      publish({ shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' })
+      await Promise.resolve()
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+
+      publish({ shardIndex: 0, baseUrl: 'http://127.0.0.1:42000' })
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+      expect(stoppedSignals[0]!.aborted).toBe(true)
+
+      await disposeRunRecord(record)
+      expect(subscribed).toBe(false)
+      expect(stoppedSignals[1]!.aborted).toBe(true)
+      publish({ shardIndex: 1, baseUrl: 'http://127.0.0.1:43000' })
+      await Promise.resolve()
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.unstubAllGlobals()
+      await app.close()
+    }
+  })
+
+  test('API-created rounds plan the full changed active population each time', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const registry = new RunRegistry()
+    const sandbox = new MockSandbox()
+    const plans: string[][] = []
+    const config: RunConfig = {
+      ...DEFAULT_CONFIG,
+      populationSize: 6,
+      sandbox: 'docker',
+      roster: [{ modelId: 'mock/model', count: 6, temperature: 0.7 }],
+    }
+    const composed: ComposedRun = {
+      config,
+      sandbox,
+      provider: new MockProvider(42),
+      runner: new MockAgentRunner(sandbox, 42),
+      planFor: async (ids) => { plans.push([...ids]) },
+      serverHandle: null,
+      shardServers: [],
+      sessionMap: new Map(),
+      sessionHook: () => {},
+      warnings: [],
+      capacity: null,
+      cleanup: async () => {},
+    }
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('must not be called for specs') }) as never,
+      registry,
+      composeWith: async () => composed,
+    })
+    const create = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: {
+        name: 'planned', goal: 'g', sandbox: 'docker',
+        workspaceRoot: 'C:\\tmp\\arena-planned', authFile: 'C:\\tmp\\auth.json',
+        roster: [{ modelId: 'mock/model', count: 6, temperature: 0.7 }],
+      },
+    })
+    expect(create.statusCode).toBe(201)
+    const runId = (JSON.parse(create.body) as { runId: string }).runId
+    const record = registry.get(runId)!
+    const originalIds = repos.agents.listActive(runId).map((agent) => agent.id)
+
+    const first = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'g' },
+    })
+    expect(first.statusCode).toBe(202)
+    await record.manager.waitForIdle(runId)
+    const round1 = repos.rounds.listForRun(runId)[0]!
+    expect(repos.scores.forRound(round1.id)).toHaveLength(6)
+
+    const bred = repos.agents.listActive(runId)
+    expect(bred.map((agent) => agent.id)).not.toEqual(originalIds)
+    const retired = bred[0]!
+    repos.agents.retire(retired.id, 2, 'retired')
+    const added = repos.agents.create({
+      runId,
+      label: 'manual-add',
+      parentAgentId: null,
+      bornRound: 2,
+    })
+    repos.genomes.create({
+      agentId: added.id,
+      roundIdx: 2,
+      strategyMd: 'manual strategy',
+      notesMd: '',
+      modelId: 'mock/model',
+      temperature: 0.7,
+      parentGenomeId: null,
+      origin: 'seed',
+    })
+    const editedIds = repos.agents.listActive(runId).map((agent) => agent.id)
+
+    const second = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'g' },
+    })
+    expect(second.statusCode).toBe(202)
+    await record.manager.waitForIdle(runId)
+    const round2 = repos.rounds.listForRun(runId)[1]!
+    const scoredIds = repos.scores.forRound(round2.id).map((score) => score.agentId).sort()
+
+    expect(plans).toEqual([originalIds, editedIds])
+    expect(plans[1]).toContain(added.id)
+    expect(plans[1]).not.toContain(retired.id)
+    expect(scoredIds).toEqual([...editedIds].sort())
+    await app.close()
+  })
+
   test('compose failures map to 400/409, never 500', async () => {
     const mk = (error: Error) => {
       const db = openDb(':memory:')

@@ -32,6 +32,8 @@ export interface ComposeSeams {
     config: RunConfig,
     onWarning: (message: string) => void,
   ) => Promise<void>
+  startShardContainerFn: typeof startShardContainer
+  removeContainerFn: typeof removeContainer
 }
 
 /**
@@ -48,6 +50,13 @@ export const defaultSeams: ComposeSeams = {
   sweepFn: sweepOrphanContainers,
   validateModels: (client, directory, config, onWarning) =>
     validateRosterModels(client, directory, config, { onWarning }),
+  startShardContainerFn: startShardContainer,
+  removeContainerFn: removeContainer,
+}
+
+export interface ShardServer {
+  shardIndex: number
+  baseUrl: string
 }
 
 export interface ComposedRun {
@@ -58,6 +67,8 @@ export interface ComposedRun {
   planFor: ((agentIds: readonly string[]) => Promise<void>) | null
   serverHandle: ServerHandle | null
   shardServers: { baseUrl: string }[]
+  /** Subscribes to live Docker shard endpoints and replays endpoints already started. */
+  onShardServer?: (listener: (server: ShardServer) => void) => () => void
   sessionMap: Map<string, string>
   sessionHook: (agentId: string, sessionId: string) => void
   warnings: string[]
@@ -171,7 +182,26 @@ export async function composeRun(
         }, onWarning).catch(() => [])
       }
       await s.ensureImageFn(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
-      const shardServers: { baseUrl: string }[] = []
+      const shardServers: ShardServer[] = []
+      const shardListeners = new Set<(server: ShardServer) => void>()
+      const publishShardServer = (server: ShardServer) => {
+        const index = shardServers.findIndex((current) => current.shardIndex === server.shardIndex)
+        if (index >= 0 && shardServers[index]!.baseUrl === server.baseUrl) return
+        if (index >= 0) shardServers[index] = server
+        else shardServers.push(server)
+        for (const listener of shardListeners) {
+          try {
+            listener(server)
+          } catch {
+            /* a dashboard bridge subscriber must never break container startup */
+          }
+        }
+      }
+      const onShardServer = (listener: (server: ShardServer) => void) => {
+        shardListeners.add(listener)
+        for (const server of shardServers) listener(server)
+        return () => { shardListeners.delete(listener) }
+      }
       const sandbox = new DockerSandbox({
         runId: `pending-${Date.now()}`,
         root: workspaceRoot,
@@ -185,7 +215,7 @@ export async function composeRun(
           // caller has set the holder to the live run id, so a pending-timestamp
           // id never reaches a container name for a live run.
           const runId = opts.runIdHolder ? opts.runIdHolder.value : `pending-${Date.now()}`
-          const started = await startShardContainer(
+          const started = await s.startShardContainerFn(
             {
               runId,
               shardIndex,
@@ -199,11 +229,11 @@ export async function composeRun(
             async (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: 10_000 }).health(),
             onWarning,
           )
-          shardServers.push({ baseUrl: started.baseUrl })
+          publishShardServer({ shardIndex: started.shardIndex, baseUrl: started.baseUrl })
           return started
         },
         stopContainer: async (name) => {
-          await removeContainer(name, onWarning)
+          await s.removeContainerFn(name, onWarning)
         },
         onWarning,
       })
@@ -217,6 +247,7 @@ export async function composeRun(
         config, sandbox, provider, runner,
         planFor: (agentIds) => sandbox.planFor(agentIds),
         serverHandle: server, shardServers,
+        onShardServer,
         sessionMap, sessionHook, warnings,
         capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
         cleanup: async () => {

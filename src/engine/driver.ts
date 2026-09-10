@@ -30,6 +30,8 @@ export interface EngineDeps {
   reflector: Reflector
   seedStrategy: (index: number) => string
   onEvent?: EventSink
+  /** Optional per-round preparation for sandboxes that need the full live roster. */
+  preparePopulation?: (agentIds: readonly string[]) => Promise<void>
 }
 
 export interface RoundResult {
@@ -179,6 +181,10 @@ export class TournamentEngine {
       repos.rounds.setStatus(round.id, 'preparing')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'preparing' })
       const agents = repos.agents.listActive(runId)
+      await this.d.preparePopulation?.(agents.map((agent) => agent.id))
+      // Planning may wait on capacity or container bookkeeping. Preserve an abort
+      // that lands during that await and never enter the provisioning pool afterward.
+      if (this.aborted.has(runId)) throw new Error('round aborted by user')
       const prepared = agents.map((agent) => {
         const exact = repos.genomes.forRound(agent.id, roundIdx)
         if (exact) return { agent, genome: exact }

@@ -74,4 +74,24 @@ describe('RunManager', () => {
     await m.waitForIdle('r1')
     expect(m.lastError('r1')).toMatch(/exploded/)
   })
+
+  test('disposeAll prevents a new round from starting while teardown waits', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const engine = {
+      runRound: async () => {
+        await gate
+        return { roundId: 'rd', roundIdx: 1, metaDigest: '', budgetBreach: null }
+      },
+      dispose: vi.fn(async () => {}),
+    }
+    const m = new RunManager(engine as never, () => {})
+    m.startRound('r1', { goalMd: 'g', criteriaMd: null })
+
+    const disposal = m.disposeAll()
+    expect(() => m.startRound('r2', { goalMd: 'g', criteriaMd: null })).toThrow(/dispos/)
+    release()
+    await disposal
+    expect(engine.dispose).toHaveBeenCalledWith('r1')
+  })
 })

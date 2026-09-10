@@ -13,6 +13,7 @@ export interface StartRoundInput {
 export class RunManager {
   private inFlight = new Map<string, Promise<void>>()
   private errors = new Map<string, string>()
+  private disposing = false
 
   constructor(private engine: TournamentEngine, private emit: EventSink) {}
 
@@ -25,6 +26,9 @@ export class RunManager {
   }
 
   startRound(runId: string, input: StartRoundInput): void {
+    if (this.disposing) {
+      throw new Error('run manager is disposing')
+    }
     if (this.inFlight.has(runId)) {
       throw new Error(`a round is already running for run ${runId}`)
     }
@@ -63,6 +67,7 @@ export class RunManager {
   }
 
   async disposeAll(): Promise<void> {
+    this.disposing = true
     for (const [runId, task] of this.inFlight) {
       await task.catch(() => {})
       await this.engine.dispose(runId).catch(() => {})

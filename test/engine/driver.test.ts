@@ -7,8 +7,99 @@ import { MockProvider } from '../../src/runtime/mock-provider.js'
 import { MockAgentRunner } from '../../src/runtime/agent-runner.js'
 import type { AgentHandle } from '../../src/runtime/sandbox.js'
 import type { AgentRunContext } from '../../src/runtime/agent-runner.js'
+import { RunManager } from '../../src/server/run-manager.js'
 
 describe('TournamentEngine', () => {
+  test('prepares the exact active population before every round', async () => {
+    const plans: string[][] = []
+    const { engine, repos } = makeMockEngine({
+      seed: 1,
+      populationSize: 6,
+      preparePopulation: async (ids) => { plans.push([...ids]) },
+    })
+    const run = engine.createRun('test', 'goal')
+    const originalIds = repos.agents.listActive(run.id).map((a) => a.id)
+
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const beforeManualEdit = repos.agents.listActive(run.id)
+    const retired = beforeManualEdit[0]!
+    repos.agents.retire(retired.id, 2, 'retired')
+    const added = repos.agents.create({
+      runId: run.id,
+      label: 'manual-add',
+      parentAgentId: null,
+      bornRound: 2,
+    })
+    repos.genomes.create({
+      agentId: added.id,
+      roundIdx: 2,
+      strategyMd: 'manual strategy',
+      notesMd: '',
+      modelId: 'mock/model',
+      temperature: 0.7,
+      parentGenomeId: null,
+      origin: 'seed',
+    })
+    const editedIds = repos.agents.listActive(run.id).map((a) => a.id)
+
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    expect(plans).toEqual([originalIds, editedIds])
+    expect(plans[1]).toContain(added.id)
+    expect(plans[1]).not.toContain(retired.id)
+    expect(plans[1]).not.toEqual(plans[0])
+  })
+
+  test('a planning failure records a failed round and clears manager busy state', async () => {
+    const { engine, repos, sandbox } = makeMockEngine({
+      seed: 1,
+      populationSize: 2,
+      preparePopulation: async () => { throw new Error('planner exploded') },
+    })
+    const run = engine.createRun('test', 'goal')
+    const provision = vi.spyOn(sandbox, 'provision')
+    const manager = new RunManager(engine, () => {})
+
+    manager.startRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(manager.isBusy(run.id)).toBe(true)
+    await manager.waitForIdle(run.id)
+
+    expect(manager.isBusy(run.id)).toBe(false)
+    expect(manager.lastError(run.id)).toMatch(/planner exploded/)
+    expect(repos.rounds.listForRun(run.id)).toHaveLength(1)
+    expect(repos.rounds.listForRun(run.id)[0]!.status).toBe('failed')
+    expect(provision).not.toHaveBeenCalled()
+  })
+
+  test('an abort during deferred planning prevents every agent from starting', async () => {
+    let release!: () => void
+    let entered!: () => void
+    const planning = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const { engine, repos, sandbox } = makeMockEngine({
+      seed: 1,
+      populationSize: 2,
+      preparePopulation: async () => {
+        entered()
+        await planning
+      },
+    })
+    const run = engine.createRun('test', 'goal')
+    const provision = vi.spyOn(sandbox, 'provision')
+    const manager = new RunManager(engine, () => {})
+
+    manager.startRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    await started
+    expect(manager.abortRound(run.id)).toBe(true)
+    release()
+    await manager.waitForIdle(run.id)
+
+    expect(provision).not.toHaveBeenCalled()
+    expect(manager.lastError(run.id)).toMatch(/aborted/)
+    expect(repos.rounds.listForRun(run.id)[0]!.status).toBe('failed')
+  })
+
   test('seeds the population from the roster', async () => {
     const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 6 })
     const run = engine.createRun('test', 'write a good answer')

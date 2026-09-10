@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { composeRun, runConfigFor } from '../../src/server/compose-run.js'
+import { composeRun, runConfigFor, type ComposeSeams } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
 
 const mockSeams = () => ({
@@ -126,6 +126,61 @@ describe('composeRun', () => {
       expect(seams.attachHostServer).not.toHaveBeenCalled()
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('docker publishes shard endpoints when preparation starts them and replays none early', async () => {
+    const seams = mockSeams()
+    seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
+    const root = mkdtempSync(join(tmpdir(), 'compose-shards-'))
+    const removeContainerFn = vi.fn<ComposeSeams['removeContainerFn']>(async () => {})
+    const startShardContainerFn = vi.fn(async (spec: { shardIndex: number }) => ({
+      name: `arena-run-${spec.shardIndex}`,
+      baseUrl: `http://127.0.0.1:${41000 + spec.shardIndex}`,
+      shardIndex: spec.shardIndex,
+    }))
+    const dockerBoundary: Pick<
+      ComposeSeams,
+      'startShardContainerFn' | 'removeContainerFn'
+    > = { startShardContainerFn, removeContainerFn }
+    try {
+      const c = await composeRun(parseRunSpec({
+        name: 'd', goal: 'g', sandbox: 'docker',
+        roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
+        workspaceRoot: root, authFile: join(root, 'auth.json'),
+      }), { ...seams, ...dockerBoundary } as never)
+      const seen: { shardIndex: number; baseUrl: string }[] = []
+      const unsubscribe = c.onShardServer!((server) => seen.push(server))
+
+      expect(c.shardServers).toEqual([])
+      await c.planFor!(['a1', 'a2'])
+      const [h1, h2] = await Promise.all([
+        c.sandbox.provision('a1', {}),
+        c.sandbox.provision('a2', {}),
+      ])
+      expect(seen.sort((a, b) => a.shardIndex - b.shardIndex)).toEqual([
+        { shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' },
+        { shardIndex: 1, baseUrl: 'http://127.0.0.1:41001' },
+      ])
+
+      await c.planFor!(['a1', 'a2'])
+      await Promise.all([c.sandbox.provision('a1', {}), c.sandbox.provision('a2', {})])
+      expect(startShardContainerFn).toHaveBeenCalledTimes(2)
+      expect(seen).toHaveLength(2)
+
+      unsubscribe()
+      await Promise.all([c.sandbox.teardown(h1), c.sandbox.teardown(h2)])
+      await c.sandbox.provision('a1', {})
+      expect(startShardContainerFn).toHaveBeenCalledTimes(3)
+      expect(seen).toHaveLength(2)
+      await c.cleanup()
+      expect(removeContainerFn.mock.calls.map((call) => call[0]).sort()).toEqual([
+        'arena-run-0',
+        'arena-run-0',
+        'arena-run-1',
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })

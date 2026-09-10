@@ -281,6 +281,8 @@ export function makeMockEngine(opts: {
   hugeTokensFor?: number
   /** Subscribe to engine events emitted during the run, for testing the event sink. */
   onEvent?: EventSink
+  /** Prepare the exact active population before the round provisions agents. */
+  preparePopulation?: (agentIds: readonly string[]) => Promise<void>
 }) {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
@@ -353,6 +355,7 @@ export function makeMockEngine(opts: {
       return base
     },
     onEvent: opts.onEvent,
+    preparePopulation: opts.preparePopulation,
   })
 
   // Exposed (not just wired into the engine) so a test can spy on `reflect` and

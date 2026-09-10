@@ -115,6 +115,106 @@ describe('DockerSandbox.isolatedWorkspace', () => {
 })
 
 describe('DockerSandbox', () => {
+  test('concurrent provisions on one shard share a single pending start', async () => {
+    const root = await tmp()
+    let release!: (container: { name: string; baseUrl: string; shardIndex: number }) => void
+    let entered!: () => void
+    const pending = new Promise<{ name: string; baseUrl: string; shardIndex: number }>((resolve) => {
+      release = resolve
+    })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let starts = 0
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 1, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      startContainer: async () => {
+        starts++
+        entered()
+        return pending
+      },
+      stopContainer: async () => {},
+    })
+    await sb.planFor(['a1', 'a2'])
+
+    const p1 = sb.provision('a1', {})
+    const p2 = sb.provision('a2', {})
+    await started
+    expect(starts).toBe(1)
+    release({ name: 'arena-t-0', baseUrl: 'http://127.0.0.1:40000', shardIndex: 0 })
+
+    const [h1, h2] = await Promise.all([p1, p2])
+    expect(h1.baseUrl).toBe('http://127.0.0.1:40000')
+    expect(h2.baseUrl).toBe(h1.baseUrl)
+  })
+
+  test('a shared failed start reaches every waiter and a later provision retries', async () => {
+    const root = await tmp()
+    let rejectFirst!: (error: Error) => void
+    let entered!: () => void
+    const first = new Promise<never>((_resolve, reject) => { rejectFirst = reject })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let starts = 0
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 1, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      startContainer: async () => {
+        starts++
+        if (starts === 1) {
+          entered()
+          return first
+        }
+        return { name: 'arena-t-0', baseUrl: 'http://127.0.0.1:40000', shardIndex: 0 }
+      },
+      stopContainer: async () => {},
+    })
+    await sb.planFor(['a1', 'a2'])
+
+    const p1 = sb.provision('a1', {})
+    const p2 = sb.provision('a2', {})
+    await started
+    rejectFirst(new Error('start failed'))
+    const failed = await Promise.allSettled([p1, p2])
+
+    expect(starts).toBe(1)
+    expect(failed.every((result) => result.status === 'rejected')).toBe(true)
+    expect(failed.map((result) => result.status === 'rejected' ? result.reason.message : '')).toEqual([
+      'start failed',
+      'start failed',
+    ])
+    await expect(sb.provision('a1', {})).resolves.toMatchObject({
+      baseUrl: 'http://127.0.0.1:40000',
+    })
+    expect(starts).toBe(2)
+  })
+
+  test('different shards may start concurrently', async () => {
+    const root = await tmp()
+    let release!: () => void
+    let bothEntered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { bothEntered = resolve })
+    const starts: number[] = []
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 2, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      startContainer: async (shardIndex) => {
+        starts.push(shardIndex)
+        if (starts.length === 2) bothEntered()
+        await gate
+        return {
+          name: `arena-t-${shardIndex}`,
+          baseUrl: `http://127.0.0.1:${40000 + shardIndex}`,
+          shardIndex,
+        }
+      },
+      stopContainer: async () => {},
+    })
+    await sb.planFor(['a1', 'a2'])
+
+    const provisions = Promise.all([sb.provision('a1', {}), sb.provision('a2', {})])
+    await started
+    expect(starts.slice().sort()).toEqual([0, 1])
+    release()
+    await provisions
+  })
+
   test('workspacePath is the CONTAINER path, not the host path', async () => {
     const { sb } = await make(['a1'], 1)
     const h = await sb.provision('a1', {})
@@ -209,6 +309,38 @@ describe('DockerSandbox', () => {
 })
 
 describe('DockerSandbox.disposeAll', () => {
+  test('waits for an owned pending start and stops its container once', async () => {
+    const root = await tmp()
+    let release!: (container: { name: string; baseUrl: string; shardIndex: number }) => void
+    let entered!: () => void
+    const pending = new Promise<{ name: string; baseUrl: string; shardIndex: number }>((resolve) => {
+      release = resolve
+    })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const stopped: string[] = []
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 1, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      startContainer: async () => {
+        entered()
+        return pending
+      },
+      stopContainer: async (name) => { stopped.push(name) },
+    })
+    await sb.planFor(['a1'])
+
+    const provision = sb.provision('a1', {})
+    await started
+    let disposed = false
+    const disposal = sb.disposeAll().then(() => { disposed = true })
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+    release({ name: 'arena-t-0', baseUrl: 'http://127.0.0.1:40000', shardIndex: 0 })
+
+    await disposal
+    await expect(provision).rejects.toThrow(/disposed/)
+    expect(stopped).toEqual(['arena-t-0'])
+  })
+
   test('stops every started container, regardless of live state', async () => {
     const { sb, c } = await make(['a1', 'a2', 'a3', 'a4'], 2)
     // a1 and a2 each start their shard's container (shard-0 and shard-1

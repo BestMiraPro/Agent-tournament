@@ -535,6 +535,7 @@ export async function runTournamentCli(
       // Each agent starts from a different keyword so imitation has something real to
       // transfer. Uniform seeds leave nothing to imitate and the curve stays flat.
       seedStrategy: defaultSeedStrategy,
+      preparePopulation: planFor ?? undefined,
     })
 
     const run = engine.createRun('cli', opts.goal)
@@ -562,10 +563,6 @@ export async function runTournamentCli(
     let finalRoundIdx = 0
 
     for (let i = 0; i < opts.rounds; i++) {
-      // Re-planned every round, not once: breeding retires and creates agents, so the
-      // population that round N+1 provisions is not the one round N was sharded for, and
-      // an agent missing from the plan cannot be provisioned at all.
-      if (planFor) await planFor(repos.agents.listActive(run.id).map((a) => a.id))
       const r = await engine.runRound(run.id, { goalMd: opts.goal, criteriaMd: opts.criteria })
       const scores = repos.scores.forRound(r.roundId)
       const values = scores.map((s) => s.score)
