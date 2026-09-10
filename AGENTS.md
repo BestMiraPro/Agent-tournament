@@ -7,13 +7,14 @@ Guidance for AI agents (and humans) working in this repo.
 Run all three before claiming work is done. All must pass.
 
 ```powershell
-npm test           # vitest run — expect 767 passed / 2 skipped
+npm test           # vitest run — expect 922 passed / 11 skipped
 npm run typecheck  # tsc --noEmit — expect exit 0, no output
 npm run web:build  # vite build — expect exit 0
 ```
 
-- The 2 skips are `test/e2e/real-tournament.test.ts` and `test/e2e/docker-tournament.test.ts` — daemon-gated (need `ARENA_E2E=1` / `ARENA_DOCKER_E2E=1` + real opencode/docker). They are pre-existing and expected.
-- Baseline as of master `88e495f`: 767 passed / 2 skipped. If your count drops below this, you broke something.
+- 3 of the skips are gated suites needing real services: `test/e2e/real-tournament.test.ts` (`ARENA_E2E=1`), `test/e2e/docker-tournament.test.ts` (`ARENA_DOCKER_E2E=1`) and `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`).
+- The other 8 are the file-symlink cases in `test/runtime/workspace-links.test.ts`. Creating a file symlink on Windows needs SeCreateSymbolicLink (Developer Mode or admin); without it the probe gets EPERM and those 8 skip. Directory-junction coverage runs regardless. On Linux/macOS all 8 should RUN — if they still skip there, the capability probe is broken, not the platform.
+- Baseline on `phase5-review-fixes` at `e10cd91`: 922 passed / 11 skipped. If your count drops below this, you broke something.
 - There is no separate lint script — `typecheck` is the type gate.
 
 ## Stack
