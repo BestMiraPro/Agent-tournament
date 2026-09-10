@@ -1,8 +1,9 @@
+import { resolve as resolvePath } from 'node:path'
 import { serializeGenome } from '../../core/genome.js'
 import type { QuiesceStatus } from '../../engine/capture.js'
 import type { AgentRunContext, AgentRunner, AgentRunResult } from '../agent-runner.js'
 import type { AgentHandle, Sandbox } from '../sandbox.js'
-import type { OpenCodeClient } from './client.js'
+import { OpenCodeTimeoutError, type OpenCodeClient } from './client.js'
 import { splitModelId } from './model-id.js'
 
 export const SUBMISSION_FILE = 'SUBMISSION.md'
@@ -40,7 +41,7 @@ export function buildAgentPrompt(goalMd: string): string {
  */
 export class OpenCodeAgentRunner implements AgentRunner {
   private resolve: ClientResolver
-  /** Runs that have not returned yet, so `quiesce` knows what is still executing. */
+  /** Retained until BOTH local return and confirmed remote termination. */
   private live = new Map<string, LiveRun>()
 
   constructor(
@@ -51,28 +52,36 @@ export class OpenCodeAgentRunner implements AgentRunner {
     this.resolve = typeof client === 'function' ? client : () => client
   }
 
-  /**
-   * Aborts this agent's session and waits for its run to actually come back.
-   *
-   * The abort acknowledgement alone is not proof: it says the server accepted the
-   * request, not that the session's last tool call has finished writing. The run
-   * promise settling is the evidence, so that is what is waited on — and when it does
-   * not settle in time the answer is `unconfirmed`, never a silent `stopped`.
-   */
+  /** Once per round, before a new roster can reuse any shared shard or workspace. */
+  assertReadyForRound(): void {
+    if (this.live.size > 0) {
+      throw new Error('previous round is still active or remote termination is unconfirmed')
+    }
+  }
+
+  /** Per-invocation guard permits unrelated workers within the admitted round. */
+  private assertAvailable(agentId: string, workspacePath: string): void {
+    for (const run of this.live.values()) {
+      if (run.agentId === agentId || workspaceKey(run.directory) === workspaceKey(workspacePath)) {
+        throw new Error(`agent ${run.agentId} is still active or remote termination is unconfirmed`)
+      }
+    }
+  }
+
+  /** Abort acknowledgement is not termination evidence; the entire wait is bounded. */
   async quiesce(handle: AgentHandle): Promise<QuiesceStatus> {
     const run = this.live.get(handle.agentId)
-    // Absent means `run` already returned, which is the strongest confirmation there is.
     if (run === undefined) return 'stopped'
-
-    if (run.sessionId !== null) {
-      // A failed abort is not decisive either way; settlement below still rules.
-      await run.client.abort(run.sessionId, run.directory).catch(() => {})
-    }
+    run.stopRequested = true
+    // Cancellation closes prompt admission even if session creation returns later.
+    if (!run.promptDispatched) this.confirmStopped(run)
+    if (run.remoteStopped) return 'stopped'
+    this.requestAbort(run)
 
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       return await Promise.race([
-        run.done.then((): QuiesceStatus => 'stopped'),
+        run.stopped.then((): QuiesceStatus => 'stopped'),
         new Promise<QuiesceStatus>((resolve) => {
           timer = setTimeout(() => resolve('unconfirmed'), QUIESCE_GRACE_MS)
         }),
@@ -82,64 +91,89 @@ export class OpenCodeAgentRunner implements AgentRunner {
     }
   }
 
-  /**
-   * Aborts every tracked session and clears them from the map; empty → no-op success.
-   *
-   * WHY this bounds the 4d-cooperative tail: the driver's flag stops queued agents and
-   * the phase gates fail the round, but neither reaches a live session — this does, by
-   * reusing `quiesce` per tracked agent (abort + grace-wait). No new wait primitive:
-   * unknown agents cannot occur (the loop reads the map's own keys), and a run that
-   * settled already removed itself, so only our own entry is deleted. Best-effort
-   * bound: a worker pulled pre-abort that registers after the snapshot is never
-   * aborted; the round still fails at the JUDGE gate.
-   */
+  /** Stop the snapshot concurrently; uncertainty must survive this cleanup attempt. */
   async abortAll(): Promise<void> {
-    for (const [agentId, tracked] of [...this.live]) {
-      await this.quiesce({ agentId, workspacePath: tracked.directory, baseUrl: '' })
-      if (this.live.get(agentId) === tracked) this.live.delete(agentId)
+    await Promise.all([...this.live.values()].map((run) =>
+      this.quiesce({ agentId: run.agentId, workspacePath: run.directory, baseUrl: '' }),
+    ))
+  }
+
+  private requestAbort(run: LiveRun): void {
+    if (run.sessionId === null || run.remoteStopped || run.abortRequested) return
+    run.abortRequested = true
+    const sessionId = run.sessionId
+    // Neither run's timeout nor quiesce's grace depends on this request settling.
+    void Promise.resolve().then(() => run.client.abort(sessionId, run.directory)).catch(() => {})
+  }
+
+  private confirmStopped(run: LiveRun): void {
+    run.remoteStopped = true
+    run.settleStopped()
+    this.forgetStopped(run)
+  }
+
+  private forgetStopped(run: LiveRun): void {
+    if (run.remoteStopped && run.localReturned && this.live.get(run.agentId) === run) {
+      this.live.delete(run.agentId)
     }
   }
 
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
+    if (ctx.agentId !== handle.agentId) throw new Error('agent context does not match handle')
+    this.assertAvailable(handle.agentId, handle.workspacePath)
     const started = Date.now()
     const zero = { tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0 }
     const client = this.resolve(handle)
 
     let settle = (): void => {}
     const tracked: LiveRun = {
+      agentId: handle.agentId,
       client,
       sessionId: null,
       directory: handle.workspacePath,
-      done: new Promise<void>((resolve) => {
+      promptDispatched: false,
+      stopRequested: false,
+      abortRequested: false,
+      remoteStopped: false,
+      localReturned: false,
+      stopped: new Promise<void>((resolve) => {
         settle = resolve
       }),
+      settleStopped: () => settle(),
     }
     this.live.set(ctx.agentId, tracked)
 
-    let sessionId: string | null = null
     try {
       const session = await client.createSession(handle.workspacePath, `agent-${ctx.agentId}`)
-      sessionId = session.id
       tracked.sessionId = session.id
       try {
         this.options.onSessionCreated?.(ctx.agentId, session.id)
       } catch {
         /* a dashboard subscriber must never break an agent's run */
       }
+      if (tracked.stopRequested) throw new Error('agent stopped before prompt dispatch')
+
+      const body = {
+        model: splitModelId(ctx.genome.modelId),
+        system: ctx.genome.strategyMd,
+        parts: [{ type: 'text' as const, text: buildAgentPrompt(ctx.goalMd) }],
+      }
 
       let timer: ReturnType<typeof setTimeout> | undefined
       try {
+        tracked.promptDispatched = true
+        // Keep this handler attached to the original request after a local timeout.
+        // Transport rejection cannot confirm stop; a resolved terminal response can.
+        const prompt = client.prompt(session.id, handle.workspacePath, body, ctx.timeoutMs).then((res) => {
+          // HTTP success with missing/malformed JSON is not a terminal prompt result.
+          if (!res || !res.info || typeof res.info !== 'object' || Array.isArray(res.info)) {
+            throw new Error('invalid OpenCode prompt response')
+          }
+          this.confirmStopped(tracked)
+          return res
+        })
         const res = await Promise.race([
-          client.prompt(
-            session.id,
-            handle.workspacePath,
-            {
-              model: splitModelId(ctx.genome.modelId),
-              system: ctx.genome.strategyMd,
-              parts: [{ type: 'text', text: buildAgentPrompt(ctx.goalMd) }],
-            },
-            ctx.timeoutMs,
-          ),
+          prompt,
           new Promise<never>((_r, reject) => {
             timer = setTimeout(() => reject(new TimeoutError()), ctx.timeoutMs)
           }),
@@ -177,10 +211,8 @@ export class OpenCodeAgentRunner implements AgentRunner {
         clearTimeout(timer)
       }
     } catch (e) {
-      const isTimeout = e instanceof TimeoutError
-      if (isTimeout && sessionId) {
-        await client.abort(sessionId, handle.workspacePath).catch(() => {})
-      }
+      const isTimeout = e instanceof TimeoutError || e instanceof OpenCodeTimeoutError
+      if (tracked.promptDispatched) this.requestAbort(tracked)
       return {
         status: isTimeout ? 'timeout' : 'error',
         errorText: isTimeout ? `agent exceeded ${ctx.timeoutMs}ms` : String(e).slice(0, 500),
@@ -188,22 +220,34 @@ export class OpenCodeAgentRunner implements AgentRunner {
         durationMs: Date.now() - started,
       }
     } finally {
-      // Only reached once nothing else in this method can run, which is exactly the
-      // condition `quiesce` reports as `stopped`.
-      this.live.delete(ctx.agentId)
-      settle()
+      if (!tracked.promptDispatched) this.confirmStopped(tracked)
+      tracked.localReturned = true
+      this.forgetStopped(tracked)
     }
   }
 }
 
 interface LiveRun {
+  agentId: string
   client: OpenCodeClient
   sessionId: string | null
   directory: string
-  done: Promise<void>
+  promptDispatched: boolean
+  stopRequested: boolean
+  abortRequested: boolean
+  remoteStopped: boolean
+  localReturned: boolean
+  stopped: Promise<void>
+  settleStopped: () => void
 }
 
-/** How long `quiesce` waits for an aborted run to come back before giving up on it. */
+/** Lexical aliases only; filesystem links are a separate sandbox responsibility. */
+function workspaceKey(directory: string): string {
+  const absolute = resolvePath(directory)
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute
+}
+
+/** Total grace for confirmed termination, including any abort request time. */
 export const QUIESCE_GRACE_MS = 10_000
 
 class TimeoutError extends Error {

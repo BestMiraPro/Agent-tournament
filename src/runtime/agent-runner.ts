@@ -23,8 +23,10 @@ export interface AgentRunResult {
 
 export interface AgentRunner {
   run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult>
+  /** Before PREPARE, reject while any prior invocation (including culled agents) remains live. */
+  assertReadyForRound?(): void
   /**
-   * Aborts every tracked session and clears them from tracking; empty → no-op success.
+   * Attempts to abort every tracked session; retain unconfirmed execution evidence.
    *
    * WHY session-level abort exists: it bounds the 4d-cooperative tail — queued agents
    * stop, live sessions abort here, and only an in-flight JUDGE call still finishes
@@ -60,7 +62,7 @@ export class MockAgentRunner implements AgentRunner {
 
   async abortAll(): Promise<void> {
     // The mock holds no real sessions: aborting is recording who was live, then
-    // forgetting them — the same observable contract as the OpenCode runner.
+    // forgetting them. It does not have an independent remote execution lifetime.
     this.abortedIds.push(...this.inFlight)
     this.inFlight.clear()
   }

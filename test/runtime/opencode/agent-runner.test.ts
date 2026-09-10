@@ -138,10 +138,9 @@ describe('abortAll', () => {
     timeoutMs: 60_000,
   })
 
-  test('aborts every tracked session, clears the map, and no-ops after', async () => {
-    // Fake timers: quiesce waits QUIESCE_GRACE_MS for a hung run to settle, and two
-    // sequential graces would cost 20s of wall clock. The runs' own race timers sit
-    // at 60s, so advancing just past the grace trips nothing else.
+  test('aborts every tracked session and no-ops after terminal responses arrive', async () => {
+    // Fake timers keep the concurrent grace from costing wall clock time. The runs'
+    // own race timers sit at 60s, beyond the single quiescence grace.
     vi.useFakeTimers()
     try {
       const sb = new MockSandbox()
@@ -159,8 +158,7 @@ describe('abortAll', () => {
       expect(c.sessions).toBe(2)
 
       const abortP = runner.abortAll()
-      // Two agents abort sequentially, so two graces elapse back to back.
-      await vi.advanceTimersByTimeAsync(2 * QUIESCE_GRACE_MS + 100)
+      await vi.advanceTimersByTimeAsync(QUIESCE_GRACE_MS)
       await abortP
       // Both tracked sessions aborted via the client spy, in map order. Runs never
       // settled, so both entries were still tracked when their turn came.
@@ -170,7 +168,7 @@ describe('abortAll', () => {
       expect((await p1).status).toBe('ok')
       expect((await p2).status).toBe('ok')
 
-      // The map was cleared: a second call aborts nothing further.
+      // Terminal responses confirmed both stopped: another call aborts nothing.
       await runner.abortAll()
       expect(c.abortedIds).toEqual(['ses_1', 'ses_2'])
     } finally {

@@ -181,6 +181,9 @@ export class TournamentEngine {
       repos.rounds.setStatus(round.id, 'preparing')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'preparing' })
       const agents = repos.agents.listActive(runId)
+      // Prior writers can outlive culling and still reach a reused shared shard.
+      // Check all retained owners before planning/provision/reset, once per round.
+      this.d.runner.assertReadyForRound?.()
       await this.d.preparePopulation?.(agents.map((agent) => agent.id))
       // Planning may wait on capacity or container bookkeeping. Preserve an abort
       // that lands during that await and never enter the provisioning pool afterward.

@@ -8,7 +8,7 @@ export const SUBMISSION_FILE = 'SUBMISSION.md'
  * Whether an agent's execution is known to have stopped.
  *
  * `unsupported` means the runner offers no way to stop it (a mock, or a runner predating
- * this interface); `unconfirmed` means we asked and did not get an acknowledgement. Both
+ * this interface); `unconfirmed` means remote termination was not proven. Both
  * are reasons NOT to certify a capture, which is why they are distinct from `stopped`.
  */
 export type QuiesceStatus = 'stopped' | 'unconfirmed' | 'unsupported'

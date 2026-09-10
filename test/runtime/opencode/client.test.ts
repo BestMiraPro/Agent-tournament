@@ -35,6 +35,17 @@ describe('OpenCodeClient', () => {
     await expect(c.createSession('/w', 't')).rejects.toThrow()
   })
 
+  test('normalizes its own deadline but preserves an unrelated AbortError', async () => {
+    stubFetch((_url, init) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+    }))
+    const c = new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 5 })
+    await expect(c.createSession('/w', 't')).rejects.toMatchObject({ name: 'OpenCodeTimeoutError' })
+    const unrelated = new DOMException('other cancellation', 'AbortError')
+    stubFetch(async () => { throw unrelated })
+    await expect(c.createSession('/w', 't')).rejects.toBe(unrelated)
+  })
+
   test('prompt sends model, system and parts', async () => {
     let body: any = null
     stubFetch(async (_url, init) => { body = JSON.parse(String(init.body)); return ok({ info: {}, parts: [] }) })

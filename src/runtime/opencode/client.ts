@@ -49,6 +49,14 @@ export interface OpenCodeClientOptions {
   timeoutMs: number
 }
 
+/** Our HTTP deadline expired; this says nothing about remote execution stopping. */
+export class OpenCodeTimeoutError extends Error {
+  constructor(timeoutMs: number, cause: unknown) {
+    super(`OpenCode request exceeded ${timeoutMs}ms`, { cause })
+    this.name = 'OpenCodeTimeoutError'
+  }
+}
+
 export class OpenCodeClient {
   constructor(private opts: OpenCodeClientOptions) {}
 
@@ -61,7 +69,8 @@ export class OpenCodeClient {
     if (opts.directory) url.searchParams.set('directory', opts.directory)
 
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? this.opts.timeoutMs)
+    const timeoutMs = opts.timeoutMs ?? this.opts.timeoutMs
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const res = await fetch(url.toString(), {
         method,
@@ -74,6 +83,9 @@ export class OpenCodeClient {
         throw new Error(`OpenCode ${method} ${path} failed: ${res.status} ${text.slice(0, 300)}`)
       }
       return (text ? JSON.parse(text) : null) as T
+    } catch (error) {
+      if (controller.signal.aborted) throw new OpenCodeTimeoutError(timeoutMs, error)
+      throw error
     } finally {
       clearTimeout(timer)
     }
