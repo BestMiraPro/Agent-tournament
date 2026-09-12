@@ -395,6 +395,27 @@ describe.skipIf(process.platform !== 'win32')('startServer termination evidence 
   })
 })
 
+describe.skipIf(process.platform === 'win32')('startServer termination evidence (posix)', () => {
+  test('stop escalates to SIGKILL when the server ignores SIGTERM', async () => {
+    helper.mode = 'real'
+    const dir = mkdtempSync(join(tmpdir(), 'startserver-sigkill-'))
+    try {
+      const ignoreTerm = `process.on('SIGTERM',function(){});`
+      const fixture = nodeFixture(writePid(join(dir, 'pid')) + printBanner + ignoreTerm + stayAlive)
+      const handle = await startServer({ ...fixture, startupTimeoutMs: 10_000 })
+      const pid = readPid(dir)
+      expect(alive(pid)).toBe(true)
+      // SIGTERM is ignored, so only the SIGKILL escalation can end this process.
+      await handle.stop()
+      expect(alive(pid)).toBe(false)
+      // Repeated stop is safe and stays resolved.
+      await handle.stop()
+    } finally {
+      reap(dir)
+    }
+  }, 30_000)
+})
+
 describe('startServer process ownership', () => {
   test('stop terminates the process we started, not just its launcher', async () => {
     // A PID from a real spawn is the only kind that may reach the real killer.
