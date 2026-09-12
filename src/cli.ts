@@ -388,14 +388,13 @@ async function buildRealDeps(
   // - reportWarning prints each warning as it happens (capacity, container start/stop),
   //   including ones that fire during rounds — a post-hoc replay would miss those.
   //
-  // One known delta: container names. The old startContainer closure read
-  // runIdHolder.value live, so containers were named arena-<liveRunId>-<shard>.
-  // composeRun names them arena-pending-<timestamp>-<shard> (its DockerSandbox runId
-  // option itself is dead — never read, verified in sandbox.ts). Sweep safety holds
-  // either way: the live sweep runs before any container of ours exists, and
-  // parseArenaName accepts dashed run ids, so a later sweep still collects ours as
-  // orphans. runIdHolder is still set by the caller for a future runId seam.
-  void runIdHolder
+  // The holder is passed through, so containers are named arena-<liveRunId>-<shard> the
+  // same way the dashboard names them. Discarding it left CLI containers called
+  // arena-pending-<timestamp>-<shard>, which makes a name useless as ownership evidence:
+  // a sweep excludes live runs BY RUN ID, so no other orchestrator could ever match a
+  // pending-timestamp name against a run it knows is alive. Passing the holder also
+  // suppresses composeRun's own pending-id sweep, which is what this path wants — the CLI
+  // sweeps itself after createRun, with the live id to exclude.
   if (config.sandbox === 'docker' && !opts.authFile) {
     console.warn(
       'docker sandbox: no --auth-file given, so agent containers start without provider ' +
@@ -441,7 +440,7 @@ async function buildRealDeps(
       sweepFn: async () => [],
       validateModels: async () => {},
     },
-    { reportWarning: (m) => console.warn(m) },
+    { runIdHolder, reportWarning: (m) => console.warn(m) },
   )
   if (!composed.serverHandle) {
     throw new Error('composeRun returned no server for a real-mode run')

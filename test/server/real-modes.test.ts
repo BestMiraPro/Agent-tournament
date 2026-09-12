@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, test, vi } from 'vitest'
 import { DEFAULT_CONFIG, type RunConfig } from '../../src/core/types.js'
 import { openDb } from '../../src/db/open.js'
@@ -830,5 +831,71 @@ describe('real-mode wiring', () => {
     expect(repos.runs.get(row.id)!.status).toBe('active')
     const snap = await app.inject({ method: 'GET', url: `/api/runs/${row.id}` })
     expect(snap.statusCode).toBe(200)
+  })
+})
+
+describe('container names carry the live run id', () => {
+  /**
+   * A sweep excludes live runs BY RUN ID, so the id inside a container name is the only
+   * thing that makes a name ownership evidence. The CLI discarded its runIdHolder, so its
+   * containers were called `arena-pending-<timestamp>-<shard>` and no other orchestrator
+   * on the host could match them against a run it knows is alive — it would see them as
+   * orphans and force-remove a paid, in-flight tournament.
+   *
+   * The mechanism is composeRun reading the holder at container START time, which is long
+   * after createRun has filled it in. This asserts that contract from both sides.
+   */
+  const seams = (started: string[]) => ({
+    startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn() })),
+    attachHostServer: vi.fn(),
+    ensureImageFn: vi.fn(async () => {}),
+    readCapacity: vi.fn(async () => ({
+      totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1024 ** 3, cpus: 8,
+    })),
+    sweepFn: vi.fn(async () => [] as string[]),
+    validateModels: vi.fn(async () => {}),
+    startShardContainerFn: vi.fn(async (spec: { runId: string; shardIndex: number }) => {
+      started.push(`arena-${spec.runId}-${spec.shardIndex}`)
+      return {
+        name: `arena-${spec.runId}-${spec.shardIndex}`,
+        baseUrl: 'http://127.0.0.1:1',
+        shardIndex: spec.shardIndex,
+      }
+    }),
+  })
+
+  const dockerSpec = () => parseRunSpec({
+    name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
+    roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
+  })
+
+  test('a holder filled in after compose reaches the container name', async () => {
+    const started: string[] = []
+    const holder = { value: '' }
+    const composed = await composeRun(dockerSpec(), seams(started) as never, { runIdHolder: holder })
+    // Exactly what createRun does before the first round provisions anything.
+    holder.value = 'run-live-42'
+    await composed.planFor?.(['a1'])
+    await composed.sandbox.provision('a1', {})
+    expect(started).toEqual(['arena-run-live-42-0'])
+    await composed.cleanup().catch(() => {})
+  })
+
+  test('without a holder the name falls back to a pending id', async () => {
+    const started: string[] = []
+    const composed = await composeRun(dockerSpec(), seams(started) as never)
+    await composed.planFor?.(['a1'])
+    await composed.sandbox.provision('a1', {})
+    expect(started[0]).toMatch(/^arena-pending-\d+-0$/)
+    await composed.cleanup().catch(() => {})
+  })
+
+  test('the CLI passes its holder through instead of discarding it', () => {
+    // buildRealDeps is not exported and the hooks do not reach the container seam, so the
+    // wiring itself is what is checked. A discarded holder is invisible to every other
+    // test in this file, which is exactly how it survived.
+    const source = readFileSync('src/cli.ts', 'utf8')
+    expect(source).toMatch(/\{\s*runIdHolder,/)
+    expect(source).not.toMatch(/void runIdHolder/)
   })
 })
