@@ -194,6 +194,10 @@ function agentDetail(repos: Repos, runId: string, agentId: string) {
 /** Spec 3.2: one entry per round that HAS score rows — the chart is completed rounds only. */
 function roundStats(repos: Repos, runId: string) {
   const agents = repos.agents.listAll(runId)
+  // One statement for every genome in the run, instead of one per agent per round. The
+  // dashboard polls this endpoint, and node:sqlite is synchronous, so the old
+  // rounds-times-agents walk blocked the event loop for 229ms per poll at 100x100.
+  const genomes = repos.genomes.forRunByRound(runId)
   const out: {
     idx: number
     goalMd: string
@@ -225,7 +229,7 @@ function roundStats(repos: Repos, runId: string) {
     for (const a of agents) {
       // The genome at this idx is the record of that round: later-born agents
       // simply have no row, an agent culled after the round still counts.
-      const g = repos.genomes.forRound(a.id, round.idx)
+      const g = genomes.get(`${a.id}:${round.idx}`)
       if (!g) continue
       counts.set(g.modelId, (counts.get(g.modelId) ?? 0) + 1)
       strategies.push(g.strategyMd)

@@ -244,3 +244,71 @@ describe('GET /api/runs/:runId/rounds', () => {
     expect(JSON.parse(res.body)).toEqual({ error: 'no such run' })
   })
 })
+
+describe('roundStats query cost', () => {
+  /**
+   * Counts statement executions so a reintroduced N+1 fails rather than just getting
+   * slower. This endpoint is polled by the dashboard and node:sqlite is synchronous, so
+   * per-round-per-agent queries block the event loop — the websocket broadcasts and the
+   * running round's own writes included. Measured before the fix: 10,103 statements and
+   * 229ms for 100 rounds x 100 agents.
+   */
+  test('scales with rounds plus agents, not rounds times agents', async () => {
+    const db = openDb(':memory:')
+    let statements = 0
+    const realPrepare = db.prepare.bind(db)
+    ;(db as unknown as { prepare: typeof db.prepare }).prepare = ((sql: string) => {
+      const stmt = realPrepare(sql)
+      for (const method of ['all', 'get', 'run'] as const) {
+        const original = (stmt as unknown as Record<string, (...a: unknown[]) => unknown>)[method]
+        if (typeof original !== 'function') continue
+        ;(stmt as unknown as Record<string, (...a: unknown[]) => unknown>)[method] = (...args: unknown[]) => {
+          statements++
+          return original.apply(stmt, args)
+        }
+      }
+      return stmt
+    }) as typeof db.prepare
+
+    const repos = makeRepos(db)
+    const rounds = 12
+    const population = 10
+    const run = repos.runs.create({ name: 'cost', config: DEFAULT_CONFIG, seedDir: null })
+    const agents = Array.from({ length: population }, (_, i) =>
+      repos.agents.create({ runId: run.id, label: `c${i}`, parentAgentId: null, bornRound: 1 }),
+    )
+    for (let r = 1; r <= rounds; r++) {
+      const round = repos.rounds.create({ runId: run.id, idx: r, goalMd: 'goal' })
+      repos.rounds.setStatus(round.id, 'complete')
+      for (const a of agents) {
+        repos.genomes.create({
+          agentId: a.id, roundIdx: r, strategyMd: `strategy ${r}`, notesMd: '',
+          modelId: 'mock/model', temperature: 0.7, parentGenomeId: null, origin: 'seed',
+        })
+      }
+      repos.scores.insertMany(
+        round.id,
+        agents.map((a, i) => ({
+          agentId: a.id, rank: i + 1, score: 100 - i, rationaleMd: 'r', band: 'top',
+        })) as never,
+      )
+    }
+
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: () => run.id,
+    })
+
+    statements = 0
+    const res = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/rounds` })
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toHaveLength(rounds)
+
+    // The N+1 shape costs rounds*agents (120 here) plus overhead; the batched shape costs
+    // a handful per round. Sits clear of both so it is a shape check, not a golden number.
+    expect(statements).toBeLessThan(rounds * population)
+    expect(statements).toBeLessThan(3 * rounds + 20)
+    db.close()
+  })
+})

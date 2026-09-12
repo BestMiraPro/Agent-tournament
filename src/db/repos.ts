@@ -209,6 +209,32 @@ export function makeRepos(db: Db) {
           parentGenomeId: r.parent_genome_id, origin: r.origin, createdAt: r.created_at,
         }))
       },
+      /**
+       * Every genome in a run, in one statement, keyed `<agentId>:<roundIdx>`.
+       *
+       * Callers that walk rounds x agents were issuing one `forRound` each: 10,000
+       * statements and 229ms of synchronous SQLite for a 100-round, 100-agent run, on an
+       * endpoint the dashboard polls. node:sqlite is synchronous, so that time blocks the
+       * event loop — the websocket broadcasts and the round's own writes included. The
+       * volume of data returned is unchanged (those callers read every genome anyway);
+       * only the number of round trips drops.
+       */
+      forRunByRound(runId: string): Map<string, GenomeRow> {
+        const rows = db.prepare(
+          `SELECT g.* FROM genomes g
+             JOIN agents a ON a.id = g.agent_id
+            WHERE a.run_id = ?`,
+        ).all(runId) as any[]
+        const byAgentAndRound = new Map<string, GenomeRow>()
+        for (const r of rows) {
+          byAgentAndRound.set(`${r.agent_id}:${r.round_idx}`, {
+            id: r.id, agentId: r.agent_id, roundIdx: r.round_idx, strategyMd: r.strategy_md,
+            notesMd: r.notes_md, modelId: r.model_id, temperature: r.temperature,
+            parentGenomeId: r.parent_genome_id, origin: r.origin, createdAt: r.created_at,
+          })
+        }
+        return byAgentAndRound
+      },
     },
 
     scores: {
