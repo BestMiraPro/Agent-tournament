@@ -7,7 +7,7 @@ Guidance for AI agents (and humans) working in this repo.
 Run all three before claiming work is done. All must pass.
 
 ```powershell
-npm test           # vitest run — expect 938 passed / 12 skipped
+npm test           # vitest run — expect 1010 passed / 12 skipped
 npm run typecheck  # tsc --noEmit — expect exit 0, no output
 npm run web:build  # vite build — expect exit 0
 ```
@@ -15,8 +15,8 @@ npm run web:build  # vite build — expect exit 0
 - 3 of the skips are gated suites needing real services: `test/e2e/real-tournament.test.ts` (`ARENA_E2E=1`), `test/e2e/docker-tournament.test.ts` (`ARENA_DOCKER_E2E=1`) and `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`).
 - The other 8 are the file-symlink cases in `test/runtime/workspace-links.test.ts`. Creating a file symlink on Windows needs SeCreateSymbolicLink (Developer Mode or admin); without it the probe gets EPERM and those 8 skip. Directory-junction coverage runs regardless. On Linux/macOS all 8 should RUN — if they still skip there, the capability probe is broken, not the platform.
 - The 12th is the POSIX branch of `stopChild` in `test/runtime/opencode/server.test.ts`, skipped on win32; the four win32 taskkill tests skip on POSIX instead.
-- 938/12 is the WINDOWS figure. 950 total cases is platform-independent, but the passed/skipped split is not: on Linux/macOS the eight symlink tests and the POSIX termination test should run while the four win32 tests skip. Measure the Linux baseline on the first Linux run instead of deriving it — and check the total is still 950, which is what catches a test that silently stopped being collected.
-- Baseline on `phase5-review-fixes` at `21aa2e7`: 938 passed / 12 skipped. If your count drops below this, you broke something.
+- 1010/12 is the WINDOWS figure. 1022 total cases is platform-independent, but the passed/skipped split is not: on Linux/macOS the eight symlink tests and the POSIX termination test should run while the four win32 tests skip. Measure the Linux baseline on the first Linux run instead of deriving it — and check the total is still 1022, which is what catches a test that silently stopped being collected.
+- Baseline on `phase5-review-fixes` at `525b443`: 1010 passed / 12 skipped. If your count drops below this, you broke something.
 - There is no separate lint script — `typecheck` is the type gate.
 
 ## Stack
