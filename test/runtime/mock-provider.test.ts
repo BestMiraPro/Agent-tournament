@@ -61,3 +61,56 @@ describe('MockProvider', () => {
     expect(a).toBe(b)
   })
 })
+
+describe('MockProvider reflect with a multiline strategy', () => {
+  /**
+   * Crossover merges two parents by splitting on lines, so a recombined child's strategy
+   * is multi-line by construction. The reflect prompt puts that strategy between
+   * `YOUR STRATEGY:` and `YOUR NOTES:`, and a `.` capture stops at the first newline — so
+   * the mock silently returned only the first line and the recombination was thrown away
+   * on the very next round, in every mock experiment that used crossover.
+   */
+  const promptFor = (strategy: string) =>
+    [
+      'YOUR RESULT: rank 2, score 50',
+      'Judge said about you: fine',
+      '',
+      `YOUR STRATEGY: ${strategy}`,
+      'YOUR NOTES: none',
+      '',
+      'WHAT WON THIS ROUND:',
+      'TOP STRATEGY: be concise and verify the work',
+      '',
+      'WHY THEY WON: they verified',
+      '',
+      'Next goal (unchanged):',
+      'goal',
+    ].join('\n')
+
+  const reflectWith = (strategy: string) => {
+    const raw = new MockProvider(7).complete({
+      purpose: 'reflect', prompt: promptFor(strategy), modelId: 'mock/model',
+    })
+    return raw
+  }
+
+  test('keeps every line of a multiline strategy', async () => {
+    const strategy = 'first line from parent A\nsecond line from parent B\nthird line'
+    const out = JSON.parse(await reflectWith(strategy)) as { strategy_md: string }
+
+    for (const line of strategy.split('\n')) {
+      expect(out.strategy_md).toContain(line)
+    }
+  })
+
+  test('still returns a single-line strategy unchanged apart from its mutation', async () => {
+    const out = JSON.parse(await reflectWith('be brief')) as { strategy_md: string }
+    expect(out.strategy_md.startsWith('be brief')).toBe(true)
+    expect(out.strategy_md).not.toContain('YOUR NOTES')
+  })
+
+  test('never absorbs the surrounding prompt into the strategy', async () => {
+    const out = JSON.parse(await reflectWith('line one\nline two')) as { strategy_md: string }
+    expect(out.strategy_md).not.toMatch(/WHY THEY WON|TOP STRATEGY|Next goal/)
+  })
+})

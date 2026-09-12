@@ -76,7 +76,16 @@ export class MockProvider implements Provider {
   /** Imitates one keyword found in top strategies but absent from its own. */
   private reflect(prompt: string): string {
     const rng = makeRng((this.seed ^ hashPrompt(prompt)) >>> 0)
-    const own = /YOUR STRATEGY: (.*)/.exec(prompt)?.[1] ?? ''
+    // The whole block between the two markers, not just its first line. Crossover merges
+    // parents by splitting on lines, so a recombined strategy is multi-line by
+    // construction — and a `.` capture stopped at the first newline, so the mock returned
+    // only that line and threw the recombination away on the very next round. `YOUR NOTES:`
+    // is a safe delimiter because escapeMarkers neutralises markers inside agent text.
+    // The single-line form is the fallback, so a differently shaped prompt still works.
+    const own =
+      /YOUR STRATEGY: ([\s\S]*?)\nYOUR NOTES:/.exec(prompt)?.[1] ??
+      /YOUR STRATEGY: (.*)/.exec(prompt)?.[1] ??
+      ''
 
     // Only the `TOP STRATEGY:` lines themselves may donate keywords. Splitting on
     // the marker instead swallowed the entire prompt tail — including the judge's

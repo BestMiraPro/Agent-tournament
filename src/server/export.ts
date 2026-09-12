@@ -1,5 +1,8 @@
 import type { AgentRow, GenomeRow, RunConfig } from '../core/types.js'
 import type { Repos, RoundRow, RunRow } from '../db/repos.js'
+// One shape, one type. The local copy had already drifted: it declared durationMs as
+// non-nullable while the row it is built from is nullable.
+import { submissionView, type SubmissionView } from './submission-view.js'
 
 /** RFC 4180: quote-and-escape when the field has comma/quote/newline/CR, else
  * raw. null/undefined and empty string render as empty (no quotes). */
@@ -9,40 +12,6 @@ export function csvEscape(field: unknown): string {
   if (s === '') return ''
   if (/["\n\r,]/.test(s)) return `"${s.replace(/"/g, '""')}"`
   return s
-}
-
-export interface SubmissionView {
-  status: string
-  errorText: string | null
-  submissionMd: string | null
-  fileManifest: unknown
-  costUsd: number
-  durationMs: number
-  tokens: { in: number; out: number; cacheRead: number; cacheWrite: number }
-}
-
-// Mirrors submissionView in api.ts (the canonical shape used by agent-detail
-// and round-detail). Inlined here to avoid a circular import: the export
-// endpoint in api.ts imports these builders, so export.ts cannot import back
-// from api.ts. Update both if the submission shape changes.
-function submissionView(sub: NonNullable<ReturnType<Repos['submissions']['forAgent']>>): SubmissionView {
-  let fileManifest: unknown = null
-  if (sub.fileManifestJson) {
-    try {
-      fileManifest = JSON.parse(sub.fileManifestJson)
-    } catch {
-      // Half-written row — serve null rather than 500 (mirrors api.ts).
-    }
-  }
-  return {
-    status: sub.status,
-    errorText: sub.errorText,
-    submissionMd: sub.submissionMd,
-    fileManifest,
-    costUsd: sub.costUsd,
-    durationMs: sub.durationMs,
-    tokens: { in: sub.tokensIn, out: sub.tokensOut, cacheRead: sub.tokensCacheRead, cacheWrite: sub.tokensCacheWrite },
-  }
 }
 
 export interface ExportEntry {

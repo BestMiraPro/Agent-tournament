@@ -17,6 +17,7 @@ import { RunManager } from './run-manager.js'
 import { startServer, type ServerHandle } from '../runtime/opencode/server.js'
 import { discoverModels } from '../runtime/opencode/discovery.js'
 import { buildCsvRows, buildJsonDump } from './export.js'
+import { submissionView } from './submission-view.js'
 
 export interface SpecDefaults {
   workspaceRoot?: string | null
@@ -131,32 +132,6 @@ const roundBodySchema = z.object({
   criteriaMd: z.string().nullable().optional(),
 })
 
-/** Shared submission join: the agent-detail `history` and the round-detail
- * `entries` serve the identical submission shape (spec §3) — one parser, one
- * guard, so the two views cannot drift apart. */
-function submissionView(sub: NonNullable<ReturnType<Repos['submissions']['forAgent']>>) {
-  let fileManifest: unknown = null
-  if (sub.fileManifestJson) {
-    try {
-      fileManifest = JSON.parse(sub.fileManifestJson)
-    } catch {
-      // The manifest is always our own JSON; a parse failure means a
-      // half-written row — serve null rather than 500 the caller.
-    }
-  }
-  return {
-    status: sub.status,
-    errorText: sub.errorText,
-    submissionMd: sub.submissionMd,
-    fileManifest,
-    costUsd: sub.costUsd,
-    durationMs: sub.durationMs,
-    tokens: {
-      in: sub.tokensIn, out: sub.tokensOut,
-      cacheRead: sub.tokensCacheRead, cacheWrite: sub.tokensCacheWrite,
-    },
-  }
-}
 /** Spec 3.1: the drawer's single fetch — agent, lineage to the seed, genomes, score+submission history. */
 function agentDetail(repos: Repos, runId: string, agentId: string) {
   const agents = repos.agents.listAll(runId)
