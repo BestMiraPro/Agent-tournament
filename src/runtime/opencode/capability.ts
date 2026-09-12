@@ -1,6 +1,7 @@
 import type { OpenCodeClient } from './client.js'
 import { extractStructured, extractText } from './client.js'
 import { splitModelId } from './model-id.js'
+import { promptOnce } from './one-shot.js'
 
 export type ProbeKind = 'text' | 'structured'
 export type ModelRole = 'worker' | 'judge' | 'reflect'
@@ -94,12 +95,16 @@ export async function validateModel(
 ): Promise<ValidationResult> {
   const kind: ProbeKind = role === 'worker' ? 'text' : 'structured'
   let lastError: unknown = null
+  // Recorded so the reason a probe failed can name the sessions left unconfirmed.
+  const abandonedSessions: string[] = []
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const session = await client.createSession(directory, `validate-${modelId}`)
-      const res = await client.prompt(
-        session.id,
+      // Each failed attempt used to abandon its own live session, so a flaky server left
+      // three per model behind — all still generating against a paid endpoint.
+      const res = await promptOnce(
+        client,
         directory,
+        `validate-${modelId}`,
         {
           model: splitModelId(modelId),
           parts: [
@@ -116,6 +121,7 @@ export async function validateModel(
             : {}),
         },
         timeoutMs,
+        (abandoned) => abandonedSessions.push(abandoned.sessionId),
       )
       const { ok, reason } = classifyProbe(
         { structured: extractStructured(res), text: extractText(res), error: res.info?.error ?? null },
@@ -128,5 +134,10 @@ export async function validateModel(
     }
   }
   const message = lastError instanceof Error ? lastError.message.slice(0, 200) : String(lastError)
-  return { modelId, role, ok: false, reason: `after ${attempts} attempts: ${message}` }
+  // Named, not swallowed: an abort was requested for each, but an acknowledgement is not
+  // proof it stopped, so the reason says what was left behind rather than implying none was.
+  const left = abandonedSessions.length > 0
+    ? ` (${abandonedSessions.length} session(s) asked to stop, not confirmed)`
+    : ''
+  return { modelId, role, ok: false, reason: `after ${attempts} attempts: ${message}${left}` }
 }

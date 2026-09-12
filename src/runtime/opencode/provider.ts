@@ -2,6 +2,7 @@ import type { CompleteRequest, Provider } from '../provider.js'
 import type { OpenCodeClient } from './client.js'
 import { extractStructured, extractText } from './client.js'
 import { splitModelId } from './model-id.js'
+import { promptOnce } from './one-shot.js'
 
 export interface ProviderUsage {
   costUsd: number
@@ -10,6 +11,13 @@ export interface ProviderUsage {
   tokensCacheRead: number
   tokensCacheWrite: number
   calls: number
+  /**
+   * Calls whose session could not be confirmed stopped — a timeout or transport failure
+   * after the prompt was dispatched. An abort was requested, but B15 settled that an
+   * acknowledgement is not proof, so these are counted rather than assumed cleaned up.
+   * Spend attributable to them never reaches `costUsd`, because no response came back.
+   */
+  abandonedSessions: number
 }
 
 export interface OpenCodeProviderOptions {
@@ -29,6 +37,7 @@ export interface OpenCodeProviderOptions {
 export class OpenCodeProvider implements Provider {
   public usage: ProviderUsage = {
     costUsd: 0, tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, calls: 0,
+    abandonedSessions: 0,
   }
 
   constructor(
@@ -38,10 +47,12 @@ export class OpenCodeProvider implements Provider {
   ) {}
 
   async complete(req: CompleteRequest): Promise<string> {
-    const session = await this.client.createSession(this.directory, `${req.purpose}-call`)
-    const res = await this.client.prompt(
-      session.id,
+    // A failed prompt used to leave its session live on the server, still generating and
+    // still spending, and the judge's retry loop made three of them per failed call.
+    const res = await promptOnce(
+      this.client,
       this.directory,
+      `${req.purpose}-call`,
       {
         model: splitModelId(req.modelId),
         parts: [{ type: 'text', text: req.prompt }],
@@ -50,6 +61,7 @@ export class OpenCodeProvider implements Provider {
           : {}),
       },
       this.opts.timeoutMs,
+      () => { this.usage.abandonedSessions++ },
     )
 
     this.record(res)
