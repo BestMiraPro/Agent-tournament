@@ -118,6 +118,10 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     },
   })
 
+  // Retained so shutdown can close the sockets it opened; see shutdown() below.
+  let wss: WebSocketServer | null = null
+  let shuttingDown: Promise<void> | null = null
+
   return {
     app,
     repos,
@@ -126,16 +130,49 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     broadcaster,
     recovered,
     attachWebSocket() {
-      const wss = new WebSocketServer({ server: app.server, path: '/ws' })
+      wss ??= new WebSocketServer({ server: app.server, path: '/ws' })
       broadcaster.attach(wss)
       return wss
     },
-    async shutdown() {
-      for (const record of registry.list()) {
-        await disposeRunRecord(record).catch(() => {})
-      }
-      await manager.disposeAll().catch(() => {})
-      await app.close().catch(() => {})
+    /**
+     * Releases everything this composition root owns, in dependency order, once.
+     *
+     * Two things were missing. An upgraded websocket is not the HTTP server's to close:
+     * `app.close()` resolves while the socket is still open, and Node will not exit
+     * while one is held — so a dashboard process that had ever served a browser hung on
+     * shutdown. And the database handle was never closed at all, keeping a file lock
+     * (and its WAL, on a real path) for the life of the process.
+     *
+     * The DB closes last and in `finally`, because everything above writes through it
+     * and because releasing it must not depend on the rest succeeding.
+     */
+    shutdown() {
+      return (shuttingDown ??= (async () => {
+        try {
+          for (const record of registry.list()) {
+            await disposeRunRecord(record).catch(() => {})
+          }
+          await manager.disposeAll().catch(() => {})
+          if (wss !== null) {
+            const server = wss
+            for (const client of server.clients) client.close()
+            // Bounded: a client that never completes the closing handshake must not
+            // hold shutdown open. The timer is unref'd so the normal path exits at once.
+            await Promise.race([
+              new Promise<void>((resolve) => server.close(() => resolve())),
+              new Promise<void>((resolve) => { setTimeout(resolve, 2000).unref() }),
+            ])
+            for (const client of server.clients) client.terminate()
+          }
+          await app.close().catch(() => {})
+        } finally {
+          try {
+            db.close()
+          } catch {
+            /* already closed, or never opened past construction */
+          }
+        }
+      })())
     },
   }
 }

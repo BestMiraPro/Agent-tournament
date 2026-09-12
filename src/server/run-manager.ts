@@ -13,7 +13,16 @@ export interface StartRoundInput {
 export class RunManager {
   private inFlight = new Map<string, Promise<void>>()
   private errors = new Map<string, string>()
+  /**
+   * Every run this manager has driven, not only the busy ones.
+   *
+   * `inFlight` is cleared the moment a round settles, so disposing from that map alone
+   * skips every run that finished normally — and with Docker those runs still own live
+   * shard containers. What needs releasing is ownership, which outlives busyness.
+   */
+  private owned = new Set<string>()
   private disposing = false
+  private disposal: Promise<void> | null = null
 
   constructor(private engine: TournamentEngine, private emit: EventSink) {}
 
@@ -33,6 +42,7 @@ export class RunManager {
       throw new Error(`a round is already running for run ${runId}`)
     }
     this.errors.delete(runId)
+    this.owned.add(runId)
 
     const task = (async () => {
       try {
@@ -66,11 +76,19 @@ export class RunManager {
     if (task) await task
   }
 
-  async disposeAll(): Promise<void> {
+  /**
+   * Stops accepting work, waits for whatever is running, then releases every owned run.
+   *
+   * Memoised so a second caller joins the first attempt instead of disposing twice —
+   * shutdown paths call this from more than one place.
+   */
+  disposeAll(): Promise<void> {
+    // Set synchronously: a startRound racing this call must be refused, not queued.
     this.disposing = true
-    for (const [runId, task] of this.inFlight) {
-      await task.catch(() => {})
-      await this.engine.dispose(runId).catch(() => {})
-    }
+    return (this.disposal ??= (async () => {
+      for (const task of [...this.inFlight.values()]) await task.catch(() => {})
+      for (const runId of this.owned) await this.engine.dispose(runId).catch(() => {})
+      this.owned.clear()
+    })())
   }
 }

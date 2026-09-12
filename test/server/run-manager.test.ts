@@ -94,4 +94,36 @@ describe('RunManager', () => {
     await disposal
     expect(engine.dispose).toHaveBeenCalledWith('r1')
   })
+
+  test('disposeAll releases runs whose rounds already finished', async () => {
+    // inFlight is cleared the moment a round settles, so iterating only that map means
+    // a run that completed normally never reaches engine.dispose and its sandbox
+    // (with Docker, its containers) outlives the process's shutdown.
+    const engine = {
+      runRound: async () => ({ roundId: 'rd', roundIdx: 1, metaDigest: '', budgetBreach: null }),
+      dispose: vi.fn(async () => {}),
+    }
+    const m = new RunManager(engine as never, () => {})
+    m.startRound('finished', { goalMd: 'g', criteriaMd: null })
+    await m.waitForIdle('finished')
+    expect(m.isBusy('finished')).toBe(false)
+
+    await m.disposeAll()
+    expect(engine.dispose).toHaveBeenCalledWith('finished')
+  })
+
+  test('disposeAll releases each run once however often it ran or is called', async () => {
+    const engine = {
+      runRound: async () => ({ roundId: 'rd', roundIdx: 1, metaDigest: '', budgetBreach: null }),
+      dispose: vi.fn(async () => {}),
+    }
+    const m = new RunManager(engine as never, () => {})
+    for (const _ of [0, 1, 2]) {
+      m.startRound('repeat', { goalMd: 'g', criteriaMd: null })
+      await m.waitForIdle('repeat')
+    }
+    await m.disposeAll()
+    await m.disposeAll()
+    expect(engine.dispose.mock.calls).toEqual([['repeat']])
+  })
 })
