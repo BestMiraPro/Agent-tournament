@@ -3,6 +3,7 @@ import { getRoundDetail, listModels, rejudge, serverError, type RoundDetail as R
 import { effectiveRound, roundOptions } from '../lib/rounds.js'
 import { createSelectionGuard } from '../lib/lifecycle.js'
 import { Markdown } from './Markdown.js'
+import { WORKER_COST_LABEL, WORKER_COST_TITLE, fmtCost } from '../lib/cost.js'
 
 // Manifest entries are FileEntry { path, bytes } rows, but the endpoint serves
 // them as unknown — fall back to String() so a shape change degrades to text.
@@ -11,9 +12,6 @@ function fileName(f: unknown): string {
   return String(f)
 }
 
-function fmtCost(usd: number): string {
-  return `$${usd.toFixed(4)}`
-}
 
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -161,7 +159,9 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
               {detail.criteriaMd ?? 'No criteria recorded.'}{' '}
               <span className={`badge badge--${detail.criteriaSource}`}>{detail.criteriaSource}</span>{' '}
               <span className="badge">{detail.status}</span>{' '}
-              <span className="muted">{fmtCost(detail.costUsd)} · judge: {detail.judgeMode}</span>
+              <span className="muted" title={WORKER_COST_TITLE}>
+                {fmtCost(detail.costUsd)} {WORKER_COST_LABEL} · judge: {detail.judgeMode}
+              </span>
             </p>
             {detail.metaDigest !== null && <Markdown text={detail.metaDigest} />}
           </div>

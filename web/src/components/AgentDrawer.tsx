@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { getAgentDetail, retireAgent, serverError, type AgentDetail } from '../api.js'
 import { lineDiff, type DiffLine } from '../lib/diff.js'
 import { Markdown } from './Markdown.js'
+import { fmtCost } from '../lib/cost.js'
 
 const DIFF_PREFIX: Record<DiffLine['kind'], string> = { same: ' ', add: '+', del: '−' }
 
@@ -15,9 +16,6 @@ function Diff({ a, b }: { a: string; b: string }) {
   )
 }
 
-function fmtCost(usd: number): string {
-  return `$${usd.toFixed(4)}`
-}
 
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`

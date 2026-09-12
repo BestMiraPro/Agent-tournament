@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { getRoundStats, type RoundStats } from '../api.js'
 import { comparableRoundSegments } from '../lib/goals.js'
+import { WORKER_COST_HEADING, WORKER_COST_TITLE } from '../lib/cost.js'
 
 export interface AnalyticsAgent {
   agentId: string
@@ -124,7 +125,8 @@ function RoundTable({ rounds }: { rounds: RoundStats[] }) {
     <table className="leaderboard">
       <thead>
         <tr>
-          <th>Round</th><th>Mean</th><th>Min</th><th>Max</th><th>Cost</th><th>Diversity</th>
+          <th>Round</th><th>Mean</th><th>Min</th><th>Max</th>
+          <th title={WORKER_COST_TITLE}>{WORKER_COST_HEADING}</th><th>Diversity</th>
           {models.map((m) => <th key={m} title={m}>{m}</th>)}
         </tr>
       </thead>

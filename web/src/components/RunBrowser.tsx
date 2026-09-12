@@ -1,5 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
 import { getRuns, type RunListItem } from '../api.js'
+import { WORKER_COST_HEADING, WORKER_COST_TITLE } from '../lib/cost.js'
 
 export function RunBrowser({ onOpen, onCreate, onCompare }: {
   onOpen: (runId: string) => void
@@ -61,7 +62,7 @@ export function RunBrowser({ onOpen, onCreate, onCompare }: {
               <th>Created</th>
               <th>Rounds</th>
               <th>Best</th>
-              <th>Cost</th>
+              <th title={WORKER_COST_TITLE}>{WORKER_COST_HEADING}</th>
             </tr>
           </thead>
           <tbody>

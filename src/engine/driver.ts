@@ -644,6 +644,19 @@ export class TournamentEngine {
           : undefined,
       })
 
+      // WORKER COST ONLY, and everything downstream inherits that scope.
+      //
+      // Submissions carry the agents' own model spend. Judging, reflection, criteria
+      // generation and recombination all go through `Provider.complete`, which returns a
+      // string and no usage envelope, so their cost never reaches the engine —
+      // `OpenCodeProvider` accumulates it internally and nothing reads it. `budget.record`
+      // is likewise called once per agent in the RUN loop and nowhere else, so a USD cap
+      // does not count orchestration either. On a 20-agent round that is one judge call
+      // plus up to 20 reflect calls missing from both the figure and the cap.
+      //
+      // Closing the gap means changing `Provider.complete` to return usage alongside text,
+      // through MockProvider, OpenCodeProvider, Judge and Reflector. Until then the UI
+      // labels this "worker cost" rather than implying a total (web/src/lib/cost.ts).
       repos.rounds.markEnded(round.id, repos.submissions.totalCost(round.id))
       repos.rounds.setStatus(round.id, 'complete')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'complete' })
@@ -658,7 +671,20 @@ export class TournamentEngine {
       // The primary failure remains authoritative: a secondary persistence problem
       // must not replace it, but a failed round should still retain its known spend.
       try {
-        repos.rounds.markEnded(round.id, repos.submissions.totalCost(round.id))
+        // WORKER COST ONLY, and everything downstream inherits that scope.
+      //
+      // Submissions carry the agents' own model spend. Judging, reflection, criteria
+      // generation and recombination all go through `Provider.complete`, which returns a
+      // string and no usage envelope, so their cost never reaches the engine —
+      // `OpenCodeProvider` accumulates it internally and nothing reads it. `budget.record`
+      // is likewise called once per agent in the RUN loop and nowhere else, so a USD cap
+      // does not count orchestration either. On a 20-agent round that is one judge call
+      // plus up to 20 reflect calls missing from both the figure and the cap.
+      //
+      // Closing the gap means changing `Provider.complete` to return usage alongside text,
+      // through MockProvider, OpenCodeProvider, Judge and Reflector. Until then the UI
+      // labels this "worker cost" rather than implying a total (web/src/lib/cost.ts).
+      repos.rounds.markEnded(round.id, repos.submissions.totalCost(round.id))
       } catch {
         // Preserve the original error below.
       }

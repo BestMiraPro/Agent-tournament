@@ -1,6 +1,7 @@
 import type { RoundStats, RunSnapshot } from '../api.js'
 import { latestComparableSegment } from '../lib/goals.js'
 import { formatTrend, sparkGeometry } from '../lib/sparkline.js'
+import { WORKER_COST_LABEL, WORKER_COST_TITLE, fmtCost } from '../lib/cost.js'
 
 const SPARK_W = 68
 const SPARK_H = 16
@@ -76,7 +77,7 @@ export function RunSummary({ snapshot, busy, roundStats }: {
         <em>scope</em>latest comparable segment <small>{comparableRounds.length} rounds</small>
       </span>
       <FitnessSpark rounds={comparableRounds} />
-      <span className="stat"><em>cost</em>${totalCost.toFixed(4)}</span>
+      <span className="stat" title={WORKER_COST_TITLE}><em>{WORKER_COST_LABEL}</em>{fmtCost(totalCost)}</span>
       <span className="stat"><em>agents</em>{snapshot.agents.length}<small> / {rostered}</small></span>
     </section>
   )

@@ -1,14 +1,12 @@
 import { useEffect, useState } from 'react'
 import { getExport, serverError, type RunExport } from '../api.js'
 import { diffConfig } from '../lib/compare.js'
+import { WORKER_COST_HEADING, WORKER_COST_TITLE, fmtCost } from '../lib/cost.js'
 
 function fmtScore(n: number | null): string {
   return n === null ? '—' : n.toFixed(2)
 }
 
-function fmtCost(usd: number): string {
-  return `$${usd.toFixed(4)}`
-}
 
 function fmtWinner(w: { label: string; modelId: string } | null): string {
   return w ? `${w.label} · ${w.modelId}` : '—'
@@ -85,7 +83,7 @@ export function CompareRuns({ a, b, onBack }: { a: string; b: string; onBack: ()
                 <tr><th>Rounds</th><td>{sa.rounds}</td><td>{sb.rounds}</td></tr>
                 <tr><th>Best score</th><td>{fmtScore(sa.best)}</td><td>{fmtScore(sb.best)}</td></tr>
                 <tr><th>Mean score</th><td>{fmtScore(sa.mean)}</td><td>{fmtScore(sb.mean)}</td></tr>
-                <tr><th>Total cost</th><td>{fmtCost(sa.cost)}</td><td>{fmtCost(sb.cost)}</td></tr>
+                <tr><th title={WORKER_COST_TITLE}>{WORKER_COST_HEADING}</th><td>{fmtCost(sa.cost)}</td><td>{fmtCost(sb.cost)}</td></tr>
                 <tr><th>Winner</th><td>{fmtWinner(sa.winner)}</td><td>{fmtWinner(sb.winner)}</td></tr>
               </tbody>
             </table>
