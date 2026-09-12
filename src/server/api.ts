@@ -32,6 +32,12 @@ export interface ApiDeps {
   composeWith?: (spec: RunSpec, opts?: { runIdHolder?: RunIdHolder }) => Promise<ComposedRun>
   /** Process-level fallbacks for spec fields a request may omit; see applySpecDefaults. */
   specDefaults?: SpecDefaults
+  /**
+   * Applies a new config to a run on the DEFAULT engine, rebuilding its judge and
+   * reflector. Supplied by the composition root because only it holds the provider those
+   * two need. Without it a legacy PATCH can only store a config the engine never reads.
+   */
+  reconfigureRun?: (runId: string, config: RunConfig) => void
   registry?: RunRegistry
   emit?: EventSink
   sweepWith?: (config: RunConfig, runId: string, onWarning: (message: string) => void) => Promise<string[]>
@@ -865,6 +871,15 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         selection,
         concurrency: patch.concurrency ?? run.config.concurrency,
         pricing: { ...run.config.pricing, ...patch.pricing },
+      }
+      // Applied to the engine as well as stored. This branch used to only write the row,
+      // so the next round ran the OLD config while the row — and every view reading it —
+      // reported the new one. Engine first, mirroring the record branch: a rejected config
+      // must not leave the row updated anyway.
+      try {
+        deps.reconfigureRun?.(id, next)
+      } catch (e) {
+        return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
       }
       deps.repos.runs.updateConfig(id, next)
     }

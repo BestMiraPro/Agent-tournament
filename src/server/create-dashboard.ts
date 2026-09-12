@@ -113,6 +113,16 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
       authFile: opts.authFile ?? null,
       serverUrl: opts.serverUrl ?? null,
     },
+    // A legacy PATCH used to write the run row and stop there, so the shared engine kept
+    // running the old config while the row reported the new one. Rebuilding the judge and
+    // reflector needs the provider, which lives here rather than in the API.
+    reconfigureRun: (runId, next) => {
+      engine.reconfigure(runId, {
+        config: next,
+        judge: new Judge(provider, next.judge, 42),
+        reflector: new Reflector(provider, next.reflect, next.roster.map((r) => r.modelId)),
+      })
+    },
     emit,
     sweepWith: (cfg, runId, onWarning) => {
       // Every registered docker run owns live containers; excluding only the new run

@@ -51,6 +51,8 @@ export class TournamentEngine {
   /** One tracker per run, keyed by run id — `runRound` may be called many times for
    *  the same run, and run-level spend (unlike round-level) must survive across all of them. */
   private budgets = new Map<string, BudgetTracker>()
+  /** Per-run config/judge/reflector set by `reconfigure`; see `depsFor`. */
+  private overrides = new Map<string, { config: RunConfig; judge: Judge; reflector: Reflector }>()
   /** Per-run abort flags for cooperative abort — set by `abortRound`, read by the
    *  pool `shouldStop` gates and the phase gates below. */
   private aborted = new Set<string>()
@@ -119,8 +121,8 @@ export class TournamentEngine {
 
   /**
    * Reconfigures a run between rounds — the engine-side half of a PATCH. The next
-   * `runRound` reads `this.d.config`/`judge`/`reflector` fresh, so assigning them is
-   * enough; the budget tracker is updated in place, keeping its accumulated spend.
+   * `runRound` resolves this run's config/judge/reflector through `depsFor`, so recording
+   * them is enough; the budget tracker is updated in place, keeping its accumulated spend.
    * Callers must guarantee no round is in flight (the API's busy guard does).
    */
   reconfigure(
@@ -131,15 +133,24 @@ export class TournamentEngine {
     if (!budget) {
       throw new Error(`no budget tracker registered for run ${runId} — call createRun first`)
     }
-    // Updated before the deps are swapped: a rejected config (e.g. a cap the roster
+    // Updated before the deps are stored: a rejected config (e.g. a cap the roster
     // pricing cannot support) must leave the engine on its old, working pieces.
     budget.updateConfig(
       { ...d.config.budget, pricing: d.config.pricing },
       d.config.roster.map((r) => r.modelId),
     )
-    this.d.config = d.config
-    this.d.judge = d.judge
-    this.d.reflector = d.reflector
+    this.overrides.set(runId, d)
+  }
+
+  /**
+   * This run's config, judge and reflector — its own if it has been reconfigured.
+   *
+   * Keyed by run because the dashboard's DEFAULT engine is shared by every legacy run.
+   * Assigning `this.d` instead, as reconfigure used to, changed the config of runs nobody
+   * had touched; the budget tracker was already per-run, so only these three leaked.
+   */
+  private depsFor(runId: string): { config: RunConfig; judge: Judge; reflector: Reflector } {
+    return this.overrides.get(runId) ?? this.d
   }
 
   /**
@@ -160,7 +171,9 @@ export class TournamentEngine {
     runId: string,
     input: { goalMd: string; criteriaMd: string | null },
   ): Promise<RoundResult> {
-    const { repos, config } = this.d
+    const repos = this.d.repos
+    // Per-run, so a reconfigure of another run on a shared engine cannot reach this one.
+    const { config, judge, reflector } = this.depsFor(runId)
     // WHY clear here AND in `finally`: a stale flag (abort arriving with no round
     // in flight) must never kill the next round.
     this.aborted.delete(runId)
@@ -516,12 +529,12 @@ export class TournamentEngine {
       // so the fast path is byte-identical to today.
       const rowNow = repos.rounds.get(round.id)
       const effective = rowNow?.criteriaSource === 'user' ? rowNow.criteriaMd : input.criteriaMd
-      const { criteriaMd, source } = await this.d.judge.resolveCriteria(
+      const { criteriaMd, source } = await judge.resolveCriteria(
         input.goalMd,
         effective,
       )
       repos.rounds.setCriteria(round.id, criteriaMd, source)
-      const judged = await this.d.judge.score(input.goalMd, criteriaMd, judgeInputs, roundIdx)
+      const judged = await judge.score(input.goalMd, criteriaMd, judgeInputs, roundIdx)
       repos.rounds.setDigest(round.id, judged.metaDigest)
       // The judge may fall back from single_call to batched_finals, so record what
       // actually ran rather than what was configured.
@@ -602,7 +615,7 @@ export class TournamentEngine {
         const reflected = await runPool(plan.survivors, config.concurrency, async (agentId) => {
           const g = repos.genomes.forRound(agentId, roundIdx)!
           const s = byAgent.get(agentId)!
-          return [agentId, await this.d.reflector.reflect({
+          return [agentId, await reflector.reflect({
             ownStrategy: g.strategyMd,
             ownNotes: g.notesMd,
             ownRank: s.rank,
@@ -627,7 +640,7 @@ export class TournamentEngine {
       await breed({
         repos, runId, nextRoundIdx: roundIdx + 1, plan, mutated,
         recombine: budgetBreach === null
-          ? (a, b) => this.d.reflector.recombine(a, b, input.goalMd)
+          ? (a, b) => reflector.recombine(a, b, input.goalMd)
           : undefined,
       })
 

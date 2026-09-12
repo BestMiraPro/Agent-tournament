@@ -578,3 +578,39 @@ describe('server-level spec defaults', () => {
     expect(JSON.parse(res.body).error).toMatch(/workspaceRoot/i)
   })
 })
+
+describe('PATCH on a legacy run reaches the engine', () => {
+  /**
+   * The legacy branch wrote the merged config to the run row and stopped there. The
+   * shared default engine never read it, so the next round executed the OLD config while
+   * the row — and the UI reading it — reported the new one. Storing a config that does
+   * not apply is the same reporting-integrity gap B19 closed for criteria.
+   */
+  test('reconfigures the run as well as storing its config', async () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const reconfigured: { runId: string; maxAgentTokens: number }[] = []
+    const run = repos.runs.create({ name: 'legacy', config: DEFAULT_CONFIG, seedDir: null })
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: () => run.id,
+      // Supplied by the composition root, which is the only place that knows how to
+      // rebuild a judge and reflector for a new config.
+      reconfigureRun: (runId, config) => {
+        reconfigured.push({ runId, maxAgentTokens: config.budget.maxAgentTokens })
+      },
+    })
+
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/runs/${run.id}/config`,
+      payload: { budget: { maxAgentTokens: 12_345 } },
+    })
+
+    expect(res.statusCode).toBe(200)
+    // Still stored, as before.
+    expect(repos.runs.get(run.id)!.config.budget.maxAgentTokens).toBe(12_345)
+    // And now actually applied.
+    expect(reconfigured).toEqual([{ runId: run.id, maxAgentTokens: 12_345 }])
+  })
+})

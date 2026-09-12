@@ -361,5 +361,5 @@ export function makeMockEngine(opts: {
   // Exposed (not just wired into the engine) so a test can spy on `reflect` and
   // inspect exactly what each call was given — e.g. to assert self-exclusion from
   // topPerformers, which the engine's public API does not otherwise reveal.
-  return { db, repos, engine, config, sandbox, reflector }
+  return { db, repos, engine, config, sandbox, reflector, judge }
 }

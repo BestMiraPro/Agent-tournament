@@ -900,3 +900,56 @@ describe('runRound on a run the engine does not know', () => {
     }
   })
 })
+
+describe('reconfigure is scoped to one run', () => {
+  /**
+   * The default dashboard engine is SHARED by every legacy run, so a reconfigure that
+   * assigns engine-wide state changes the config of runs nobody touched. The budget
+   * tracker was already per-run; `config`, `judge` and `reflector` were not.
+   */
+  test('reconfiguring one run leaves another run on the same engine alone', async () => {
+    const base = makeMockEngine({ seed: 1, populationSize: 2 })
+    try {
+      const patched = base.engine.createRun('patched', 'goal')
+      const untouched = base.engine.createRun('untouched', 'goal')
+
+      // A quota of zero files is a config value read per round, so its effect is visible
+      // in the submission rows rather than only in a getter.
+      base.engine.reconfigure(patched.id, {
+        config: { ...base.config, maxWorkspaceFiles: 0 },
+        judge: base.judge,
+        reflector: base.reflector,
+      })
+
+      const patchedRound = await base.engine.runRound(patched.id, { goalMd: 'g', criteriaMd: null })
+      const untouchedRound = await base.engine.runRound(untouched.id, { goalMd: 'g', criteriaMd: null })
+
+      const statusesFor = (roundId: string) =>
+        base.repos.submissions.forRound(roundId).map((s) => s.status)
+      expect(statusesFor(patchedRound.roundId).every((s) => s === 'error')).toBe(true)
+      expect(statusesFor(untouchedRound.roundId).some((s) => s === 'error')).toBe(false)
+    } finally {
+      base.db.close()
+    }
+  })
+
+  test('a reconfigured run uses the new config on its next round', async () => {
+    const base = makeMockEngine({ seed: 1, populationSize: 2 })
+    try {
+      const run = base.engine.createRun('r', 'goal')
+      const before = await base.engine.runRound(run.id, { goalMd: 'g', criteriaMd: null })
+      expect(base.repos.submissions.forRound(before.roundId).some((s) => s.status === 'error')).toBe(false)
+
+      base.engine.reconfigure(run.id, {
+        config: { ...base.config, maxWorkspaceFiles: 0 },
+        judge: base.judge,
+        reflector: base.reflector,
+      })
+
+      const after = await base.engine.runRound(run.id, { goalMd: 'g', criteriaMd: null })
+      expect(base.repos.submissions.forRound(after.roundId).every((s) => s.status === 'error')).toBe(true)
+    } finally {
+      base.db.close()
+    }
+  })
+})
