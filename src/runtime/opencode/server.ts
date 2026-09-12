@@ -105,7 +105,7 @@ export class ServerStopError extends Error {
 
 const TIMED_OUT = Symbol('timed out')
 
-/** Resolves the promise's value, or TIMED_OUT. Never rejects, never leaves a timer. */
+/** Resolves the promise's value, or TIMED_OUT; always clears its timer. */
 async function within<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
@@ -118,42 +118,18 @@ async function within<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMED_OU
   }
 }
 
-/** Runs the tree killer and resolves its failure, or null on success. Never rejects. */
-function taskkillTree(pid: number): Promise<Error | null> {
-  return new Promise((resolve) => {
-    // A number we spawned ourselves — never a process name, and execFile runs no shell.
-    execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, (error) =>
-      resolve(error ?? null),
-    )
-  })
-}
-
-/**
- * Terminates the process we spawned and everything it started.
- *
- * On win32 the launch goes through a shell so `opencode` can resolve its `.cmd` shim, and
- * `child.kill()` then kills only that shell: the server keeps running, holding its port,
- * with nothing left pointing at it. `taskkill /T` walks down from our own child's PID, so
- * it reaches the grandchild.
- *
- * Two things this deliberately does NOT do. It does not treat the shell's exit as proof on
- * its own — the helper is awaited (with its own deadline) before the root's exit is taken
- * as confirmation. And it does not fall back to `child.kill('SIGKILL')` on win32, because
- * that kills the shell and leaves the grandchild: reporting success after it would be
- * exactly the bug this function exists to fix. When termination cannot be established it
- * raises `ServerStopError` instead. On POSIX there is no shell layer, so signalling the
- * child IS signalling the server, and SIGTERM→SIGKILL is a real escalation.
- *
- * OWNERSHIP LIMIT: if our own child has already exited, any descendant it left has been
- * reparented and is no longer reachable from this PID — and that PID may by then belong
- * to something else, so it must not be signalled. That case returns without claiming the
- * descendants are gone.
- */
+/** Windows requires tree termination while the owned launcher is still alive. */
 function stopChild(child: ChildProcess): Promise<void> {
   const dead = (): boolean => child.exitCode !== null || child.signalCode !== null
 
   return (async () => {
-    if (dead() || child.pid === undefined) return
+    if (child.pid === undefined) return
+    if (dead()) {
+      if (process.platform === 'win32') {
+        throw new ServerStopError('launcher already exited; its descendants cannot be confirmed stopped')
+      }
+      return
+    }
     const pid = child.pid
 
     let detach = (): void => {}
@@ -178,13 +154,18 @@ function stopChild(child: ChildProcess): Promise<void> {
         throw new ServerStopError(`server process ${pid} did not exit after SIGKILL`)
       }
 
-      // On win32 the ONLY thing that evidences a stopped tree is the helper reporting
-      // success. The shell's own exit says the launcher is gone and nothing about the
-      // server it started, so it is never accepted in the helper's place.
-      const failure = await within(taskkillTree(pid), STOP_GRACE_MS)
+      let helper: ChildProcess | undefined
+      const termination = new Promise<Error | null>((resolve) => {
+        helper = execFile('taskkill', ['/PID', String(pid), '/T', '/F'], {
+          windowsHide: true, timeout: STOP_GRACE_MS, killSignal: 'SIGKILL',
+        }, (error) => resolve(error ?? null))
+      })
+      // Allow the timed-out helper to close; bound even a missing callback.
+      const failure = await within(termination, STOP_GRACE_MS + 1000)
       if (failure === TIMED_OUT) {
+        try { helper?.kill('SIGKILL') } catch { /* uncertainty is reported below */ }
         throw new ServerStopError(
-          `taskkill for ${pid} did not finish within ${STOP_GRACE_MS}ms; the server tree may still be running`,
+          `taskkill for ${pid} did not finish within ${STOP_GRACE_MS + 1000}ms; helper or server tree may still be running`,
         )
       }
       if (failure !== null) {
@@ -196,8 +177,7 @@ function stopChild(child: ChildProcess): Promise<void> {
           { cause: failure },
         )
       }
-      // The helper reported terminating the tree. Our own child's exit is then a
-      // consistency check on what we believed we owned, not the primary evidence.
+      // Confirm the root exited after successful tree termination.
       if (await gone(STOP_GRACE_MS)) return
       throw new ServerStopError(`server process ${pid} survived taskkill /T`)
     } finally {

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { ChildProcess } from 'node:child_process'
+import type { ChildProcess, ExecFileOptions } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -23,6 +23,8 @@ const spawned = vi.hoisted(() => ({ children: [] as ChildProcess[], options: [] 
 const helper = vi.hoisted(() => ({
   mode: 'blocked' as 'blocked' | 'real' | 'ok' | 'fail' | 'hang',
   calls: [] as string[][],
+  options: [] as ExecFileOptions[],
+  kill: vi.fn(() => true),
 }))
 
 // Capture the real child so the tests can assert kill delivery on the handle
@@ -38,10 +40,17 @@ vi.mock('node:child_process', async (importOriginal) => {
       return child
     },
     execFile: (...args: unknown[]) => {
-      const [file, argv, , callback] = args as [string, string[], unknown, (e: Error | null) => void]
+      const [file, argv, options, callback] = args as [string, string[], ExecFileOptions, (e: Error | null) => void]
       helper.calls.push([file, ...argv])
-      if (helper.mode === 'real') return (orig.execFile as (...a: unknown[]) => unknown)(...args)
-      if (helper.mode === 'hang') return {}
+      helper.options.push(options)
+      if (helper.mode === 'real') {
+        if (file !== 'taskkill' || !spawned.children.some((child) =>
+          child.pid !== undefined && String(child.pid) === argv[1] && child.exitCode === null && child.signalCode === null)) {
+          throw new Error('Refusing an unowned process-kill target in a test')
+        }
+        return (orig.execFile as (...a: unknown[]) => unknown)(...args)
+      }
+      if (helper.mode === 'hang') return { kill: helper.kill }
       const error =
         helper.mode === 'ok'
           ? null
@@ -138,10 +147,13 @@ function fakeOwnedChild(pid: number) {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   spawned.children.length = 0
   spawned.options.length = 0
   helper.mode = 'blocked'
   helper.calls.length = 0
+  helper.options.length = 0
+  helper.kill.mockClear()
 })
 
 describe('parseServerPort', () => {
@@ -302,6 +314,7 @@ describe('startServer banner parsing', () => {
  */
 describe.skipIf(process.platform !== 'win32')('startServer termination evidence (win32)', () => {
   test('a hung helper is bounded and is not reported as a stopped tree', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     helper.mode = 'hang'
     const { child, stdout } = fakeOwnedChild(999_999)
     const pending = startServer({ spawnFn: () => child, startupTimeoutMs: 2000 })
@@ -314,9 +327,15 @@ describe.skipIf(process.platform !== 'win32')('startServer termination evidence 
     await new Promise((r) => setImmediate(r))
     expect(await Promise.race([stopped, Promise.resolve('pending')])).toBe('pending')
 
+    await vi.advanceTimersByTimeAsync(10_001)
     const outcome = await stopped
     expect(outcome).toBeInstanceOf(Error)
     expect(String(outcome)).toMatch(/did not finish within/)
+    expect(helper.kill).toHaveBeenCalledWith('SIGKILL')
+    expect(helper.options[0]?.timeout).toBeGreaterThan(0)
+    expect(helper.options[0]?.timeout).toBeLessThanOrEqual(5000)
+    expect(helper.options[0]?.killSignal).toBe('SIGKILL')
+    expect(child.listenerCount('exit')).toBe(0)
   }, 20_000)
 
   test('a failing helper surfaces the failure instead of a shell-only kill', async () => {
@@ -352,11 +371,28 @@ describe.skipIf(process.platform !== 'win32')('startServer termination evidence 
     stdout.write('opencode server listening on http://127.0.0.1:4599\n')
     const handle = await pending
     Object.assign(child, { exitCode: 0 })
-    await expect(handle.stop()).resolves.toBeUndefined()
+    const stopped = handle.stop()
+    await expect(stopped).rejects.toThrow(/launcher already exited.*cannot be confirmed/)
+    expect(handle.stop()).toBe(stopped)
     // That PID may belong to something else by now; signalling it would be reckless.
     expect(helper.calls).toEqual([])
     expect(child.kill).not.toHaveBeenCalled()
   }, 20_000)
+
+  test('startup timeout observes a helper failure and detaches startup listeners', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    helper.mode = 'fail'
+    const { child, stdout } = fakeOwnedChild(999_999)
+    const startup = startServer({ spawnFn: () => child, startupTimeoutMs: 10 })
+      .then(() => undefined, (error: Error) => error)
+    await vi.advanceTimersByTimeAsync(10_001)
+    const error = await startup
+    expect(error?.message).toMatch(/timed out.*cleanup also failed/)
+    expect(error?.cause).toMatchObject({ name: 'ServerStopError' })
+    expect(child.listenerCount('exit')).toBe(0)
+    expect(stdout.listenerCount('end')).toBe(0)
+    expect(child.kill).not.toHaveBeenCalled()
+  })
 })
 
 describe('startServer process ownership', () => {
