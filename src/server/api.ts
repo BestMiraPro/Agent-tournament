@@ -18,12 +18,20 @@ import { startServer, type ServerHandle } from '../runtime/opencode/server.js'
 import { discoverModels } from '../runtime/opencode/discovery.js'
 import { buildCsvRows, buildJsonDump } from './export.js'
 
+export interface SpecDefaults {
+  workspaceRoot?: string | null
+  authFile?: string | null
+  serverUrl?: string | null
+}
+
 export interface ApiDeps {
   repos: Repos
   manager: RunManager
   createRun: (name: string, goal: string) => string
   composeRun?: (spec: RunSpec, opts?: { runIdHolder?: RunIdHolder }) => Promise<ComposedRun>
   composeWith?: (spec: RunSpec, opts?: { runIdHolder?: RunIdHolder }) => Promise<ComposedRun>
+  /** Process-level fallbacks for spec fields a request may omit; see applySpecDefaults. */
+  specDefaults?: SpecDefaults
   registry?: RunRegistry
   emit?: EventSink
   sweepWith?: (config: RunConfig, runId: string, onWarning: (message: string) => void) => Promise<string[]>
@@ -63,6 +71,37 @@ function startDockerShardBridges(opts: {
       active.clear()
     },
   }
+}
+
+/**
+ * Server-level spec defaults, applied BEFORE validation.
+ *
+ * The dashboard takes --workspace-root and --auth-file so they need not be repeated on
+ * every request, but they used to be merged inside composeWith — which runs after the
+ * strict parseRunSpec below. A docker spec omitting them was therefore rejected outright
+ * and those flags were unreachable for the only two sandboxes that require them.
+ *
+ * Merging here rather than in compose keeps one source for the decision, and keeps the
+ * cross-field and absolute-path checks in force over the merged result: a relative
+ * server-side default is still refused rather than smuggled past validation.
+ *
+ * An explicit request value always wins. An explicit `null` counts as "not supplied",
+ * because the schema already defaults an absent field to null and nothing downstream can
+ * tell the two apart.
+ */
+function applySpecDefaults(
+  body: Record<string, unknown>,
+  defaults: SpecDefaults | undefined,
+): Record<string, unknown> {
+  if (!defaults) return body
+  const merged = { ...body }
+  for (const key of ['workspaceRoot', 'authFile', 'serverUrl'] as const) {
+    if (merged[key] === undefined || merged[key] === null) {
+      const fallback = defaults[key]
+      if (fallback !== undefined && fallback !== null) merged[key] = fallback
+    }
+  }
+  return merged
 }
 
 /** Compose/create failures are client or contention problems, never 500s. */
@@ -276,7 +315,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       }
       let spec: RunSpec
       try {
-        spec = parseRunSpec(body)
+        spec = parseRunSpec(applySpecDefaults(body, deps.specDefaults))
       } catch (e) {
         return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) })
       }

@@ -105,6 +105,14 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     createRun: (name, goal) => engine.createRun(name, goal).id,
     registry,
     composeWith,
+    // Applied before the spec is validated, which is the only place they can take
+    // effect: composeWith runs after parseRunSpec, so merging them there left the
+    // flags unreachable for docker and local runs, which require these fields.
+    specDefaults: {
+      workspaceRoot: opts.workspaceRoot ?? null,
+      authFile: opts.authFile ?? null,
+      serverUrl: opts.serverUrl ?? null,
+    },
     emit,
     sweepWith: (cfg, runId, onWarning) => {
       // Every registered docker run owns live containers; excluding only the new run

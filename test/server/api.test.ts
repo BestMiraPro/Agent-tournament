@@ -3,7 +3,7 @@ import { buildApi } from '../../src/server/api.js'
 import { openDb } from '../../src/db/open.js'
 import { makeRepos } from '../../src/db/repos.js'
 import { DEFAULT_CONFIG } from '../../src/core/types.js'
-import { parseRunSpec } from '../../src/server/run-spec.js'
+import { parseRunSpec, type RunSpec } from '../../src/server/run-spec.js'
 import { runConfigFor } from '../../src/server/compose-run.js'
 import { MockProvider } from '../../src/runtime/mock-provider.js'
 import { MockSandbox } from '../../src/runtime/mock-sandbox.js'
@@ -506,5 +506,75 @@ describe('stopping a run while a round is still finishing', () => {
     expect(JSON.parse((await second).body)).toEqual({ stopped: true })
     expect(JSON.parse((await first).body)).toEqual({ stopped: true })
     expect(h.wasCleaned()).toBe(true)
+  })
+})
+
+describe('server-level spec defaults', () => {
+  /**
+   * The dashboard accepts --workspace-root and --auth-file so they need not be repeated
+   * on every request. They were merged inside composeWith, which runs AFTER the strict
+   * parseRunSpec in this route — so a docker spec omitting them was rejected outright and
+   * the flags were unreachable for the only sandboxes that require them.
+   */
+  const withDefaults = (defaults: { workspaceRoot?: string | null; authFile?: string | null }) => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const specs: RunSpec[] = []
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: () => repos.runs.create({ name: 'x', config: DEFAULT_CONFIG, seedDir: null }).id,
+      registry: new RunRegistry(),
+      specDefaults: defaults,
+      composeWith: async (spec: RunSpec) => {
+        specs.push(spec)
+        throw new Error('compose stops here: the spec is what this test is about')
+      },
+    })
+    return { app, specs }
+  }
+
+  const dockerBody = (extra: Record<string, unknown> = {}) => ({
+    name: 'd', goal: 'g', sandbox: 'docker',
+    roster: [{ modelId: 'a/b', count: 2, temperature: 0.7 }],
+    ...extra,
+  })
+
+  test('a docker spec omitting workspaceRoot and authFile inherits the server defaults', async () => {
+    const { app, specs } = withDefaults({ workspaceRoot: '/srv/arena', authFile: '/srv/auth.json' })
+    const res = await app.inject({ method: 'POST', url: '/api/runs', payload: dockerBody() })
+
+    // Reaching compose at all is the point: validation accepted the merged spec. The
+    // response is whatever the stub's failure maps to, so what is asserted is that the
+    // error came from compose and not from the "docker requires workspaceRoot" check.
+    expect(specs).toHaveLength(1)
+    expect(specs[0]!.workspaceRoot).toBe('/srv/arena')
+    expect(specs[0]!.authFile).toBe('/srv/auth.json')
+    expect(JSON.parse(res.body).error).toMatch(/compose stops here/)
+  })
+
+  test('an explicit request value wins over the server default', async () => {
+    const { app, specs } = withDefaults({ workspaceRoot: '/srv/arena', authFile: '/srv/auth.json' })
+    await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: dockerBody({ workspaceRoot: '/from/request', authFile: '/from/request/auth.json' }),
+    })
+    expect(specs[0]!.workspaceRoot).toBe('/from/request')
+    expect(specs[0]!.authFile).toBe('/from/request/auth.json')
+  })
+
+  test('a relative server default is still rejected, not smuggled past validation', async () => {
+    const { app, specs } = withDefaults({ workspaceRoot: 'relative/path', authFile: '/srv/auth.json' })
+    const res = await app.inject({ method: 'POST', url: '/api/runs', payload: dockerBody() })
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body).error).toMatch(/absolute/i)
+    expect(specs).toHaveLength(0)
+  })
+
+  test('with no server default a docker spec is still refused', async () => {
+    const { app } = withDefaults({})
+    const res = await app.inject({ method: 'POST', url: '/api/runs', payload: dockerBody() })
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body).error).toMatch(/workspaceRoot/i)
   })
 })
