@@ -30,16 +30,6 @@ export interface ApiDeps {
   startModelsServer?: () => Promise<ServerHandle>
 }
 
-// WHY module-local 60s success-only cache: each miss spawns a server process,
-// so an uncached setup screen would fork one per keystroke; a minute-stale
-// model list is harmless (free text always works). Failures never cache.
-let modelsCache: { at: number; models: string[] } | null = null
-
-/** Test seam reset: each buildApi otherwise shares the process cache. */
-export function _resetModelsCacheForTests(): void {
-  modelsCache = null
-}
-
 function startDockerShardBridges(opts: {
   composed: ComposedRun
   runId: string
@@ -258,6 +248,20 @@ function roundDetail(repos: Repos, round: RoundRow) {
 export function buildApi(deps: ApiDeps): FastifyInstance {
   const app = Fastify({ logger: false })
 
+  /**
+   * Model discovery, cached 60s on success only.
+   *
+   * Every miss starts an opencode server process, so an uncached setup screen would fork
+   * one per keystroke; a minute-stale list is harmless because free text always works.
+   * Failures never cache, so a transient one stays retryable.
+   *
+   * Scoped to this API instance rather than the module: a second dashboard in the same
+   * process can point at a different opencode configuration, and answering it from the
+   * first one's list would describe a server it never asked about.
+   */
+  let modelsCache: { at: number; models: string[] } | null = null
+  let modelsInFlight: Promise<string[]> | null = null
+
   app.post('/api/runs', async (req, reply) => {
     const rawBody = req.body
     if (typeof rawBody !== 'object' || rawBody === null || Array.isArray(rawBody)) {
@@ -382,22 +386,36 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       return { models: modelsCache.models }
     }
     const start = deps.startModelsServer ?? startServer
-    let handle: ServerHandle
-    try {
-      handle = await start()
-    } catch (e) {
-      return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
+
+    // Concurrent misses share one attempt. The cache is only written AFTER discovery
+    // returns, so without this two requests that miss together both get past the check
+    // above and each start their own opencode server process — the setup screen's two
+    // model pickers mounting at once was enough to do it.
+    if (modelsInFlight === null) {
+      const attempt = (async () => {
+        const handle = await start()
+        try {
+          // Discovery order untouched — the client does presentation.
+          const models = await discoverModels(handle.client)
+          modelsCache = { at: Date.now(), models }
+          return models
+        } finally {
+          // A stop failure must not mask a successful discovery — hence ignore.
+          await handle.stop().catch(() => {})
+        }
+      })()
+      modelsInFlight = attempt
+      // Cleared on settle, so a failure stays retryable rather than becoming sticky.
+      // The error is swallowed HERE only: every caller awaiting `attempt` reports it.
+      void attempt.catch(() => {}).then(() => {
+        if (modelsInFlight === attempt) modelsInFlight = null
+      })
     }
+
     try {
-      // Discovery order untouched — the client does presentation.
-      const models = await discoverModels(handle.client)
-      modelsCache = { at: Date.now(), models }
-      return { models }
+      return { models: await modelsInFlight }
     } catch (e) {
       return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
-    } finally {
-      // A stop failure must not mask a successful discovery — hence ignore.
-      await handle.stop().catch(() => {})
     }
   })
 

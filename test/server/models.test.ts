@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest'
-import { buildApi, _resetModelsCacheForTests } from '../../src/server/api.js'
+import { describe, expect, test, vi } from 'vitest'
+import { buildApi } from '../../src/server/api.js'
 import { openDb } from '../../src/db/open.js'
 import { makeRepos } from '../../src/db/repos.js'
 import { DEFAULT_CONFIG } from '../../src/core/types.js'
@@ -28,10 +28,6 @@ const setup = (startModelsServer: () => Promise<never>) => {
   })
   return { app }
 }
-
-beforeEach(() => {
-  _resetModelsCacheForTests()
-})
 
 describe('GET /api/models', () => {
   test('passes discovery order through untouched', async () => {
@@ -99,6 +95,73 @@ describe('GET /api/models', () => {
     expect((await app.inject({ method: 'GET', url: '/api/models' })).statusCode).toBe(502)
     expect((await app.inject({ method: 'GET', url: '/api/models' })).statusCode).toBe(502)
     expect(start).toHaveBeenCalledTimes(2)
+  })
+
+  test('concurrent cache misses start exactly one server', async () => {
+    // The cache is only written after discovery returns, so two requests that miss
+    // together both used to get past it and each fork their own opencode process.
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const stop = vi.fn(async () => {})
+    const start = vi.fn(async () => {
+      await held
+      return { baseUrl: 'http://127.0.0.1:9', client: cannedClient({ m: {} }, stop), stop } as never
+    })
+    const { app } = setup(start)
+
+    const first = app.inject({ method: 'GET', url: '/api/models' })
+    const second = app.inject({ method: 'GET', url: '/api/models' })
+    await new Promise((r) => setImmediate(r))
+    release()
+
+    const [a, b] = await Promise.all([first, second])
+    expect(a.statusCode).toBe(200)
+    expect(b.statusCode).toBe(200)
+    // Both get the real list, not an empty placeholder.
+    expect(JSON.parse(a.body)).toEqual({ models: ['acme/m'] })
+    expect(JSON.parse(b.body)).toEqual({ models: ['acme/m'] })
+    expect(start).toHaveBeenCalledTimes(1)
+    // One server started means exactly one server stopped.
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  test('a coalesced failure fails both callers and stays retryable', async () => {
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const start = vi.fn(async () => {
+      await held
+      throw new Error('opencode not on PATH')
+    })
+    const { app } = setup(start)
+
+    const first = app.inject({ method: 'GET', url: '/api/models' })
+    const second = app.inject({ method: 'GET', url: '/api/models' })
+    await new Promise((r) => setImmediate(r))
+    release()
+
+    for (const res of await Promise.all([first, second])) {
+      expect(res.statusCode).toBe(502)
+      expect(JSON.parse(res.body).error).toMatch(/not on PATH/)
+    }
+    expect(start).toHaveBeenCalledTimes(1)
+    // Coalescing must not turn a transient failure into a cached one.
+    expect((await app.inject({ method: 'GET', url: '/api/models' })).statusCode).toBe(502)
+    expect(start).toHaveBeenCalledTimes(2)
+  })
+
+  test('separate dashboards in one process do not share a model list', async () => {
+    // A second dashboard can point at a different opencode configuration; serving it
+    // the first one's cached list would answer for a server it never asked.
+    const one = setup(async () => ({
+      baseUrl: 'http://127.0.0.1:9', client: cannedClient({ 'from-first': {} }), stop: async () => {},
+    }) as never)
+    const two = setup(async () => ({
+      baseUrl: 'http://127.0.0.1:9', client: cannedClient({ 'from-second': {} }), stop: async () => {},
+    }) as never)
+    expect(JSON.parse((await one.app.inject({ method: 'GET', url: '/api/models' })).body))
+      .toEqual({ models: ['acme/from-first'] })
+    expect(JSON.parse((await two.app.inject({ method: 'GET', url: '/api/models' })).body))
+      .toEqual({ models: ['acme/from-second'] })
   })
 
   test('stop runs after a successful discovery (finally)', async () => {
