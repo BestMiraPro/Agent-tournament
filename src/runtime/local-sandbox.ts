@@ -25,33 +25,23 @@ export class LocalSandbox implements Sandbox {
     }
   }
 
-  /**
-   * Rejects an agent-supplied path that escapes the workspace textually or crosses a
-   * link on any component. Anchored at the sandbox root so the agent's own workspace
-   * directory is checked too. See `resolveInWorkspace` for the residual race.
-   */
   private safeJoin(h: AgentHandle, relPath: string): Promise<string> {
     return resolveInWorkspace(h.workspacePath, relPath, this.root)
   }
 
   async provision(agentId: string, opts: ProvisionOpts): Promise<AgentHandle> {
     const dir = this.dirFor(agentId)
-    await seedWorkspace(dir, opts.seedDir)
+    await seedWorkspace(dir, opts.seedDir, this.root)
     this.live.add(agentId)
     return { agentId, workspacePath: dir, baseUrl: '' }
   }
 
-  /**
-   * Deliberately does NOT go through `safeJoin`: if the workspace directory has itself
-   * been replaced by a link, refusing here would let one agent fail the round for
-   * everyone. `rm` unlinks a link rather than following it, so removing the link and
-   * recreating a real directory both repairs the workspace and destroys nothing outside
-   * it — a strictly better outcome than a thrown round.
-   */
   async reset(handle: AgentHandle, opts: ProvisionOpts): Promise<void> {
     this.assertLive(handle)
+    // Check ancestors; rm safely unlinks a final workspace junction without following it.
+    await resolveInWorkspace(dirname(handle.workspacePath), '', this.root)
     await rm(handle.workspacePath, { recursive: true, force: true })
-    await seedWorkspace(handle.workspacePath, opts.seedDir)
+    await seedWorkspace(handle.workspacePath, opts.seedDir, this.root)
   }
 
   async writeFile(handle: AgentHandle, relPath: string, content: string): Promise<void> {

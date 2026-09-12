@@ -118,12 +118,6 @@ export class DockerSandbox implements Sandbox {
     }
   }
 
-  /**
-   * The container sees `/work/<id>`; every host read and write goes through the bind
-   * mount instead, so a link an agent creates inside the container is followed by the
-   * HOST at capture time. Anchored at the shard root, because co-tenants share the mount
-   * and can replace a sibling's workspace directory with a link.
-   */
   private safeJoin(agentId: string, relPath: string): Promise<string> {
     return resolveInWorkspace(this.hostDirFor(agentId), relPath, this.opts.root)
   }
@@ -167,7 +161,7 @@ export class DockerSandbox implements Sandbox {
   async provision(agentId: string, opts: ProvisionOpts): Promise<AgentHandle> {
     if (this.disposed) throw new Error('docker sandbox has been disposed')
     const shardIndex = this.shardFor(agentId)
-    await seedWorkspace(this.hostDirFor(agentId), opts.seedDir)
+    await seedWorkspace(this.hostDirFor(agentId), opts.seedDir, this.opts.root)
     if (this.disposed) throw new Error('docker sandbox has been disposed')
     const container = await this.startShard(shardIndex)
     if (this.disposed) throw new Error('docker sandbox has been disposed')
@@ -181,16 +175,13 @@ export class DockerSandbox implements Sandbox {
     }
   }
 
-  /**
-   * Not via `safeJoin`: a co-tenant that replaced this workspace directory with a link
-   * must not be able to fail the round by doing so. `rm` unlinks a link instead of
-   * following it, so this repairs the workspace without touching the link's target.
-   */
   async reset(handle: AgentHandle, opts: ProvisionOpts): Promise<void> {
     this.assertLive(handle)
     const dir = this.hostDirFor(handle.agentId)
+    // Check ancestors; rm safely unlinks a final workspace junction without following it.
+    await resolveInWorkspace(dirname(dir), '', this.opts.root)
     await rm(dir, { recursive: true, force: true })
-    await seedWorkspace(dir, opts.seedDir)
+    await seedWorkspace(dir, opts.seedDir, this.opts.root)
   }
 
   async writeFile(handle: AgentHandle, relPath: string, content: string): Promise<void> {

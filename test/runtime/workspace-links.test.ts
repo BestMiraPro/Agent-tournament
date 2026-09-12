@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { afterAll, describe, expect, test } from 'vitest'
 import { captureSubmission, verifyCapture } from '../../src/engine/capture.js'
 import { DockerSandbox } from '../../src/runtime/docker/sandbox.js'
@@ -40,21 +40,18 @@ const fileLinksAvailable = (() => {
   const probe = join(root, 'probe-link')
   try {
     symlinkSync(outsideFile, probe, 'file')
-    rmSync(probe, { force: true })
-    return true
-  } catch {
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(code ?? '')) throw error
+    console.info(`file symlinks unavailable on ${process.platform}: ${code}; directory-junction tests still run`)
     return false
   }
+  rmSync(probe, { force: true })
+  return true
 })()
 
-if (!fileLinksAvailable) {
-  // Printed so a run's skip count is attributable rather than mysterious.
-  console.info(`file symlinks unavailable on ${process.platform}; directory-junction tests still run`)
-}
-
 afterAll(async () => {
-  // Only ever inside the directory this file created.
-  if (root.startsWith(tmpdir())) await rm(root, { recursive: true, force: true })
+  if (resolve(root).startsWith(resolve(tmpdir()) + sep)) await rm(root, { recursive: true, force: true })
 })
 
 /** Directory links: 'junction' on win32 is the unprivileged equivalent of a dir symlink. */
@@ -82,7 +79,7 @@ async function dockerFixture(dir: string, agentId: string) {
     },
     stopContainer: async () => {},
   })
-  sandbox.planFor([agentId])
+  await sandbox.planFor([agentId])
   const handle = await sandbox.provision(agentId, {})
   expect(started).toEqual(['shard-0'])
   // provision() returns the CONTAINER path; the host path is where the links go.
@@ -173,6 +170,7 @@ describe.each(sandboxes)('%s workspace containment', (_name, build) => {
     const dir = await mkdtemp(join(root, 'swapped-'))
     const { sandbox, handle, hostDir } = await build(dir, 'a1')
     // What a co-tenant sharing the bind mount can do to a sibling's workspace.
+    expect(resolve(hostDir).startsWith(resolve(dir) + sep)).toBe(true)
     await rm(hostDir, { recursive: true, force: true })
     await linkDir(outsideDir, hostDir)
     await expect(sandbox.readFile(handle, OUTSIDE_NAME)).rejects.toBeInstanceOf(WorkspaceEscapeError)
@@ -241,4 +239,104 @@ describe.each(sandboxes)('%s workspace containment', (_name, build) => {
     const broken: Sandbox = { ...sandbox, readFile: () => Promise.reject(io) }
     await expect(verifyCapture(broken, handle, capture, { executionStopped: true })).rejects.toBe(io)
   })
+
+  test('capture rejects a directory junction at SUBMISSION.md', async () => {
+    const dir = await mkdtemp(join(root, 'capture-junction-'))
+    const { sandbox, handle, hostDir } = await build(dir, 'a1')
+    await linkDir(outsideDir, join(hostDir, 'SUBMISSION.md'))
+    await expect(captureSubmission(sandbox, handle)).rejects.toBeInstanceOf(WorkspaceEscapeError)
+  })
+
+  test('verification detects a captured file replaced by a directory junction', async () => {
+    const dir = await mkdtemp(join(root, 'verify-junction-'))
+    const { sandbox, handle, hostDir } = await build(dir, 'a1')
+    await sandbox.writeFile(handle, 'SUBMISSION.md', 'answer')
+    const capture = await captureSubmission(sandbox, handle, { executionStopped: true })
+    await rm(join(hostDir, 'SUBMISSION.md'))
+    await linkDir(outsideDir, join(hostDir, 'SUBMISSION.md'))
+    expect(await verifyCapture(sandbox, handle, capture, { executionStopped: true })).toMatchObject({
+      tampered: true, verified: true, detail: 'submission was modified after it was captured',
+    })
+  })
+
+  test('provision rejects a preplanted workspace junction before PREPARE can reset it', async () => {
+    const dir = await mkdtemp(join(root, 'seed-root-'))
+    const { sandbox, hostDir } = await build(dir, 'a1')
+    const seed = join(dir, 'seed')
+    const sibling = await mkdtemp(join(root, 'seed-target-'))
+    await mkdir(seed)
+    await writeFile(join(seed, 'seed.txt'), 'operator seed')
+    expect(resolve(hostDir).startsWith(resolve(dir) + sep)).toBe(true)
+    await rm(hostDir, { recursive: true })
+    await linkDir(sibling, hostDir)
+    await expect(sandbox.provision('a1', { seedDir: seed }).then((handle) =>
+      sandbox.reset(handle, { seedDir: seed }),
+    )).rejects.toBeInstanceOf(WorkspaceEscapeError)
+    await expect(readFile(join(sibling, 'seed.txt'))).rejects.toHaveProperty('code', 'ENOENT')
+  })
+
+  test('seed rejects a nested destination junction before overwriting its target', async () => {
+    const dir = await mkdtemp(join(root, 'seed-child-'))
+    const { sandbox, hostDir } = await build(dir, 'a1')
+    const seed = join(dir, 'seed')
+    const sibling = await mkdtemp(join(root, 'seed-child-target-'))
+    await mkdir(join(seed, 'evidence'), { recursive: true })
+    await writeFile(join(seed, 'evidence', 'data.txt'), 'operator seed')
+    await writeFile(join(sibling, 'data.txt'), OUTSIDE_TEXT)
+    await linkDir(sibling, join(hostDir, 'evidence'))
+    await expect(sandbox.provision('a1', { seedDir: seed })).rejects.toBeInstanceOf(WorkspaceEscapeError)
+    expect(await readFile(join(sibling, 'data.txt'), 'utf8')).toBe(OUTSIDE_TEXT)
+  })
+
+  test('a trusted configured-root alias permits an existing workspace', async () => {
+    const dir = await mkdtemp(join(root, 'trusted-alias-'))
+    const actualRoot = join(dir, 'actual')
+    const alias = join(dir, 'alias')
+    const actual = await build(actualRoot, 'a1')
+    await actual.sandbox.writeFile(actual.handle, 'answer.txt', 'answer')
+    await linkDir(actualRoot, alias)
+    const { sandbox, handle } = await build(alias, 'a1')
+    expect(await sandbox.readFile(handle, 'answer.txt')).toBe('answer')
+  })
+
+  test('trusted operator seed links are copied as normal nested files', async () => {
+    const dir = await mkdtemp(join(root, 'seed-source-'))
+    const { sandbox, handle } = await build(dir, 'a1')
+    const seed = join(dir, 'seed')
+    await mkdir(seed)
+    await linkDir(outsideDir, join(seed, 'operator-link'))
+    await sandbox.provision('a1', { seedDir: seed })
+    expect(await sandbox.readFile(handle, `operator-link/${OUTSIDE_NAME}`)).toBe(OUTSIDE_TEXT)
+    await sandbox.reset(handle, { seedDir: seed })
+    await sandbox.writeFile(handle, 'nested/answer.txt', 'answer')
+    expect(await sandbox.readFile(handle, 'nested/answer.txt')).toBe('answer')
+    expect(await sandbox.readFile(handle, `operator-link/${OUTSIDE_NAME}`)).toBe(OUTSIDE_TEXT)
+  })
+
+  test('reset repairs a leaf workspace junction without deleting the target', async () => {
+    const dir = await mkdtemp(join(root, 'reset-leaf-'))
+    const { sandbox, handle, hostDir } = await build(dir, 'a1')
+    expect(resolve(hostDir).startsWith(resolve(dir) + sep)).toBe(true)
+    await rm(hostDir, { recursive: true })
+    await linkDir(outsideDir, hostDir)
+    await sandbox.reset(handle, {})
+    expect(await readFile(outsideFile, 'utf8')).toBe(OUTSIDE_TEXT)
+    await sandbox.writeFile(handle, 'mine.txt', 'mine')
+    expect(await sandbox.readFile(handle, 'mine.txt')).toBe('mine')
+  })
+})
+
+test('Docker rejects a linked shard ancestor before reset deletes or provision copies', async () => {
+  const dir = await mkdtemp(join(root, 'shard-ancestor-'))
+  const { sandbox, handle, hostDir } = await dockerFixture(dir, 'a1')
+  const sibling = await mkdtemp(join(root, 'shard-target-'))
+  await mkdir(join(sibling, 'a1'))
+  await writeFile(join(sibling, 'a1', OUTSIDE_NAME), OUTSIDE_TEXT)
+  const shard = dirname(hostDir)
+  expect(resolve(shard).startsWith(resolve(dir) + sep)).toBe(true)
+  await rm(shard, { recursive: true })
+  await linkDir(sibling, shard)
+  await expect(sandbox.reset(handle, {})).rejects.toBeInstanceOf(WorkspaceEscapeError)
+  expect(await readFile(join(sibling, 'a1', OUTSIDE_NAME), 'utf8')).toBe(OUTSIDE_TEXT)
+  await expect(sandbox.provision('a1', { seedDir: outsideDir })).rejects.toBeInstanceOf(WorkspaceEscapeError)
 })

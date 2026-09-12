@@ -11,11 +11,12 @@ Main handoff: [2026-09-06-code-review-and-implementation-handoff.md](2026-09-06-
 - Detailed local ledger and task artifacts: `.superpowers/sdd/review-fixes/` (gitignored; do not commit).
 - Do not rerun the whole review. Read this progress file, then the active task brief/report and `git status`.
 - Full baseline previously: 809 passed, 3 gated skips. Run focused tests during work; all three AGENTS gates are required at integration before claiming completion.
-- The third expected skip is `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`), alongside local and Docker real-mode suites. AGENTS.md still quotes the older 767/2 baseline; refresh its counts/skip list at final integration, preserving all three gates.
+- The third gated suite is `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`), alongside local and Docker real-mode suites. Preserve all three build/test/typecheck gates.
 - No paid provider runs, dependency upgrades, or broad visual redesign have been performed.
 - Latest verified checkpoint: `e10cd91` (B16), after `8836535` (Task 10 review fixes) and `e0a49cd` (B17/B18). Full gates at `e10cd91`: 922 passed / 11 skipped; typecheck/build/diffcheck exit 0.
-- Active: nothing. All confirmed bugs B01-B20 are complete. Remaining work is the I01-I14 / U01-U08 investigations and optional improvements, which need scope confirmation first, plus the unexecuted validation listed below.
-- Expected skips are now 11, not 3: the three gated real-mode/e2e suites plus eight file-symlink tests that need SeCreateSymbolicLink (this account gets EPERM; junction coverage runs). AGENTS.md still quotes 767/2 and must be refreshed to 922/11 with this skip list.
+- 2026-09-11 resume: inherited clean HEAD `6955108`; recorded gates above are historical. Task10 R2 reopened because a Promise deadline does not terminate the unbounded taskkill helper, and an already-exited launcher still returns success. fix_server_review owns the remaining correction. review_workspace_links is reviewing the changed B16 policy at `e10cd91`, especially unchecked provision/reset paths. Do not repeat already completed tickets or treat stale local reports as the current implementation.
+- Expected skips at the inherited checkpoint are 11: three gated real-mode/e2e suites plus eight file-symlink tests (Windows EPERM; junction coverage runs). AGENTS.md was refreshed by `6955108`.
+- 2026-09-12 follow-up: both reopened items corrected in the working tree. Server R2 uses the native `execFile` timeout + a backstop kill and rejects an already-exited Windows launcher; scoped follow-up review passes without findings. B16 seed checks every copy destination and the workspace itself, reset checks ancestors before `rm`; the five new junction regressions were shown to fail on the pre-fix sources and pass with the fix. Full gates: 938 passed / 11 skipped; typecheck/build exit 0. Ready to commit.
 
 ## Ticket status
 
@@ -29,8 +30,8 @@ Main handoff: [2026-09-06-code-review-and-implementation-handoff.md](2026-09-06-
 | B09–B11 | Complete | Commit `bbe2a0e`; 46 focused tests, three review fix rounds, full 853-test gate. Real-browser lifecycle acceptance still pending. |
 | B12–B14 | Complete | Commit `34d705d`; scoped re-review approved; final870-test gate passes. Both test review findings corrected; real-mode acceptance pending. |
 | B15 | Complete | Commit `bc0718c`; fix round 1 landed the once-per-round admission check. 118 focused tests; both cross-round regressions shown to fail without the guard; full 884-test gate passed. |
-| B16 | Complete | Commit `e10cd91`; shared `resolveInWorkspace` anchored at the sandbox root. Live junction reproduction: removing the walk returns the sibling fixture's contents. 17 focused pass / 8 EPERM skips; full 922-test gate. |
-| B17–B18 | Complete | Commits `e0a49cd` + `8836535` (all three review findings). 31 focused tests; each fix shown to fail when reverted; full 922-test gate. Windows only — POSIX termination unvalidated. |
+| B16 | Complete | Seed-destination and ancestor-reset checks added; five new junction regressions proven sensitive by revert; full 938-test gate (11 skips). |
+| B17–B18 | Complete | R2 follow-up: bounded helper lifetime with backstop kill, already-exited launcher rejects on win32; scoped follow-up review passes; full 938-test gate. POSIX termination unvalidated. |
 | B19 | Complete | Commit `2898bca`;95 focused tests, scoped review/full859-test gate passed. Server rejects overrides from judging onward. |
 | B20 | Complete | Commit `bec120b`;31 focused tests including rendered summary; scoped review and full857-test gate pass. Browser layout check pending. |
 | I01–I14, U01–U08 | Not started | Investigations/optional improvements; confirm scope and trigger first. |
