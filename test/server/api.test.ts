@@ -12,6 +12,7 @@ import { TournamentEngine } from '../../src/engine/driver.js'
 import { Judge } from '../../src/judge/judge.js'
 import { Reflector } from '../../src/evolution/reflect.js'
 import { RunRegistry } from '../../src/server/runs.js'
+import { RunManager } from '../../src/server/run-manager.js'
 
 const setup = () => {
   const db = openDb(':memory:')
@@ -426,5 +427,84 @@ describe('starting a round on a run this process did not compose', () => {
     const res = await app.inject({ method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'g' } })
     expect(res.statusCode).toBe(202)
     expect(started).toEqual([runId])
+  })
+})
+
+describe('stopping a run while a round is still finishing', () => {
+  /**
+   * Stop is graceful by design: it waits for the in-flight round against a still-alive
+   * sandbox rather than aborting it. That wait is a window, and during it the run row
+   * still said "not stopped" and the registry record was still present, so the whole
+   * refusal rested on an in-memory flag inside the manager.
+   */
+  const stoppableRun = () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const run = repos.runs.create({ name: 'graceful', config: DEFAULT_CONFIG, seedDir: null })
+
+    let finishRound = (): void => {}
+    const roundFinished = new Promise<void>((resolve) => { finishRound = resolve })
+    let roundCompleted = false
+    let cleanedUp = false
+    const registry = new RunRegistry()
+    const engine = {
+      runRound: async () => {
+        await roundFinished
+        roundCompleted = true
+        return { roundId: 'r', roundIdx: 1, metaDigest: '', budgetBreach: null }
+      },
+      dispose: async () => {},
+    }
+    const manager = new RunManager(engine as never, () => {})
+    registry.set({
+      runId: run.id, spec: {} as never, engine: engine as never, manager,
+      composed: { cleanup: async () => { cleanedUp = true } } as never,
+      bridges: [], warnings: [], capacity: null,
+    })
+
+    const app = buildApi({
+      repos, registry,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: () => run.id,
+    })
+    return { app, repos, runId: run.id, manager, finishRound, isDone: () => roundCompleted, wasCleaned: () => cleanedUp }
+  }
+
+  test('refuses a new round mid-teardown, and the in-flight round still finishes', async () => {
+    const h = stoppableRun()
+    h.manager.startRound(h.runId, { goalMd: 'g', criteriaMd: null })
+
+    const stopping = h.app.inject({ method: 'DELETE', url: `/api/runs/${h.runId}` })
+    await new Promise((r) => setImmediate(r))
+
+    // The stop is recorded before the wait, so the refusal is DB-backed rather than
+    // resting on an in-memory flag that a restart would lose.
+    expect(h.repos.runs.get(h.runId)!.status).toBe('stopped')
+    const refused = await h.app.inject({
+      method: 'POST', url: `/api/runs/${h.runId}/rounds`, payload: { goalMd: 'again' },
+    })
+    expect(refused.statusCode).toBe(409)
+    expect(JSON.parse(refused.body).error).toMatch(/stopped/i)
+    expect(h.isDone()).toBe(false)
+
+    h.finishRound()
+    expect(JSON.parse((await stopping).body)).toEqual({ stopped: true })
+    // Graceful, not an abort: the round ran to completion and cleanup followed it.
+    expect(h.isDone()).toBe(true)
+    expect(h.wasCleaned()).toBe(true)
+  })
+
+  test('a second stop during teardown is answered without tearing down twice', async () => {
+    const h = stoppableRun()
+    h.manager.startRound(h.runId, { goalMd: 'g', criteriaMd: null })
+    const first = h.app.inject({ method: 'DELETE', url: `/api/runs/${h.runId}` })
+    await new Promise((r) => setImmediate(r))
+    // Issued before releasing the round, and awaited after, so neither ordering can
+    // deadlock the test if the second stop turns out to wait on teardown too.
+    const second = h.app.inject({ method: 'DELETE', url: `/api/runs/${h.runId}` })
+    h.finishRound()
+    expect(JSON.parse((await second).body)).toEqual({ stopped: true })
+    expect(JSON.parse((await first).body)).toEqual({ stopped: true })
+    expect(h.wasCleaned()).toBe(true)
   })
 })

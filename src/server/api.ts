@@ -844,11 +844,24 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       // so disposing it would kill every legacy run — only per-run records stop.
       return reply.code(409).send({ error: 'run is not stoppable (created outside the dashboard)' })
     }
+    // Recorded BEFORE the graceful wait, not after it.
+    //
+    // Stop waits for the in-flight round against a still-alive sandbox rather than
+    // aborting it, and that wait used to leave the run row saying "active" with its
+    // registry record still present — so refusing a round that arrived meanwhile rested
+    // entirely on an in-memory flag inside the manager, and a crash mid-teardown left a
+    // run that looked perfectly runnable. Writing the stop first makes every route that
+    // already checks `status === 'stopped'` refuse for the right reason, and it survives
+    // a restart.
+    //
+    // This does not turn Stop into Abort: the round still runs to completion and its
+    // results are recorded. A run that is stopped while still busy IS the stopping state
+    // — no new rounds, one finishing — and it needs no new status value to say so.
+    deps.repos.runs.setStatus(id, 'stopped')
+    registry?.delete(id)
     // Mirrors disposeRunRecord's never-throw contract: a stop must not 500.
     try {
       await disposeRunRecord(record)
-      deps.repos.runs.setStatus(id, 'stopped')
-      registry?.delete(id)
     } catch {
       /* the run is torn down either way */
     }
