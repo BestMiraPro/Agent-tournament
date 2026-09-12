@@ -345,6 +345,135 @@ describe('Judge.score — batched mode preserves rationales and finals digest', 
   })
 })
 
+describe('Judge.score — batched mode never rewards unjudged submissions', () => {
+  /**
+   * Parses the refs out of a prompt so a stub can answer a real batch, then lets the
+   * test corrupt that answer the way a model does: dropping a ref, repeating one,
+   * inventing one, or numbering ranks from something other than 1.
+   */
+  const refsIn = (prompt: string): { ref: string; agentId: string }[] => {
+    const re = /<submission ref="([^"]+)">([\s\S]*?)<\/submission>/g
+    return [...prompt.matchAll(re)].map((m) => ({
+      ref: m[1]!,
+      agentId: /AGENT=(\S+)/.exec(m[2] ?? '')?.[1] ?? 'unknown',
+    }))
+  }
+
+  const rank = (ref: string, i: number) => ({
+    ref, rank: i + 1, score: 100 - i, rationale: `rationale-for-${ref}`,
+  })
+
+  const corruptingJudge = (
+    corrupt: (entries: { ref: string; agentId: string }[], call: number) =>
+      { ref: string; rank: number; score: number; rationale: string }[],
+  ): Provider => {
+    let call = 0
+    return {
+      async complete(req) {
+        call++
+        return JSON.stringify({ rankings: corrupt(refsIn(req.prompt), call), meta_digest: 'd' })
+      },
+    }
+  }
+
+  const population = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      agentId: `agent-${i}`,
+      submissionMd: `work product FITNESS=${i} AGENT=agent-${i}`,
+      files: [],
+      status: 'ok' as const,
+    }))
+
+  test('an omitted submission scores 0, the way the single-call path already treats it', async () => {
+    // The first batch answers for everyone but its last ref. That agent was never
+    // judged, so a positive score derived purely from where it landed in the ordering
+    // is a score the judge never gave — and it is enough to keep the agent in the
+    // middle band that gets bred instead of culled.
+    let omitted: string | null = null
+    const provider = corruptingJudge((entries, call) => {
+      if (call !== 1) return entries.map((e, i) => rank(e.ref, i))
+      omitted = entries[entries.length - 1]!.agentId
+      return entries.slice(0, -1).map((e, i) => rank(e.ref, i))
+    })
+    const res = await new Judge(provider, cfg, 42).score('goal', 'criteria', population(30))
+
+    expect(res.mode).toBe('batched_finals')
+    expect(omitted).not.toBeNull()
+    const unjudged = res.scores.find((s) => s.agentId === omitted)!
+    expect(unjudged.score).toBe(0)
+    expect(unjudged.rationaleMd).toMatch(/no ranking/i)
+    // Last place, and the only zero: nobody else loses their judged score.
+    expect(unjudged.rank).toBe(30)
+    expect(res.scores.filter((s) => s.score === 0)).toHaveLength(1)
+  })
+
+  test('complete rankings are scored exactly as before', async () => {
+    // The guard must not touch valid output: every agent ranked, no zeros, and the
+    // same rank-derived scale batched mode has always used.
+    const provider = corruptingJudge((entries) => entries.map((e, i) => rank(e.ref, i)))
+    const res = await new Judge(provider, cfg, 42).score('goal', 'criteria', population(30))
+
+    expect(res.scores).toHaveLength(30)
+    expect(res.scores.some((s) => s.score === 0)).toBe(false)
+    expect(res.scores.map((s) => s.rank)).toEqual(Array.from({ length: 30 }, (_, i) => i + 1))
+    expect(res.scores[0]!.score).toBe(100)
+    for (const s of res.scores) expect(s.rationaleMd).not.toMatch(/no ranking/i)
+  })
+
+  test('a duplicated ref keeps its first placing rather than its last', async () => {
+    // A second entry for the same ref used to overwrite the first, so a model that
+    // repeated itself silently replaced a real placing with whatever came later.
+    let repeated: string | null = null
+    const provider = corruptingJudge((entries, call) => {
+      const ranked = entries.map((e, i) => rank(e.ref, i))
+      if (call !== 1) return ranked
+      // Deliberately NOT the batch winner: a finalist's rationale comes from the finals
+      // call, which would hide an overwrite in the batch placings.
+      const last = entries[entries.length - 1]!
+      repeated = last.agentId
+      return [...ranked, { ref: last.ref, rank: 99, score: 0, rationale: 'second-entry-wins' }]
+    })
+    const res = await new Judge(provider, cfg, 42).score('goal', 'criteria', population(30))
+
+    expect(res.scores).toHaveLength(30)
+    expect(new Set(res.scores.map((s) => s.agentId)).size).toBe(30)
+    const first = res.scores.find((s) => s.agentId === repeated)!
+    expect(first.rationaleMd).not.toBe('second-entry-wins')
+    expect(res.scores.some((s) => s.score === 0)).toBe(false)
+  })
+
+  test('a ref the judge was never shown cannot invent an agent', async () => {
+    const provider = corruptingJudge((entries, call) => {
+      const ranked = entries.map((e, i) => rank(e.ref, i))
+      return call === 1
+        ? [...ranked, { ref: 'never-shown', rank: 1, score: 100, rationale: 'ghost' }]
+        : ranked
+    })
+    const res = await new Judge(provider, cfg, 42).score('goal', 'criteria', population(30))
+
+    expect(res.scores).toHaveLength(30)
+    expect(res.scores.every((s) => s.agentId.startsWith('agent-'))).toBe(true)
+  })
+
+  test('a batch whose ranks do not start at 1 still sends its best to the finals', async () => {
+    // Looking for the exact value 1 found no winner when a model numbered from 2, so
+    // the batch contributed nobody to the finals and every one of its agents was
+    // ordered behind every finalist regardless of how good it was.
+    let calls = 0
+    const provider = corruptingJudge((entries) => {
+      calls++
+      return entries.map((e, i) => ({ ...rank(e.ref, i), rank: i + 2 }))
+    })
+    const res = await new Judge(provider, cfg, 42).score('goal', 'criteria', population(30))
+
+    expect(res.scores).toHaveLength(30)
+    expect(res.scores.some((s) => s.score === 0)).toBe(false)
+    // 30 agents at batchSize 5 is 6 batches; the 7th call is the finals among their
+    // winners. Six calls would mean no batch produced one.
+    expect(calls).toBe(7)
+  })
+})
+
 describe('Judge schema usage', () => {
   test('passes the ranking schema to the provider', async () => {
     let seenSchema: unknown = null

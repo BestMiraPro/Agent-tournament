@@ -58,6 +58,12 @@ export const FALLBACK_CRITERIA_MD = [
   '- **goal adherence** (weight 0.2): The work stays faithful and directly responsive to the stated goal, without drifting into unrelated scope.',
 ].join('\n')
 
+/**
+ * Shared by both scoring paths, so "the judge never ranked this" reads identically
+ * whether the population fit in one call or was split across batches.
+ */
+const NO_RANKING_MD = 'The judge returned no ranking for this submission.'
+
 export class Judge {
   constructor(
     private provider: Provider,
@@ -233,13 +239,13 @@ export class Judge {
         buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
       )
       batchDigest ||= parsed.meta_digest
-      for (const r of parsed.rankings) {
-        const agentId = byRef.get(r.ref)
-        if (agentId) placings.set(agentId, { rank: r.rank, rationale: r.rationale })
-      }
-      const top = parsed.rankings.find((r) => r.rank === 1)
-      const winnerId = top ? byRef.get(top.ref) : undefined
-      const winner = batch.find((b) => b.agentId === winnerId)
+      const placed = this.resolveRankings(parsed.rankings, byRef)
+      for (const [agentId, entry] of placed) placings.set(agentId, entry)
+      // The BEST-ranked entry, not the one numbered 1. A model that numbers from 2
+      // otherwise contributed no winner at all, and every agent in the batch was
+      // ordered behind every finalist however good its submission was.
+      const best = [...placed.entries()].sort((a, b) => a[1].rank - b[1].rank)[0]
+      const winner = best && batch.find((b) => b.agentId === best[0])
       if (winner) winners.push(winner)
     }
 
@@ -254,9 +260,8 @@ export class Judge {
         buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
       )
       finalsDigest = parsed.meta_digest
-      for (const r of parsed.rankings) {
-        const agentId = byRef.get(r.ref)
-        if (agentId) finalsOrder.set(agentId, { rank: r.rank, rationale: r.rationale })
+      for (const [agentId, entry] of this.resolveRankings(parsed.rankings, byRef)) {
+        finalsOrder.set(agentId, entry)
       }
     } else if (winners[0]) {
       finalsOrder.set(winners[0].agentId, {
@@ -278,7 +283,13 @@ export class Judge {
       scores: ordered.map((inp, i) => ({
         agentId: inp.agentId,
         rank: i + 1,
-        score: Math.round(((n - i) / n) * 100 * 100) / 100,
+        // A submission no call ever ranked scores 0, exactly as the single-call path
+        // treats it. The positional score is only a stand-in for a judgement that was
+        // actually made; handing one to an unjudged agent invents a verdict, and a
+        // middling invented score is enough to keep it out of the cull band and breed it.
+        score: placings.has(inp.agentId) || finalsOrder.has(inp.agentId)
+          ? Math.round(((n - i) / n) * 100 * 100) / 100
+          : 0,
         // Prefer the finals rationale for agents who reached the finals round; fall
         // back to their batch rationale otherwise. Only a judge response that omits
         // an agent's ref from every call it appeared in (malformed output) falls
@@ -286,7 +297,9 @@ export class Judge {
         rationaleMd:
           finalsOrder.get(inp.agentId)?.rationale ||
           placings.get(inp.agentId)?.rationale ||
-          `Placed ${i + 1} of ${n} across batch and finals ranking.`,
+          (placings.has(inp.agentId) || finalsOrder.has(inp.agentId)
+            ? `Placed ${i + 1} of ${n} across batch and finals ranking.`
+            : NO_RANKING_MD),
       })),
       // The finals digest describes the models that actually competed for the top
       // places, so it is preferred; fall back to a batch digest only when there was
@@ -316,6 +329,28 @@ export class Judge {
    * This must never let an agent silently vanish or be scored twice, and must never
    * fabricate an agent that was never in byRef.
    */
+  /**
+   * Turns one judge response into agent placings, applying the same rules as
+   * `deanonymize`: a ref is taken once (first occurrence), and a ref the judge was never
+   * shown is dropped rather than fabricating an agent. The batched path used to skip
+   * both checks, so a repeated ref silently replaced a real placing with a later one.
+   */
+  private resolveRankings(
+    rankings: { ref: string; rank: number; rationale: string }[],
+    byRef: Map<string, string>,
+  ): Map<string, { rank: number; rationale: string }> {
+    const seenRefs = new Set<string>()
+    const placed = new Map<string, { rank: number; rationale: string }>()
+    for (const r of rankings) {
+      if (seenRefs.has(r.ref)) continue
+      seenRefs.add(r.ref)
+      const agentId = byRef.get(r.ref)
+      if (!agentId) continue
+      placed.set(agentId, { rank: r.rank, rationale: r.rationale })
+    }
+    return placed
+  }
+
   private deanonymize(
     rankings: { ref: string; rank: number; score: number; rationale: string }[],
     byRef: Map<string, string>,
@@ -339,7 +374,7 @@ export class Judge {
           agentId,
           rank: Number.MAX_SAFE_INTEGER,
           score: 0,
-          rationaleMd: 'The judge returned no ranking for this submission.',
+          rationaleMd: NO_RANKING_MD,
         })
       }
     }
