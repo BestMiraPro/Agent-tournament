@@ -378,3 +378,53 @@ test('PATCH record branch rejects concurrency 65', async () => {
   })
   expect(res.statusCode).toBe(400)
 })
+
+describe('starting a round on a run this process did not compose', () => {
+  /**
+   * A registry record lives only in memory, so after a dashboard restart a persisted run
+   * has none and the route falls back to the DEFAULT manager — whose engine is the mock
+   * one. For a docker or local run that means fabricated mock rounds appended to a real
+   * run's history, indistinguishable afterwards from the real ones.
+   */
+  const persistedRun = (sandbox: 'mock' | 'local' | 'docker') => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const started: string[] = []
+    const run = repos.runs.create({
+      name: `${sandbox} run`,
+      config: { ...DEFAULT_CONFIG, sandbox },
+      seedDir: null,
+    })
+    const app = buildApi({
+      repos,
+      manager: {
+        isBusy: () => false,
+        lastError: () => null,
+        startRound: (runId: string) => { started.push(runId) },
+      } as never,
+      createRun: () => run.id,
+    })
+    return { app, repos, started, runId: run.id }
+  }
+
+  test.each(['docker', 'local'] as const)(
+    'refuses a persisted %s run instead of running it on the mock engine',
+    async (sandbox) => {
+      const { app, repos, started, runId } = persistedRun(sandbox)
+      const res = await app.inject({ method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'g' } })
+
+      expect(res.statusCode).toBe(409)
+      expect(JSON.parse(res.body).error).toMatch(/restart|resume/i)
+      expect(started).toEqual([])
+      // Side-effect-free: refusing must not leave a round behind either.
+      expect(repos.rounds.listForRun(runId)).toHaveLength(0)
+    },
+  )
+
+  test('still starts a persisted mock run, which the default engine can honour', async () => {
+    const { app, started, runId } = persistedRun('mock')
+    const res = await app.inject({ method: 'POST', url: `/api/runs/${runId}/rounds`, payload: { goalMd: 'g' } })
+    expect(res.statusCode).toBe(202)
+    expect(started).toEqual([runId])
+  })
+})

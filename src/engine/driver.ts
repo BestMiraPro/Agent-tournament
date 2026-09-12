@@ -164,14 +164,18 @@ export class TournamentEngine {
     // WHY clear here AND in `finally`: a stale flag (abort arriving with no round
     // in flight) must never kill the next round.
     this.aborted.delete(runId)
-    const roundIdx = repos.rounds.lastIdx(runId) + 1
-    const round = repos.rounds.create({ runId, idx: roundIdx, goalMd: input.goalMd })
-    repos.rounds.markStarted(round.id)
-
+    // Before anything is written. Trackers live in memory, so a run persisted by an
+    // earlier process has none — and creating the round row first left a started round
+    // that recovery then marked failed, recording a spurious failure for a request that
+    // should simply have been refused.
     const budget = this.budgets.get(runId)
     if (!budget) {
       throw new Error(`no budget tracker registered for run ${runId} — call createRun first`)
     }
+
+    const roundIdx = repos.rounds.lastIdx(runId) + 1
+    const round = repos.rounds.create({ runId, idx: roundIdx, goalMd: input.goalMd })
+    repos.rounds.markStarted(round.id)
 
     try {
       // Round counters reset; run totals and any run-level breach deliberately survive.

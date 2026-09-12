@@ -877,3 +877,26 @@ describe('driver event emission', () => {
     expect(repos.rounds.get(round.roundId)?.status).toBe('complete')
   })
 })
+
+describe('runRound on a run the engine does not know', () => {
+  test('rejects without leaving a round behind', async () => {
+    // The budget tracker lives in memory, so after a restart a persisted run has none.
+    // The round row was created and marked started BEFORE that check, so a rejection
+    // left a started round that recovery then marked failed — a spurious failure in the
+    // run's history for a request that should have been refused cleanly.
+    const base = makeMockEngine({ seed: 1, populationSize: 2 })
+    try {
+      // A run row in the database that was never registered with this engine — exactly
+      // what a persisted run looks like to a freshly started process.
+      const run = base.repos.runs.create({
+        name: 'from a previous process', config: base.config, seedDir: null,
+      })
+
+      await expect(base.engine.runRound(run.id, { goalMd: 'g', criteriaMd: null }))
+        .rejects.toThrow(/budget tracker/i)
+      expect(base.repos.rounds.listForRun(run.id)).toHaveLength(0)
+    } finally {
+      base.db.close()
+    }
+  })
+})

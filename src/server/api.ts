@@ -691,7 +691,26 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     } catch {
       return reply.code(400).send({ error: 'goalMd is required' })
     }
-    const mgr = deps.registry?.get(id)?.manager ?? deps.manager
+    const record = deps.registry?.get(id)
+    // A registry record lives only in memory, so after a restart a persisted run has
+    // none and this route used to fall back to the DEFAULT manager — whose engine is the
+    // mock one. Running a docker or local run on it appends fabricated mock rounds to a
+    // real run's history, indistinguishable from the real ones afterwards. Refuse
+    // instead, immediately and without writing anything.
+    //
+    // A mock run is still served: the default engine genuinely can honour it, which keeps
+    // an ordinary restart usable. The residue is a spec-created MOCK run resumed after a
+    // restart, which runs at the default population rather than its own — wrong, but mock
+    // data either way. Real resume needs runtime reconstruction and cumulative budget
+    // recovery, which is a feature, not a fix.
+    if (!record && run.config.sandbox !== 'mock') {
+      return reply.code(409).send({
+        error:
+          `run ${id} uses the ${run.config.sandbox} sandbox and was composed by an earlier ` +
+          `process, so this server cannot resume it after a restart. Start a new run.`,
+      })
+    }
+    const mgr = record?.manager ?? deps.manager
     try {
       mgr.startRound(id, { goalMd: body.goalMd, criteriaMd: body.criteriaMd ?? null })
     } catch (e) {
