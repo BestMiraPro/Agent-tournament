@@ -1,15 +1,40 @@
 import type { EngineEvent, EventSink } from '../engine/events.js'
 
+/** Ceiling on an unterminated remainder, so a stream without separators cannot grow forever. */
+const MAX_SSE_REMAINDER = 1024 * 1024
+
+/**
+ * Splits an SSE buffer into complete event payloads.
+ *
+ * Two things the naive version got wrong. It split on `'\n\n'` only, so a server using
+ * CRLF — which SSE permits — never produced a single match: the buffer grew, no event was
+ * ever delivered, and an empty activity feed looked exactly like a run doing nothing. And
+ * it pushed every `data:` line as its own payload, when SSE says the data lines of one
+ * event concatenate; a pretty-printed JSON body therefore arrived as fragments that each
+ * failed to parse and were dropped without a word.
+ */
 export function parseSseFrames(buffer: string): { frames: string[]; rest: string } {
+  const normalized = buffer.replace(/\r\n|\r/g, '\n')
+  const blocks = normalized.split('\n\n')
+  let rest = blocks.pop() ?? ''
   const frames: string[] = []
-  const parts = buffer.split('\n\n')
-  const rest = parts.pop() ?? ''
-  for (const block of parts) {
+  for (const block of blocks) {
+    const data: string[] = []
     for (const line of block.split('\n')) {
-      if (line.startsWith('data:')) frames.push(line.slice(5).trim())
+      if (!line.startsWith('data:')) continue
+      const value = line.slice(5)
+      // Exactly one optional space is part of the framing; everything after it is payload.
+      data.push(value.startsWith(' ') ? value.slice(1) : value)
     }
+    if (data.length > 0) frames.push(data.join('\n'))
   }
+  if (rest.length > MAX_SSE_REMAINDER) rest = rest.slice(-MAX_SSE_REMAINDER)
   return { frames, rest }
+}
+
+/** Reconnect backoff: 1s, 2s, 4s … capped at 10s. Pure, so it is testable directly. */
+export function nextBridgeDelay(attempt: number): number {
+  return Math.min(1000 * 2 ** attempt, 10_000)
 }
 
 interface RawEvent {
@@ -80,43 +105,84 @@ export function startEventBridge(opts: {
   onError?: (e: Error) => void
 }): BridgeHandle {
   const controller = new AbortController()
+  let retry: ReturnType<typeof setTimeout> | undefined
+  let stopped = false
 
-  void (async () => {
+  const done = (): boolean => stopped || controller.signal.aborted
+
+  /**
+   * One subscription attempt, then a reconnect.
+   *
+   * A dropped stream used to end the bridge for good: the grid went quiet for the rest of
+   * the run with nothing logged, because a clean EOF was indistinguishable from a run with
+   * no activity. An HTTP refusal was worse — a 401 from inherited server-auth env, or a
+   * 404, still has a body, so the loop was entered and reported success while delivering
+   * nothing at all.
+   */
+  const connect = async (attempt: number): Promise<void> => {
+    if (done()) return
+    let progressed = false
     try {
       const res = await fetch(`${opts.baseUrl}/global/event`, {
         headers: { accept: 'text/event-stream' },
         signal: controller.signal,
       })
-      if (!res.body) return
+      if (!res.ok) throw new Error(`OpenCode event stream refused the subscription: ${res.status}`)
+      if (!res.body) throw new Error('OpenCode event stream returned no body')
+
       const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) return
-        buffer += decoder.decode(value, { stream: true })
-        const { frames, rest } = parseSseFrames(buffer)
-        buffer = rest
-        for (const frame of frames) {
-          let parsed: { payload?: RawEvent; type?: string; properties?: Record<string, unknown> }
-          try {
-            parsed = JSON.parse(frame)
-          } catch {
-            continue
+      try {
+        const decoder = new TextDecoder()
+        let buffer = ''
+        for (;;) {
+          const chunk = await reader.read()
+          if (chunk.done) break
+          progressed = true
+          buffer += decoder.decode(chunk.value, { stream: true })
+          const { frames, rest } = parseSseFrames(buffer)
+          buffer = rest
+          for (const frame of frames) {
+            let parsed: { payload?: RawEvent; type?: string; properties?: Record<string, unknown> }
+            try {
+              parsed = JSON.parse(frame)
+            } catch {
+              continue
+            }
+            // /global/event wraps each event as {directory, project, payload}; anything
+            // without a payload object is consumed at the top level instead.
+            const raw = parsed.payload ?? parsed
+            const mapped = mapOpenCodeEvent(raw, opts.runId, opts.lookupAgent)
+            if (mapped) opts.emit(mapped)
           }
-          // /global/event wraps each event as {directory, project, payload}; anything
-          // without a payload object is consumed at the top level instead.
-          const raw = parsed.payload ?? parsed
-          const mapped = mapOpenCodeEvent(raw, opts.runId, opts.lookupAgent)
-          if (mapped) opts.emit(mapped)
         }
+      } finally {
+        // Release the body even when we leave through an error or an abort.
+        await reader.cancel().catch(() => {})
       }
     } catch (e) {
-      if (!controller.signal.aborted) {
-        opts.onError?.(e instanceof Error ? e : new Error(String(e)))
-      }
+      if (done()) return
+      opts.onError?.(e instanceof Error ? e : new Error(String(e)))
+      schedule(progressed ? 0 : attempt + 1)
+      return
     }
-  })()
+    // A clean end of stream is not an error — the server simply closed it — but the run
+    // is not over, so resubscribe rather than going silent.
+    schedule(progressed ? 0 : attempt + 1)
+  }
 
-  return { stop: () => controller.abort() }
+  function schedule(attempt: number): void {
+    if (done()) return
+    retry = setTimeout(() => { void connect(attempt) }, nextBridgeDelay(attempt))
+  }
+
+  void connect(0)
+
+  return {
+    stop: () => {
+      // Set before aborting so an in-flight attempt's catch cannot schedule another.
+      stopped = true
+      if (retry) clearTimeout(retry)
+      controller.abort()
+    },
+  }
 }
