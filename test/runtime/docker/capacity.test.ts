@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
-import { parseMemoryLimit, planCapacity } from '../../../src/runtime/docker/capacity.js'
+import { parseMemoryLimit, planCapacity, readHostCapacity } from '../../../src/runtime/docker/capacity.js'
+import type { DockerFn, ExecResult } from '../../../src/runtime/docker/cli.js'
 
 describe('parseMemoryLimit', () => {
   test('parses megabytes and gigabytes', () => {
@@ -43,5 +44,65 @@ describe('planCapacity', () => {
     const r = planCapacity({ containers: 20, memory: '1g', cpus: 1 }, host)
     expect(r.suggestedContainers).toBeGreaterThan(0)
     expect(r.suggestedContainers).toBeLessThan(20)
+  })
+
+  test.each([
+    ['unreadable total memory', { totalMemoryBytes: NaN, usedMemoryBytes: 0, cpus: 16 }],
+    ['unreadable cpu count', { totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 0, cpus: NaN }],
+    ['unreadable usage', { totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: NaN, cpus: 16 }],
+  ])('refuses rather than approves a plan against %s', (_name, broken) => {
+    // Every comparison against NaN is false, so an absurd plan sailed through BOTH
+    // guards and came back ok — the overcommit preflight silently approving the exact
+    // thing it exists to stop. Fail closed instead.
+    const r = planCapacity({ containers: 500, memory: '8g', cpus: 8 }, broken)
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/capacity/i)
+  })
+})
+
+describe('readHostCapacity', () => {
+  const ok = (stdout: string) => ({ stdout, stderr: '', code: 0 })
+
+  /** Answers `docker info` and `docker stats` from canned results, in call order. */
+  const fakeDocker = (info: ExecResult, stats: ExecResult = ok('')): DockerFn =>
+    async (args) => (args[0] === 'info' ? info : stats)
+
+  test('reads total memory, usage and cpus from a healthy daemon', async () => {
+    const host = await readHostCapacity(
+      fakeDocker(ok('17179869184|16'), ok('512MiB / 1GiB\n1.5GiB / 2GiB\n')),
+    )
+    expect(host.totalMemoryBytes).toBe(17_179_869_184)
+    expect(host.cpus).toBe(16)
+    expect(host.usedMemoryBytes).toBe(512 * 1024 ** 2 + 1.5 * 1024 ** 3)
+  })
+
+  test('a host with no containers running reports zero usage, not a failure', async () => {
+    const host = await readHostCapacity(fakeDocker(ok('17179869184|16'), ok('')))
+    expect(host.usedMemoryBytes).toBe(0)
+    expect(host.totalMemoryBytes).toBe(17_179_869_184)
+  })
+
+  test('a daemon that is not running is surfaced, not read as an empty host', async () => {
+    // Exit status was never checked, so a dead daemon became totalMemoryBytes 0 and the
+    // preflight refused the run for "not enough memory" — the wrong reason entirely.
+    await expect(readHostCapacity(
+      fakeDocker({ stdout: '', stderr: 'Cannot connect to the Docker daemon', code: 1 }),
+    )).rejects.toThrow(/daemon|docker info/i)
+  })
+
+  test.each([['abc|def'], ['|'], ['17179869184'], ['0|16'], ['17179869184|0']])(
+    'malformed info output %j is surfaced rather than silently trusted',
+    async (stdout) => {
+      // NaN or 0 here is what made planCapacity approve an absurd plan.
+      await expect(readHostCapacity(fakeDocker(ok(stdout)))).rejects.toThrow(/capacity|memory|cpu/i)
+    },
+  )
+
+  test('a failed stats call is surfaced rather than read as zero usage', async () => {
+    // Assuming nothing is running when we could not ask is the over-committing
+    // direction: it makes every already-running container invisible to the budget.
+    await expect(readHostCapacity(
+      fakeDocker(ok('17179869184|16'), { stdout: '', stderr: 'daemon gone', code: 1 }),
+    )).rejects.toThrow(/usage|docker stats/i)
   })
 })

@@ -48,6 +48,8 @@ export class DockerSandbox implements Sandbox {
    *  in `containers` has been removed. */
   private everStarted = new Map<string, StartedContainer>()
   private stoppedNames = new Set<string>()
+  /** In-flight stops, so two callers reaching one container issue a single attempt. */
+  private stopAttempts = new Map<string, Promise<void>>()
   private disposed = false
 
   constructor(private opts: DockerSandboxOptions) {}
@@ -264,17 +266,33 @@ export class DockerSandbox implements Sandbox {
    * prevent. The failure is reported instead: a container we could not stop is a leak the
    * user needs to know about, and the next run's orphan sweep is what will collect it.
    */
-  private async stopOnce(container: StartedContainer): Promise<void> {
-    if (this.stoppedNames.has(container.name)) return
-    this.stoppedNames.add(container.name)
-    try {
-      await this.opts.stopContainer(container.name)
-    } catch (e) {
-      this.opts.onWarning?.(
-        `Could not stop container ${container.name}: ${(e as Error).message}. ` +
-          `It may still be running — check with \`docker ps -a --filter name=${container.name}\`.`,
-      )
-    }
+  private stopOnce(container: StartedContainer): Promise<void> {
+    // Success, not the attempt, is what makes a container done. Recording the name first
+    // meant a failed stop marked it stopped forever, so `disposeAll` — the unconditional
+    // backstop against a leaked container — skipped the one container that actually
+    // leaked. A name still eligible for retry is the whole value of that backstop.
+    if (this.stoppedNames.has(container.name)) return Promise.resolve()
+
+    // Concurrent callers join one attempt rather than each issuing their own stop;
+    // teardown and disposeAll can reach the same container at the same time.
+    const inFlight = this.stopAttempts.get(container.name)
+    if (inFlight) return inFlight
+
+    const attempt = (async () => {
+      try {
+        await this.opts.stopContainer(container.name)
+        this.stoppedNames.add(container.name)
+      } catch (e) {
+        this.opts.onWarning?.(
+          `Could not stop container ${container.name}: ${(e as Error).message}. ` +
+            `It may still be running — check with \`docker ps -a --filter name=${container.name}\`.`,
+        )
+      } finally {
+        this.stopAttempts.delete(container.name)
+      }
+    })()
+    this.stopAttempts.set(container.name, attempt)
+    return attempt
   }
 
   /**

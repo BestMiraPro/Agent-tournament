@@ -394,3 +394,85 @@ describe('DockerSandbox.disposeAll', () => {
     expect(c.stopped.slice().sort()).toEqual(['arena-t-0', 'arena-t-1'])
   })
 })
+
+describe('DockerSandbox stop retries', () => {
+  /** A stop that fails the first N times for a given container, then succeeds. */
+  const flakyStop = (failures: Map<string, number>) => {
+    const attempts: string[] = []
+    return {
+      attempts,
+      stop: async (name: string) => {
+        attempts.push(name)
+        const left = failures.get(name) ?? 0
+        if (left > 0) {
+          failures.set(name, left - 1)
+          throw new Error('daemon gone')
+        }
+      },
+    }
+  }
+
+  test('a container that failed to stop during teardown is retried by disposeAll', async () => {
+    // The name was recorded as stopped BEFORE the attempt, so a failure permanently
+    // marked the container done and disposeAll — the unconditional backstop against
+    // leaked containers — skipped it. The leak it exists to prevent, caused by it.
+    const root = await tmp()
+    const warnings: string[] = []
+    const flaky = flakyStop(new Map([['arena-t-0', 1]]))
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 1, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      startContainer: async (shardIndex: number) => ({
+        name: `arena-t-${shardIndex}`,
+        baseUrl: `http://127.0.0.1:${40000 + shardIndex}`,
+        shardIndex,
+      }),
+      stopContainer: flaky.stop,
+      onWarning: (m) => warnings.push(m),
+    })
+    await sb.planFor(['a1'])
+    const handle = await sb.provision('a1', {})
+
+    // Teardown is the first attempt, and it fails.
+    await sb.teardown(handle)
+    expect(flaky.attempts).toEqual(['arena-t-0'])
+    expect(warnings).toHaveLength(1)
+
+    // The backstop must try again, and this time it works.
+    await sb.disposeAll()
+    expect(flaky.attempts).toEqual(['arena-t-0', 'arena-t-0'])
+    expect(warnings).toHaveLength(1)
+  })
+
+  test('a container that stopped cleanly is never stopped twice', async () => {
+    const { sb, c } = await make(['a1'], 1)
+    const handle = await sb.provision('a1', {})
+    await sb.teardown(handle)
+    await sb.disposeAll()
+    await sb.disposeAll()
+    expect(c.stopped).toEqual(['arena-t-0'])
+  })
+
+  test('concurrent stops of one container make a single attempt', async () => {
+    const root = await tmp()
+    let attempts = 0
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 1, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      startContainer: async (shardIndex: number) => ({
+        name: `arena-t-${shardIndex}`,
+        baseUrl: `http://127.0.0.1:${40000 + shardIndex}`,
+        shardIndex,
+      }),
+      stopContainer: async () => { attempts++; await held },
+    })
+    await sb.planFor(['a1'])
+    const handle = await sb.provision('a1', {})
+
+    const teardown = sb.teardown(handle)
+    const dispose = sb.disposeAll()
+    release()
+    await Promise.all([teardown, dispose])
+    expect(attempts).toBe(1)
+  })
+})

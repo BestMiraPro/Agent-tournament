@@ -1,4 +1,4 @@
-import { docker } from './cli.js'
+import { docker, type DockerFn } from './cli.js'
 
 export interface HostCapacity {
   totalMemoryBytes: number
@@ -32,6 +32,27 @@ export function parseMemoryLimit(limit: string): number {
 
 export function planCapacity(plan: CapacityPlan, host: HostCapacity): CapacityVerdict {
   const per = parseMemoryLimit(plan.memory)
+
+  // Fail closed on unreadable capacity. Every comparison against NaN is false, so a host
+  // carrying one sailed through BOTH guards below and came back `ok` — the overcommit
+  // preflight approving exactly what it exists to refuse, and saying nothing. Refusing is
+  // the safe direction: `readHostCapacity` now throws before reaching here, and
+  // `assertHostCapacity` turns that into a warning-and-proceed, so the documented
+  // "unreadable host does not block a run" policy still holds on the real path.
+  if (
+    !Number.isFinite(host.totalMemoryBytes) ||
+    !Number.isFinite(host.usedMemoryBytes) ||
+    !Number.isFinite(host.cpus)
+  ) {
+    return {
+      ok: false,
+      suggestedContainers: 0,
+      reason:
+        'Host capacity could not be established (non-finite memory or CPU reading), ' +
+        'so the requested plan cannot be checked against it.',
+    }
+  }
+
   const free = Math.max(0, host.totalMemoryBytes - host.usedMemoryBytes)
   const budget = free * HEADROOM
   const fit = Math.max(0, Math.floor(budget / per))
@@ -61,14 +82,47 @@ export function planCapacity(plan: CapacityPlan, host: HostCapacity): CapacityVe
   return { ok: true, reason: null, suggestedContainers: plan.containers }
 }
 
-/** Reads live host capacity from the Docker daemon plus currently running containers. */
-export async function readHostCapacity(): Promise<HostCapacity> {
-  const info = await docker(['info', '--format', '{{.MemTotal}}|{{.NCPU}}'], 20_000)
+/**
+ * Reads live host capacity from the Docker daemon plus currently running containers.
+ *
+ * Throws rather than guessing. Neither exit status nor numeric validity used to be
+ * checked, which failed in two different directions: a daemon that was not running gave
+ * `totalMemoryBytes: 0` and the preflight refused the run for "not enough memory" — the
+ * wrong reason entirely — while malformed output gave NaN, which made `planCapacity`
+ * approve an absurd plan without a word. Saying "I could not tell" is the only honest
+ * answer, and `assertHostCapacity` already treats an unreadable host as a warning rather
+ * than a refusal.
+ */
+export async function readHostCapacity(run: DockerFn = docker): Promise<HostCapacity> {
+  const info = await run(['info', '--format', '{{.MemTotal}}|{{.NCPU}}'], 20_000)
+  if (info.code !== 0) {
+    throw new Error(
+      `docker info failed (exit ${info.code}), so host capacity is unknown: ` +
+        `${(info.stderr || info.stdout).trim().slice(-200)}`,
+    )
+  }
+
   const [memStr, cpuStr] = info.stdout.trim().split('|')
-  const stats = await docker(
-    ['stats', '--no-stream', '--format', '{{.MemUsage}}'],
-    40_000,
-  )
+  const totalMemoryBytes = Number(memStr)
+  const cpus = Number(cpuStr)
+  if (!Number.isFinite(totalMemoryBytes) || totalMemoryBytes <= 0) {
+    throw new Error(`docker info reported unusable total memory ${JSON.stringify(memStr ?? null)}`)
+  }
+  if (!Number.isFinite(cpus) || cpus <= 0) {
+    throw new Error(`docker info reported an unusable cpu count ${JSON.stringify(cpuStr ?? null)}`)
+  }
+
+  const stats = await run(['stats', '--no-stream', '--format', '{{.MemUsage}}'], 40_000)
+  if (stats.code !== 0) {
+    // Treating a failed call as zero usage is the over-committing direction: it makes
+    // every container already running invisible to the memory budget.
+    throw new Error(
+      `docker stats failed (exit ${stats.code}), so container memory usage is unknown: ` +
+        `${(stats.stderr || stats.stdout).trim().slice(-200)}`,
+    )
+  }
+
+  // An empty listing is legitimate — it means nothing is running — so it stays 0.
   let used = 0
   for (const line of stats.stdout.split('\n')) {
     const m = /^([\d.]+)\s*([KMG])iB/i.exec(line.trim())
@@ -76,9 +130,6 @@ export async function readHostCapacity(): Promise<HostCapacity> {
     const mult = m[2]!.toUpperCase() === 'K' ? 1024 : m[2]!.toUpperCase() === 'M' ? 1024 ** 2 : 1024 ** 3
     used += Number(m[1]) * mult
   }
-  return {
-    totalMemoryBytes: Number(memStr ?? 0),
-    usedMemoryBytes: used,
-    cpus: Number(cpuStr ?? 1),
-  }
+
+  return { totalMemoryBytes, usedMemoryBytes: used, cpus }
 }
