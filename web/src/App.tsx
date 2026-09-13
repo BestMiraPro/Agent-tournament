@@ -80,6 +80,15 @@ export function App() {
       if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) {
         throw new Error(`Concurrency must be an integer in [1, 64]: ${concurrency}`)
       }
+      if (value.sandbox === 'docker') {
+        if (!Number.isInteger(value.maxContainers) || value.maxContainers < 1 || value.maxContainers > 64) {
+          throw new Error(`Containers must be an integer in [1, 64]: ${value.maxContainers}`)
+        }
+        if (!Number.isFinite(value.containerCpus) || value.containerCpus <= 0 || value.containerCpus > 64) {
+          throw new Error(`CPUs per container must be a number in (0, 64]: ${value.containerCpus}`)
+        }
+        // The memory format is left to the server, which owns the one parser for it.
+      }
       const parsed = parsePricing(value.pricingText)
       if (parsed.error) throw new Error(parsed.error)
       pricing = parsed.pricing ?? {}
@@ -107,6 +116,10 @@ export function App() {
         criteria: value.criteria,
         selection: value.selection,
         concurrency: value.concurrency,
+        // Only a docker run has containers to size; the others would ignore these.
+        ...(value.sandbox === 'docker'
+          ? { maxContainers: value.maxContainers, containerMemory: value.containerMemory, containerCpus: value.containerCpus }
+          : {}),
         pricing,
       }))
     } catch (e) {

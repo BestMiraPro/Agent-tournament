@@ -17,6 +17,9 @@ export interface RunSetupValue {
   criteria: string | null
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number
+  maxContainers: number
+  containerMemory: string
+  containerCpus: number
   pricingText: string
 }
 
@@ -42,6 +45,9 @@ export function RunSetup({ busy, error, onCreate }: {
   const [bottomPct, setBottomPct] = useState(String(DEFAULT_CONFIG.selection.bottomPct))
   const [crossoverPct, setCrossoverPct] = useState(String(DEFAULT_CONFIG.selection.crossoverPct))
   const [concurrency, setConcurrency] = useState(String(DEFAULT_CONFIG.concurrency))
+  const [maxContainers, setMaxContainers] = useState(String(DEFAULT_CONFIG.maxContainers))
+  const [containerMemory, setContainerMemory] = useState(DEFAULT_CONFIG.containerMemory)
+  const [containerCpus, setContainerCpus] = useState(String(DEFAULT_CONFIG.containerCpus))
   const [pricingText, setPricingText] = useState('')
   // Known-models is a copy-paste aid only: failure or an empty list hides the
   // datalist options and free-text inputs keep working.
@@ -124,14 +130,23 @@ export function RunSetup({ busy, error, onCreate }: {
           <>
             <label htmlFor="setup-root">Workspace root</label>
             <input id="setup-root" value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} disabled={busy} />
-            <p className="help">Absolute folder on this host where agents work.</p>
+            <p className="help">Absolute folder where agents work. Leave blank to use the app&apos;s default.</p>
           </>
         )}
         {sandbox === 'docker' && (
           <>
             <label htmlFor="setup-auth">Auth file (bind-mounted read-only)</label>
             <input id="setup-auth" value={authFile} onChange={(e) => setAuthFile(e.target.value)} disabled={busy} />
-            <p className="help">Credentials file the containers may read, never write.</p>
+            <p className="help">Credentials the containers may read, never write. Leave blank to use your OpenCode login.</p>
+            <label htmlFor="setup-containers">Containers</label>
+            <input id="setup-containers" type="number" min={1} max={64} step={1} value={maxContainers} onChange={(e) => setMaxContainers(e.target.value)} disabled={busy} />
+            <p className="help">How many containers the agents are spread across. With fewer containers than agents, agents share one and can reach each other&apos;s files, so their results cannot be certified untouched. Match the agent count for full isolation.</p>
+            <label htmlFor="setup-container-memory">Memory per container</label>
+            <input id="setup-container-memory" value={containerMemory} onChange={(e) => setContainerMemory(e.target.value)} disabled={busy} />
+            <p className="help">At least 512m, for example 512m or 1g. Containers times memory has to fit in the memory Docker has free.</p>
+            <label htmlFor="setup-container-cpus">CPUs per container</label>
+            <input id="setup-container-cpus" type="number" min={0.25} max={64} step={0.25} value={containerCpus} onChange={(e) => setContainerCpus(e.target.value)} disabled={busy} />
+            <p className="help">Containers times CPUs cannot exceed this machine&apos;s CPU count.</p>
           </>
         )}
       </section>
@@ -177,6 +192,9 @@ export function RunSetup({ busy, error, onCreate }: {
             crossoverPct: Number(crossoverPct),
           },
           concurrency: Number(concurrency),
+          maxContainers: Number(maxContainers),
+          containerMemory: containerMemory.trim(),
+          containerCpus: Number(containerCpus),
           pricingText,
         })}
       >

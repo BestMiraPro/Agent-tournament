@@ -423,6 +423,9 @@ async function buildRealDeps(
         crossoverPct: config.selection.crossoverPct,
       },
       concurrency: config.concurrency,
+      maxContainers: config.maxContainers,
+      containerMemory: config.containerMemory,
+      containerCpus: config.containerCpus,
       pricing: { ...config.pricing },
       budget: {
         maxRunTokens: config.budget.maxRunTokens,

@@ -97,6 +97,9 @@ export function runConfigFor(spec: RunSpec): RunConfig {
     selection: { ...DEFAULT_CONFIG.selection, ...spec.selection },
     budget: { ...DEFAULT_CONFIG.budget, ...spec.budget },
     concurrency: spec.concurrency ?? DEFAULT_CONFIG.concurrency,
+    maxContainers: spec.maxContainers ?? DEFAULT_CONFIG.maxContainers,
+    containerMemory: spec.containerMemory ?? DEFAULT_CONFIG.containerMemory,
+    containerCpus: spec.containerCpus ?? DEFAULT_CONFIG.containerCpus,
     pricing: { ...DEFAULT_CONFIG.pricing, ...spec.pricing },
     seedDir: spec.seedDir,
   }

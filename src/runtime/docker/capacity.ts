@@ -1,4 +1,8 @@
 import { docker, type DockerFn } from './cli.js'
+import { parseMemoryLimit } from '../../core/memory.js'
+
+// Re-exported so existing importers keep working; the parser itself lives in core.
+export { parseMemoryLimit }
 
 export interface HostCapacity {
   totalMemoryBytes: number
@@ -20,15 +24,6 @@ export interface CapacityVerdict {
 
 /** Fraction of free memory we are willing to commit; the rest is headroom for the host. */
 const HEADROOM = 0.8
-
-export function parseMemoryLimit(limit: string): number {
-  const m = /^(\d+(?:\.\d+)?)\s*([kmg])b?$/i.exec(limit.trim())
-  if (!m) throw new Error(`Unparseable memory limit "${limit}"`)
-  const n = Number(m[1])
-  const unit = m[2]!.toLowerCase()
-  const mult = unit === 'k' ? 1024 : unit === 'm' ? 1024 ** 2 : 1024 ** 3
-  return Math.round(n * mult)
-}
 
 export function planCapacity(plan: CapacityPlan, host: HostCapacity): CapacityVerdict {
   const per = parseMemoryLimit(plan.memory)
@@ -65,7 +60,13 @@ export function planCapacity(plan: CapacityPlan, host: HostCapacity): CapacityVe
       reason:
         `Requested ${plan.containers} containers x ${plan.memory} = ${gib(plan.containers * per)}, ` +
         `but only ${gib(budget)} of ${gib(free)} free memory is safely committable. ` +
-        `Reduce maxContainers to ${fit}, lower containerMemory, or raise Docker's memory allocation.`,
+        // Every suggestion here is something the operator can actually do: these settings are
+        // in the run spec and the dashboard's Docker options, where they once were not.
+        (fit > 0
+          ? `Lower the container count to ${fit} (fewer agents also means fewer containers), lower`
+          : 'Not even one container of that size fits in the memory Docker has free. Lower') +
+        ` the memory per container, stop Docker containers you are not using, ` +
+        `or raise Docker Desktop's memory limit (Settings, Resources).`,
     }
   }
 
@@ -75,7 +76,8 @@ export function planCapacity(plan: CapacityPlan, host: HostCapacity): CapacityVe
       suggestedContainers: Math.max(1, Math.floor(host.cpus / plan.cpus)),
       reason:
         `Requested ${plan.containers} containers x ${plan.cpus} CPU = ${plan.containers * plan.cpus} ` +
-        `but the host has ${host.cpus}. Oversubscribing CPUs will make the machine unresponsive.`,
+        `but the host has ${host.cpus}. Oversubscribing CPUs will make the machine unresponsive. ` +
+        `Lower the container count or the CPUs per container.`,
     }
   }
 

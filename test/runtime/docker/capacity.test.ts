@@ -106,3 +106,38 @@ describe('readHostCapacity', () => {
     )).rejects.toThrow(/usage|docker stats/i)
   })
 })
+
+describe('planCapacity refusal wording', () => {
+  // The exact reading from an operator's machine: Docker Desktop at 6.69GiB with other
+  // projects' containers using about 4.18GiB of it.
+  const shared = { totalMemoryBytes: 7_182_827_520, usedMemoryBytes: 7_182_827_520 - 2.51 * 1024 ** 3, cpus: 16 }
+
+  test('suggests only things the operator can actually change', () => {
+    // It used to say "Reduce maxContainers, lower containerMemory" — neither of which the
+    // dashboard exposed, so the advice could not be followed from the app at all.
+    const r = planCapacity({ containers: 4, memory: '1g', cpus: 1 }, shared)
+    expect(r.ok).toBe(false)
+    expect(r.suggestedContainers).toBe(2)
+    expect(r.reason).toMatch(/Lower the container count to 2/)
+    expect(r.reason).toMatch(/memory per container/)
+    expect(r.reason).toMatch(/stop Docker containers you are not using/)
+    expect(r.reason).toMatch(/Docker Desktop's memory limit/)
+  })
+
+  test('never suggests lowering the container count to zero', () => {
+    const r = planCapacity({ containers: 1, memory: '4g', cpus: 1 }, shared)
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/Not even one container/)
+    expect(r.reason).not.toMatch(/count to 0/)
+    // Each branch must read as a sentence on its own: the first version of this message
+    // ran "...Docker has free. lower the memory..." into the shared tail.
+    expect(r.reason).toMatch(/free\. Lower the memory per container/)
+  })
+
+  test('a CPU refusal says what to lower', () => {
+    const roomy = { totalMemoryBytes: 64 * 1024 ** 3, usedMemoryBytes: 0, cpus: 16 }
+    const r = planCapacity({ containers: 4, memory: '256m', cpus: 8 }, roomy)
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/CPUs per container/)
+  })
+})

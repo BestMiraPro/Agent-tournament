@@ -81,6 +81,17 @@ Nothing needs configuring first. The defaults, each overridable with a flag afte
 | `--population` | `8` — size of the default mock run |
 | `--no-open` | the browser opens by default |
 
+### When a docker run is refused for memory
+
+Before starting any container, a docker run checks that containers × memory per container fits in 80% of the memory Docker currently has free. Other projects' containers count against that. If the run is refused, the message says how much fits. Any of these gets it through:
+
+- **Fewer containers.** Set **Containers** under the Docker options in the setup form, or run fewer agents. Fewer containers than agents means agents share one and can reach each other's files, so their results can no longer be certified untouched.
+- **Less memory per container.** For example `512m` instead of the default `1g`. The minimum accepted is `512m`: an idle agent container measured 250–267 MiB before doing any work. Whether `512m` is enough once agents are busy has not been measured, which is why the default stays `1g`.
+- **Free up Docker memory** by stopping containers you are not using (`docker ps` lists them).
+- **Give Docker more memory** in Docker Desktop, under Settings → Resources.
+
+**CPUs per container** is checked the same way against this machine's CPU count.
+
 For UI development with hot reload, run `npm run dashboard -- --no-open` and `npm run web:dev` in two terminals, then open `http://localhost:4301`.
 
 ### The dashboard workflow

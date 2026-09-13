@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'vitest'
+import { DEFAULT_CONFIG } from '../../src/core/types.js'
+import { runConfigFor } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
 
 const base = {
@@ -123,5 +125,59 @@ describe('parseRunSpec', () => {
   test('criteria round-trips through the return', () => {
     expect(parseRunSpec({ ...base, criteria: '## C' }).criteria).toBe('## C')
     expect(parseRunSpec(base).criteria).toBeNull()
+  })
+})
+
+/**
+ * The capacity preflight refuses a docker run with "Reduce maxContainers to N, lower
+ * containerMemory ..." — but neither was part of the run spec, so a run created from the
+ * dashboard could act on none of that advice. On a machine whose Docker memory is shared
+ * with other projects, every docker run was refused with no way through from the app.
+ */
+describe('parseRunSpec container sizing', () => {
+  test('defaults to the engine config when omitted', () => {
+    const s = parseRunSpec(base)
+    expect(s.maxContainers).toBe(DEFAULT_CONFIG.maxContainers)
+    expect(s.containerMemory).toBe(DEFAULT_CONFIG.containerMemory)
+    expect(s.containerCpus).toBe(DEFAULT_CONFIG.containerCpus)
+  })
+
+  test('accepts a smaller footprint for a constrained host', () => {
+    const s = parseRunSpec({ ...base, maxContainers: 2, containerMemory: '512m', containerCpus: 0.5 })
+    expect(s.maxContainers).toBe(2)
+    expect(s.containerMemory).toBe('512m')
+    expect(s.containerCpus).toBe(0.5)
+  })
+
+  test('the values reach the run config the preflight checks', () => {
+    const config = runConfigFor(parseRunSpec({
+      ...base, maxContainers: 2, containerMemory: '768m', containerCpus: 2,
+    }))
+    expect(config.maxContainers).toBe(2)
+    expect(config.containerMemory).toBe('768m')
+    expect(config.containerCpus).toBe(2)
+  })
+
+  test.each([[0], [65], [1.5]])('rejects maxContainers %j', (maxContainers) => {
+    expect(() => parseRunSpec({ ...base, maxContainers })).toThrow(/maxContainers/)
+  })
+
+  test.each([['lots'], ['1gib'], ['-1g'], ['']])('rejects unparseable containerMemory %j', (containerMemory) => {
+    expect(() => parseRunSpec({ ...base, containerMemory })).toThrow(/containerMemory/)
+  })
+
+  test.each([['512k'], ['256m'], ['384m']])('rejects containerMemory %j, below what an agent container needs', (containerMemory) => {
+    // An idle agent container measured 250-267 MiB before doing any work, so 256m would
+    // be at its ceiling on arrival, and "512k" meant as megabytes far below it. Each of
+    // those kills would be recorded against the agent rather than the setting.
+    expect(() => parseRunSpec({ ...base, containerMemory })).toThrow(/at least 512m/)
+  })
+
+  test('accepts exactly the floor', () => {
+    expect(parseRunSpec({ ...base, containerMemory: '512m' }).containerMemory).toBe('512m')
+  })
+
+  test.each([[0], [-1], [65]])('rejects containerCpus %j', (containerCpus) => {
+    expect(() => parseRunSpec({ ...base, containerCpus })).toThrow(/containerCpus/)
   })
 })

@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { z } from 'zod'
 import { DEFAULT_CONFIG } from '../core/types.js'
+import { MIN_CONTAINER_MEMORY, MIN_CONTAINER_MEMORY_BYTES, parseMemoryLimit } from '../core/memory.js'
 
 const rosterEntry = z.object({
   modelId: z.string().min(1),
@@ -44,6 +45,12 @@ const schema = z.object({
     .optional(),
   // Upper bound is a typo-guard, not tuning — the provider rate-limits real parallelism anyway.
   concurrency: z.number().int().min(1).max(64).optional(),
+  // Container sizing for the docker sandbox; mock and local ignore it. In the spec because
+  // the capacity preflight refuses a run by telling the operator to change exactly these,
+  // and before they were here nothing created from the dashboard could.
+  maxContainers: z.number().int().min(1).max(64).optional(),
+  containerMemory: z.string().optional(),
+  containerCpus: z.number().positive().max(64).optional(),
   // Four keys, not two: the engine preflight (BudgetTracker assertPrice) fail-closes
   // on cache-less entries (omitting them prices the bulk of a run at zero), so a
   // 2-key shape would pass the API and die at createRun — accept the full shape here.
@@ -68,6 +75,9 @@ export interface RunSpec {
   budget: { maxRunTokens: number; maxRoundTokens: number; maxAgentTokens: number }
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number; diversityFloor?: boolean }
   concurrency: number
+  maxContainers: number
+  containerMemory: string
+  containerCpus: number
   pricing: Record<string, { inPerM: number; outPerM: number; cacheReadPerM: number; cacheWritePerM: number }>
   seedDir: string | null
   workspaceRoot: string | null
@@ -97,6 +107,16 @@ export function parseRunSpec(input: unknown): RunSpec {
   }
   if (p.workspaceRoot && !path.isAbsolute(p.workspaceRoot)) {
     throw new Error('workspaceRoot must be an absolute path')
+  }
+  const containerMemory = p.containerMemory ?? DEFAULT_CONFIG.containerMemory
+  let containerMemoryBytes: number
+  try {
+    containerMemoryBytes = parseMemoryLimit(containerMemory)
+  } catch {
+    throw new Error(`containerMemory must look like 512m or 1g, got "${containerMemory}"`)
+  }
+  if (containerMemoryBytes < MIN_CONTAINER_MEMORY_BYTES) {
+    throw new Error(`containerMemory must be at least ${MIN_CONTAINER_MEMORY}, got "${containerMemory}"`)
   }
   const population = p.roster.reduce((n, r) => n + r.count, 0)
   // Same words as the engine guard (selection.ts): computed from merged spec
@@ -134,6 +154,9 @@ export function parseRunSpec(input: unknown): RunSpec {
       diversityFloor: p.selection?.diversityFloor ?? DEFAULT_CONFIG.selection.diversityFloor,
     },
     concurrency: p.concurrency ?? DEFAULT_CONFIG.concurrency,
+    maxContainers: p.maxContainers ?? DEFAULT_CONFIG.maxContainers,
+    containerMemory,
+    containerCpus: p.containerCpus ?? DEFAULT_CONFIG.containerCpus,
     pricing: p.pricing ?? {},
     seedDir: p.seedDir,
     workspaceRoot: p.workspaceRoot,

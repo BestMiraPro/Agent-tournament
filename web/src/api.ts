@@ -107,6 +107,10 @@ export interface FullRunSpec {
   criteria: string | null
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number
+  // Docker only; the server defaults any that are omitted.
+  maxContainers?: number
+  containerMemory?: string
+  containerCpus?: number
   pricing: Record<string, { inPerM: number; outPerM: number; cacheReadPerM: number; cacheWritePerM: number }>
 }
 
