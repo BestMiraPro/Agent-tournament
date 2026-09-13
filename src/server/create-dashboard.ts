@@ -19,6 +19,7 @@ import type { RunSpec } from './run-spec.js'
 import { RunManager } from './run-manager.js'
 import { disposeRunRecord, RunRegistry } from './runs.js'
 import { EventBroadcaster } from './ws.js'
+import { serveUi } from './static-ui.js'
 
 export interface DashboardOptions {
   dbPath?: string
@@ -27,6 +28,11 @@ export interface DashboardOptions {
   workspaceRoot?: string | null
   authFile?: string | null
   serverUrl?: string | null
+  /**
+   * Directory holding the built UI. When set, the UI is served from the API's own port, so
+   * the app is one process on one address. Tests leave it unset and get the API alone.
+   */
+  uiDir?: string | null
 }
 
 export interface Dashboard {
@@ -135,6 +141,9 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
       return sweepOrphanContainers({ activeRunIds, onWarning })
     },
   })
+
+  // After buildApi, so every API route is registered before the UI's catch-all.
+  if (opts.uiDir) serveUi(app, opts.uiDir)
 
   // Retained so shutdown can close the sockets it opened; see shutdown() below.
   let wss: WebSocketServer | null = null

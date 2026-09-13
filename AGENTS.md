@@ -57,18 +57,28 @@ docs/superpowers/     # SDD specs + plans (phase history)
 
 ## Deployment (local dashboard)
 
-The dashboard runs as two processes (API + Vite dev server):
+One command builds the UI, serves it and the API from one port (`http://127.0.0.1:4300`), and opens the browser:
 
 ```powershell
-# API + WS on :4300 (scrubs OPENCODE_SERVER_* leaked by the desktop app)
-$env:OPENCODE_SERVER_USERNAME=""; $env:OPENCODE_SERVER_PASSWORD=""
-npm run dashboard -- --db arena.db --workspace-root runs --auth-file "$env:USERPROFILE\.local\share\opencode\auth.json"
-
-# Vite UI on :4301 (use localhost, not 127.0.0.1 — IPv6 bind)
-npm run web:dev
+npm start
 ```
 
-The UI proxies `/api/*` and `/ws` to the API port via `vite.config.ts`.
+Or double-click `Start Agent Tournament.cmd` in the project root. No flags are needed:
+
+- data in `runs/dashboard.db`, so runs persist across restarts (`--db :memory:` for a throwaway session);
+- workspaces in `runs/workspaces`;
+- credentials from `~/.local/share/opencode/auth.json` when that file exists (honours `XDG_DATA_HOME`).
+
+Every default has a flag (`--port`, `--db`, `--workspace-root`, `--auth-file`, `--server-url`, `--population`, `--no-open`), passed after `--`. Launching while it is already running opens the running instance instead of failing, and does so before touching the database — a second instance's startup recovery would otherwise mark the first one's in-flight round failed.
+
+No `OPENCODE_SERVER_*` clearing is needed any more: the one place opencode is spawned (`src/runtime/opencode/server.ts`) scrubs those variables itself.
+
+For UI work with hot reload, run the API and the Vite dev server separately. Vite proxies `/api/*` and `/ws` to the API port via `vite.config.ts`:
+
+```powershell
+npm run dashboard -- --no-open
+npm run web:dev   # http://localhost:4301 — localhost, not 127.0.0.1 (Vite binds IPv6)
+```
 
 ## Real-mode e2e (optional, costs real LLM tokens)
 

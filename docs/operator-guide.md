@@ -61,18 +61,27 @@ Docker mode runs each agent in a resource-capped container, bind-mounting the au
 
 ## Dashboard (live operator view)
 
-The dashboard is a two-process local web app:
+Start it with one command, or double-click `Start Agent Tournament.cmd` in the project folder:
 
 ```powershell
-# Terminal 1 — API + WebSocket on :4300
-$env:OPENCODE_SERVER_USERNAME=""; $env:OPENCODE_SERVER_PASSWORD=""
-npm run dashboard -- --db arena.db --workspace-root runs --auth-file "$env:USERPROFILE\.local\share\opencode\auth.json"
-
-# Terminal 2 — Vite UI on :4301
-npm run web:dev
+npm start
 ```
 
-Open `http://localhost:4301` (use `localhost`, not `127.0.0.1` — Vite binds IPv6).
+It builds the interface, starts one server at `http://127.0.0.1:4300`, and opens it in your browser. The console prints where data, workspaces and credentials are coming from. Press Ctrl+C, or close the window, to stop. Starting it again while it is already running just opens the running one.
+
+Nothing needs configuring first. The defaults, each overridable with a flag after `--` (for example `npm start -- --port 4400`):
+
+| Flag | Default |
+|------|---------|
+| `--port` | `4300` |
+| `--db` | `runs/dashboard.db` — runs survive restarts; `:memory:` for a throwaway session |
+| `--workspace-root` | `runs/workspaces` |
+| `--auth-file` | `~/.local/share/opencode/auth.json` if it exists — docker runs are refused without credentials |
+| `--server-url` | none — start a fresh opencode server per run |
+| `--population` | `8` — size of the default mock run |
+| `--no-open` | the browser opens by default |
+
+For UI development with hot reload, run `npm run dashboard -- --no-open` and `npm run web:dev` in two terminals, then open `http://localhost:4301`.
 
 ### The dashboard workflow
 

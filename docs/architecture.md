@@ -19,7 +19,7 @@ The Agent Tournament is a 100-agent parallel LLM competition with evolutionary s
        │ pool     │                              └─────┬─────┘
        └────┬─────┘                                   │
             │                                    ┌────▼────┐
-            │                                    │   Web   │  npm run web:dev
+            │                                    │   Web   │  served by npm start
             │                                    │ App.tsx │◄── WebSocket /ws
             │                                    └─────────┘
             │
@@ -41,7 +41,7 @@ The Agent Tournament is a 100-agent parallel LLM competition with evolutionary s
 ## Two entry points, one engine
 
 - **CLI** (`src/cli.ts`): `npm run tournament` — runs N rounds to completion, prints the winner. Headless.
-- **Dashboard** (`src/server/index.ts` + `web/`): `npm run dashboard` + `npm run web:dev` — the operator starts rounds manually, watches live, reconfigures between rounds.
+- **Dashboard** (`src/server/index.ts` + `web/`): `npm start` — one process serves the API, the WebSocket and the built UI on :4300 (`src/server/static-ui.ts`). The operator starts rounds manually, watches live, and reconfigures between rounds. For UI development, `npm run dashboard` + `npm run web:dev` keeps hot reload, with Vite proxying back to the API.
 
 Both share the same engine (`src/engine/driver.ts`), judge (`src/judge/`), reflector (`src/evolution/`), and DB (`src/db/`). The dashboard adds a server (Fastify + WS) and a React UI; the engine is the same.
 
