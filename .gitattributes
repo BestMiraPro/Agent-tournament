@@ -9,3 +9,8 @@
 *.ico binary
 *.woff binary
 *.woff2 binary
+
+# Windows batch files are the exception: cmd.exe mis-parses labels and goto in
+# LF-only files, so the double-click launcher must be checked out with CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
