@@ -42,6 +42,12 @@ export interface RoundRow {
  */
 const INFINITY_SENTINEL = '__Infinity__'
 
+/** `submissions.usage_known`: 1 observed, 0 not observed, NULL recorded before tracking existed. */
+function usageKnownOf(value: unknown): boolean | null {
+  if (value === null || value === undefined) return null
+  return value === 1
+}
+
 function encodeConfig(config: unknown): string {
   return JSON.stringify(config, (_k, v) => (v === Infinity ? INFINITY_SENTINEL : v))
 }
@@ -286,14 +292,16 @@ export function makeRepos(db: Db) {
         workspacePath: string; status: SubmissionStatus; errorText: string | null
         tokensIn: number; tokensOut: number; tokensCacheRead: number; tokensCacheWrite: number
         costUsd: number; durationMs: number
+        /** False when the token/cost fields are placeholders for usage nobody observed. */
+        usageKnown?: boolean
       }): void {
         db.prepare(
-          'INSERT INTO submissions (id, round_id, agent_id, genome_id, submission_md, file_manifest_json, workspace_path, status, error_text, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          'INSERT INTO submissions (id, round_id, agent_id, genome_id, submission_md, file_manifest_json, workspace_path, status, error_text, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, duration_ms, usage_known) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         ).run(
           id(), input.roundId, input.agentId, input.genomeId, input.submissionMd,
           JSON.stringify(input.fileManifest), input.workspacePath, input.status, input.errorText,
           input.tokensIn, input.tokensOut, input.tokensCacheRead, input.tokensCacheWrite,
-          input.costUsd, input.durationMs,
+          input.costUsd, input.durationMs, input.usageKnown === false ? 0 : 1,
         )
       },
       forRound(roundId: string) {
@@ -306,6 +314,7 @@ export function makeRepos(db: Db) {
           tokensIn: r.tokens_in, tokensOut: r.tokens_out,
           tokensCacheRead: r.tokens_cache_read, tokensCacheWrite: r.tokens_cache_write,
           costUsd: r.cost_usd, durationMs: r.duration_ms,
+          usageKnown: usageKnownOf(r.usage_known),
         }))
       },
       forAgent(roundId: string, agentId: string) {
@@ -322,6 +331,7 @@ export function makeRepos(db: Db) {
           tokensIn: r.tokens_in, tokensOut: r.tokens_out,
           tokensCacheRead: r.tokens_cache_read, tokensCacheWrite: r.tokens_cache_write,
           costUsd: r.cost_usd, durationMs: r.duration_ms,
+          usageKnown: usageKnownOf(r.usage_known),
         }
       },
       totalCost(roundId: string): number {

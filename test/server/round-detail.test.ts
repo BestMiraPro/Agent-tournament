@@ -96,6 +96,7 @@ describe('GET /api/runs/:runId/rounds/:idx', () => {
       fileManifest: [{ path: 'out-1.txt', bytes: 10 }],
       costUsd: 0.01 * n, durationMs: 1000 + n,
       tokens: { in: 100 * n, out: 50 * n, cacheRead: 5 * n, cacheWrite: 7 * n },
+      usageKnown: true,
     })
     expect(JSON.parse(res.body)).toEqual({
       idx: 1, goalMd: 'goal 1',

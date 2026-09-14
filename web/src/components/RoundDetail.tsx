@@ -3,7 +3,7 @@ import { getRoundDetail, listModels, rejudge, serverError, type RoundDetail as R
 import { effectiveRound, roundOptions } from '../lib/rounds.js'
 import { createSelectionGuard } from '../lib/lifecycle.js'
 import { Markdown } from './Markdown.js'
-import { WORKER_COST_LABEL, WORKER_COST_TITLE, fmtCost } from '../lib/cost.js'
+import { WORKER_COST_LABEL, WORKER_COST_TITLE, fmtCost, submissionCostLabel, submissionTokensLabel } from '../lib/cost.js'
 
 // Manifest entries are FileEntry { path, bytes } rows, but the endpoint serves
 // them as unknown — fall back to String() so a shape change degrades to text.
@@ -33,9 +33,9 @@ function Submission({ sub }: { sub: NonNullable<RoundDetailData['entries'][numbe
         </ul>
       )}
       <p className="muted">
-        {fmtCost(sub.costUsd)}
+        {submissionCostLabel(sub)}
         {sub.durationMs !== null && <> · {fmtDuration(sub.durationMs)}</>}
-        {' '}· {sub.tokens.in} in / {sub.tokens.out} out tokens
+        {' '}· {submissionTokensLabel(sub)}
       </p>
     </>
   )
@@ -226,7 +226,7 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
                   <Markdown text={e.rationaleMd} />
                   <details>
                     <summary>
-                      {e.submission ? `${e.submission.status} · ${fmtCost(e.submission.costUsd)}` : 'no submission'}
+                      {e.submission ? `${e.submission.status} · ${submissionCostLabel(e.submission)}` : 'no submission'}
                     </summary>
                     {e.submission ? <Submission sub={e.submission} /> : <p className="muted">No submission file.</p>}
                   </details>

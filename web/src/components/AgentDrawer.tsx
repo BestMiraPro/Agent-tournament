@@ -3,7 +3,7 @@ import { getAgentDetail, retireAgent, serverError, type AgentDetail } from '../a
 import type { LiveAgent } from '../useLiveRun.js'
 import { lineDiff, type DiffLine } from '../lib/diff.js'
 import { Markdown } from './Markdown.js'
-import { fmtCost } from '../lib/cost.js'
+import { submissionCostLabel } from '../lib/cost.js'
 
 const DIFF_PREFIX: Record<DiffLine['kind'], string> = { same: ' ', add: '+', del: '−' }
 
@@ -194,7 +194,7 @@ export function AgentDrawer({ runId, agentId, onClose, onRetired, live }: {
                     <>
                       <p>
                         <span className={`drawer__badge drawer__badge--${sub.status}`}>{sub.status}</span>{' '}
-                        {fmtCost(sub.costUsd)}
+                        {submissionCostLabel(sub)}
                         {sub.durationMs !== null && <> · {fmtDuration(sub.durationMs)}</>}
                       </p>
                       {sub.errorText && <pre className="drawer__error">{sub.errorText}</pre>}

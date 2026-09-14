@@ -85,6 +85,8 @@ export interface AgentDetail {
       costUsd: number
       durationMs: number | null
       tokens: { in: number; out: number; cacheRead: number; cacheWrite: number }
+      /** false: no usage was observed (lost response); null: recorded before tracking. */
+      usageKnown: boolean | null
     } | null
   }[]
 }
@@ -284,6 +286,8 @@ export interface RoundDetail {
       costUsd: number
       durationMs: number | null
       tokens: { in: number; out: number; cacheRead: number; cacheWrite: number }
+      /** false: no usage was observed (lost response); null: recorded before tracking. */
+      usageKnown: boolean | null
     } | null
   }[]
 }

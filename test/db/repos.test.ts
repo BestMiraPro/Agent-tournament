@@ -188,6 +188,32 @@ describe('agent-detail getters', () => {
     expect(repos.submissions.forAgent(round.id, 'unknown-agent')).toBeNull()
     expect(repos.submissions.forAgent('unknown-round', a1.id)).toBeNull()
   })
+
+  test('submissions record whether their usage was observed', () => {
+    const { repos, run } = setup()
+    const round = repos.rounds.create({ runId: run.id, idx: 1, goalMd: 'g' })
+    const write = (label: string, usageKnown?: boolean) => {
+      const agent = repos.agents.create({ runId: run.id, label, parentAgentId: null, bornRound: 1 })
+      const genome = repos.genomes.create({
+        agentId: agent.id, roundIdx: 1, strategyMd: 's', notesMd: '',
+        modelId: 'm', temperature: 0.7, parentGenomeId: null, origin: 'seed',
+      })
+      repos.submissions.create({
+        roundId: round.id, agentId: agent.id, genomeId: genome.id,
+        submissionMd: null, fileManifest: [], workspacePath: '/ws', status: 'error', errorText: 'x',
+        tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0, durationMs: 1,
+        ...(usageKnown === undefined ? {} : { usageKnown }),
+      })
+      return agent.id
+    }
+    const observed = write('observed')
+    const lost = write('lost', false)
+    expect(repos.submissions.forAgent(round.id, observed)!.usageKnown).toBe(true)
+    expect(repos.submissions.forAgent(round.id, lost)!.usageKnown).toBe(false)
+    const byAgent = new Map(repos.submissions.forRound(round.id).map((s) => [s.agentId, s.usageKnown]))
+    expect(byAgent.get(observed)).toBe(true)
+    expect(byAgent.get(lost)).toBe(false)
+  })
 })
 
 describe('config round-trip', () => {

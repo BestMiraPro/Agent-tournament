@@ -303,6 +303,22 @@ describe('agent failure events', () => {
     expect(submission?.errorText).toContain('UND_ERR_HEADERS_TIMEOUT')
   })
 
+  test('a submission whose usage was never observed is stored as unknown, not as free', async () => {
+    const lost = makeMockEngine({ seed: 1, populationSize: 2, wrapRunner: failingFirst(failedResult) })
+    const lostRun = lost.engine.createRun('r', 'goal')
+    const lostRound = await lost.engine.runRound(lostRun.id, { goalMd: 'goal', criteriaMd: null })
+    const lostRows = lost.repos.submissions.forRound(lostRound.roundId)
+    expect(lostRows.map((s) => s.usageKnown).sort()).toEqual([false, true])
+
+    const thrown = makeMockEngine({
+      seed: 1, populationSize: 2,
+      wrapRunner: failingFirst(async () => { throw new TypeError('fetch failed') }),
+    })
+    const thrownRun = thrown.engine.createRun('r', 'goal')
+    const thrownRound = await thrown.engine.runRound(thrownRun.id, { goalMd: 'goal', criteriaMd: null })
+    expect(thrown.repos.submissions.forRound(thrownRound.roundId).map((s) => s.usageKnown).sort()).toEqual([false, true])
+  })
+
   test('scores say which ranked agents had failed', async () => {
     const events: EngineEvent[] = []
     const { engine } = makeMockEngine({

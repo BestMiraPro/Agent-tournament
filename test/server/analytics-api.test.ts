@@ -110,6 +110,7 @@ describe('GET /api/runs/:runId/agents/:agentId', () => {
           status: 'ok', errorText: null, submissionMd: 'submission gamma round 1',
           fileManifest: [{ path: 'out-1.txt', bytes: 10 }], costUsd: 0.01, durationMs: 1001,
           tokens: { in: 100, out: 50, cacheRead: 5, cacheWrite: 7 },
+          usageKnown: true,
         },
       },
       {
@@ -118,6 +119,7 @@ describe('GET /api/runs/:runId/agents/:agentId', () => {
           status: 'error', errorText: 'runner exploded', submissionMd: 'partial work',
           fileManifest: [{ path: 'partial.txt', bytes: 4 }], costUsd: 0.02, durationMs: 1002,
           tokens: { in: 200, out: 100, cacheRead: 10, cacheWrite: 14 },
+          usageKnown: true,
         },
       },
       {

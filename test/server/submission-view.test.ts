@@ -7,6 +7,7 @@ const row = {
   fileManifestJson: JSON.stringify([{ path: 'a.md', bytes: 3 }]),
   costUsd: 0.5, durationMs: 120,
   tokensIn: 1, tokensOut: 2, tokensCacheRead: 3, tokensCacheWrite: 4,
+  usageKnown: true,
 }
 
 describe('submissionView', () => {
@@ -16,7 +17,13 @@ describe('submissionView', () => {
       fileManifest: [{ path: 'a.md', bytes: 3 }],
       costUsd: 0.5, durationMs: 120,
       tokens: { in: 1, out: 2, cacheRead: 3, cacheWrite: 4 },
+      usageKnown: true,
     })
+  })
+
+  test('says when usage was never observed, and when it was never recorded', () => {
+    expect(submissionView({ ...row, usageKnown: false } as never).usageKnown).toBe(false)
+    expect(submissionView({ ...row, usageKnown: null } as never).usageKnown).toBeNull()
   })
 
   test('a half-written manifest serves null rather than throwing', () => {

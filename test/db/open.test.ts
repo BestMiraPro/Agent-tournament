@@ -125,6 +125,34 @@ describe('openDb', () => {
     }
   })
 
+  test('migrates submissions that predate usage tracking as unknown, not as observed', async () => {
+    // Historical rows stored 0 for a lost response and 0 for a genuinely free call alike;
+    // nothing can tell them apart now, so the honest value is null.
+    const dir = await mkdtemp(join(tmpdir(), 'agent-tournament-migrate-usage-test-'))
+    const dbPath = join(dir, 'old.sqlite')
+    try {
+      const old = new DatabaseSync(dbPath)
+      old.exec(`CREATE TABLE submissions (
+        id TEXT PRIMARY KEY, round_id TEXT NOT NULL, agent_id TEXT NOT NULL, genome_id TEXT NOT NULL,
+        submission_md TEXT, file_manifest_json TEXT, workspace_path TEXT NOT NULL, status TEXT NOT NULL,
+        error_text TEXT, tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0,
+        tokens_cache_read INTEGER DEFAULT 0, tokens_cache_write INTEGER DEFAULT 0,
+        cost_usd REAL DEFAULT 0, duration_ms INTEGER, UNIQUE(round_id, agent_id)
+      )`)
+      old.prepare('INSERT INTO submissions (id, round_id, agent_id, genome_id, workspace_path, status, error_text) VALUES (?,?,?,?,?,?,?)')
+        .run('s1', 'r1', 'a1', 'g1', '/ws', 'error', 'TypeError: fetch failed')
+      old.close()
+
+      const migrated = openDb(dbPath)
+      const repos = makeRepos(migrated)
+      expect(repos.submissions.forAgent('r1', 'a1')!.usageKnown).toBeNull()
+      expect(repos.submissions.forRound('r1')[0]!.usageKnown).toBeNull()
+      migrated.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
   test('preserves multiline initial criteria exactly across a file-backed reopen', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'agent-tournament-criteria-test-'))
     const dbPath = join(dir, 'criteria.sqlite')

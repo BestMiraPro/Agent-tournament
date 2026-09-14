@@ -27,3 +27,24 @@ export const WORKER_COST_TITLE =
 export function fmtCost(usd: number): string {
   return `$${usd.toFixed(4)}`
 }
+
+interface PersistedUsage {
+  costUsd: number
+  tokens: { in: number; out: number }
+  usageKnown: boolean | null
+}
+
+/**
+ * A stored submission's cost, without presenting a lost response as free.
+ *
+ * An agent whose terminal response never arrived stores 0 because nothing better exists,
+ * yet it may have worked for minutes. `usageKnown === false` marks that; older rows (null)
+ * cannot tell and keep showing what they stored.
+ */
+export function submissionCostLabel(sub: PersistedUsage): string {
+  return sub.usageKnown === false ? 'cost unavailable' : fmtCost(sub.costUsd)
+}
+
+export function submissionTokensLabel(sub: PersistedUsage): string {
+  return sub.usageKnown === false ? 'tokens unavailable' : `${sub.tokens.in} in / ${sub.tokens.out} out tokens`
+}

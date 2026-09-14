@@ -12,6 +12,9 @@ const ADDITIONS: { table: string; column: string; ddl: string }[] = [
   { table: 'runs', column: 'initial_criteria', ddl: 'TEXT' },
   { table: 'submissions', column: 'tokens_cache_read', ddl: 'INTEGER DEFAULT 0' },
   { table: 'submissions', column: 'tokens_cache_write', ddl: 'INTEGER DEFAULT 0' },
+  // Nullable with no default: older rows stored 0 both for a lost response and for a
+  // genuinely free call, so no value can be recovered for them.
+  { table: 'submissions', column: 'usage_known', ddl: 'INTEGER' },
 ]
 
 export function migrate(db: Db): void {

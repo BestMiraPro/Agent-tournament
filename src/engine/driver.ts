@@ -560,6 +560,8 @@ export class TournamentEngine {
           tokensCacheWrite: res.ok ? res.value.tokensCacheWrite : 0,
           costUsd: res.ok ? res.value.costUsd : 0,
           durationMs: res.ok ? res.value.durationMs : 0,
+          // A worker that threw returned no usage at all; its zeros are not observed spend.
+          usageKnown: res.ok ? res.value.usageKnown !== false : false,
         })
       }
 

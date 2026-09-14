@@ -8,6 +8,8 @@ export interface SubmissionView {
   costUsd: number
   durationMs: number | null
   tokens: { in: number; out: number; cacheRead: number; cacheWrite: number }
+  /** false: cost and tokens are placeholders for a lost response; null: never recorded. */
+  usageKnown: boolean | null
 }
 
 /**
@@ -43,5 +45,6 @@ export function submissionView(
       in: sub.tokensIn, out: sub.tokensOut,
       cacheRead: sub.tokensCacheRead, cacheWrite: sub.tokensCacheWrite,
     },
+    usageKnown: sub.usageKnown,
   }
 }
