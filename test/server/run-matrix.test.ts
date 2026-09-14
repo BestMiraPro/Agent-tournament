@@ -9,6 +9,8 @@ const seams = {
   readCapacity: (async () => ({ totalMemoryBytes: 32 * 1024 ** 3, usedMemoryBytes: 0, cpus: 8 })) as never,
   sweepFn: (async () => []) as never,
   validateModels: (async () => {}) as never,
+  // The auth path in these specs is illustrative; its existence is not what is under test.
+  inspectPath: (() => 'file') as never,
 }
 
 describe('run matrix', () => {

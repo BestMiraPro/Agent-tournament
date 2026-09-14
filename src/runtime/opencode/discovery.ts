@@ -65,7 +65,31 @@ export function missingModels(catalog: RuntimeCatalog, modelIds: readonly string
   return [...new Set(modelIds)].filter((id) => !catalog.models.has(id))
 }
 
-export function modelUnavailableMessage(modelId: string, version: string | null, shardIndex: number): string {
+/** Whether the runtime lists any model at all for this provider. */
+export function hasProvider(catalog: RuntimeCatalog, providerId: string): boolean {
+  const prefix = `${providerId}/`
+  for (const id of catalog.models) if (id.startsWith(prefix)) return true
+  return false
+}
+
+/** The provider part of a model id: everything before the first slash. */
+export function providerOf(modelId: string): string {
+  const slash = modelId.indexOf('/')
+  return slash < 0 ? modelId : modelId.slice(0, slash)
+}
+
+/**
+ * Why a shard cannot run a model.
+ *
+ * OpenCode leaves a provider out of its catalogue entirely when it has no credentials for it,
+ * so a whole missing provider means the container never received a key — the September 14
+ * run mounted a folder as its auth file — not that the provider lacks that model.
+ */
+export function modelUnavailableMessage(modelId: string, version: string | null, shardIndex: number, providerMissing = false): string {
   const runtime = version ? `OpenCode ${version}` : 'OpenCode version unknown'
+  if (providerMissing) {
+    return `Provider unavailable in Docker runtime (${runtime}, shard ${shardIndex}): no credentials for "${providerOf(modelId)}" reached the container, ` +
+      `so ${modelId} cannot run. Check the Auth file setting (leave it blank to use your OpenCode login)`
+  }
   return `Model unavailable in Docker runtime (${runtime}, shard ${shardIndex}): ${modelId} is not in its model catalogue`
 }

@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import {
   flattenProviders,
+  hasProvider,
   hostModelsCatalog,
   missingModels,
   modelUnavailableMessage,
@@ -83,5 +84,17 @@ describe('runtime catalogue', () => {
         'wandb/deepseek-ai/DeepSeek-V4-Pro-0813 is not in its model catalogue',
     )
     expect(modelUnavailableMessage('p/m', null, 0)).toContain('OpenCode version unknown')
+  })
+
+  test('says credentials are missing when the whole provider is absent', async () => {
+    const catalog = await readRuntimeCatalog(client as never)
+    expect(hasProvider(catalog, 'wandb')).toBe(true)
+    expect(hasProvider(catalog, 'google')).toBe(false)
+    // A prefix of another provider id is not that provider.
+    expect(hasProvider(catalog, 'wand')).toBe(false)
+    expect(modelUnavailableMessage('google/gemini-3.8-flash', '1.18.21', 0, true)).toBe(
+      'Provider unavailable in Docker runtime (OpenCode 1.18.21, shard 0): no credentials for "google" reached the container, ' +
+        'so google/gemini-3.8-flash cannot run. Check the Auth file setting (leave it blank to use your OpenCode login)',
+    )
   })
 })

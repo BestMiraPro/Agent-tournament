@@ -480,6 +480,7 @@ describe('real-mode wiring', () => {
       readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
       sweepFn: vi.fn(async () => [] as string[]),
       validateModels: vi.fn(async () => {}),
+      inspectPath: vi.fn(() => 'file' as const),
     })
     const dockerSpec = () => parseRunSpec({
       name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
@@ -596,6 +597,7 @@ describe('real-mode wiring', () => {
       readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
       sweepFn: vi.fn(async () => [] as string[]),
       validateModels: vi.fn(async () => {}),
+      inspectPath: vi.fn(() => 'file' as const),
     }
     await expect(composeRun(parseRunSpec({
       name: 'd', goal: 'g', sandbox: 'docker',
@@ -854,6 +856,7 @@ describe('container names carry the live run id', () => {
     })),
     sweepFn: vi.fn(async () => [] as string[]),
     validateModels: vi.fn(async () => {}),
+    inspectPath: vi.fn(() => 'file' as const),
     startShardContainerFn: vi.fn(async (spec: { runId: string; shardIndex: number }) => {
       started.push(`arena-${spec.runId}-${spec.shardIndex}`)
       return {

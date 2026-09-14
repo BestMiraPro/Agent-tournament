@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { composeRun, runConfigFor, type ComposeSeams } from '../../src/server/compose-run.js'
+import { composeRun, pathKind, runConfigFor, type ComposeSeams } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
 
 const mockSeams = () => ({
@@ -12,6 +12,7 @@ const mockSeams = () => ({
   readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
   sweepFn: vi.fn(async () => [] as string[]),
   validateModels: vi.fn(async () => {}),
+  inspectPath: vi.fn((): 'file' | 'directory' | 'missing' => 'file'),
 })
 
 describe('composeRun', () => {
@@ -25,6 +26,52 @@ describe('composeRun', () => {
     expect(seams.startHostServer).not.toHaveBeenCalled()
     expect(seams.readCapacity).not.toHaveBeenCalled()
     expect(c.planFor).toBeNull()
+  })
+
+  describe('docker auth file', () => {
+    const dockerSpec = (root: string, authFile: string) => parseRunSpec({
+      name: 'd', goal: 'g', sandbox: 'docker',
+      roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 1, temperature: 0.7 }],
+      workspaceRoot: root, authFile,
+    })
+
+    // The September 14 test run: a folder typed into "Auth file" was bind-mounted where
+    // auth.json belongs, the containers had no credentials, and every keyed provider failed.
+    test('a folder is refused before any server, capacity read or container starts', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-auth-'))
+      const seams = { ...mockSeams(), inspectPath: vi.fn((): 'directory' => 'directory') }
+      try {
+        await expect(composeRun(dockerSpec(root, 'C:\\Users\\me\\Crypto-research'), seams as never))
+          .rejects.toThrow(/C:\\Users\\me\\Crypto-research is a folder, not a credentials file.*Leave "Auth file" blank/)
+        expect(seams.startHostServer).not.toHaveBeenCalled()
+        expect(seams.readCapacity).not.toHaveBeenCalled()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('a path that does not exist is refused the same way', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-auth-'))
+      const seams = { ...mockSeams(), inspectPath: vi.fn((): 'missing' => 'missing') }
+      try {
+        await expect(composeRun(dockerSpec(root, '/nowhere/auth.json'), seams as never)).rejects.toThrow(/does not exist/)
+        expect(seams.startHostServer).not.toHaveBeenCalled()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('pathKind tells a file, a folder and nothing apart on the real filesystem', () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-pathkind-'))
+      try {
+        writeFileSync(join(root, 'auth.json'), '{}')
+        expect(pathKind(join(root, 'auth.json'))).toBe('file')
+        expect(pathKind(root)).toBe('directory')
+        expect(pathKind(join(root, 'absent.json'))).toBe('missing')
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
   })
 
   test('docker without capacity fails before spending', async () => {
@@ -262,6 +309,26 @@ describe('composeRun', () => {
         expect(c.warnings.some((w) => /could not read the model catalogue/i.test(w))).toBe(true)
         await c.runner.run(h1, { agentId: 'a1', genome: genome(missing), goalMd: 'g', timeoutMs: 5000 })
         expect(shardClient.createSession).toHaveBeenCalledTimes(1)
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('a provider with no models at all in the shard is reported as missing credentials', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-catalog-'))
+      // What a shard without readable credentials lists: only the keyless provider.
+      const shardClient = shardClientWith(async () => ({
+        providers: [{ id: 'opencode', models: { 'muse-spark-1.3-contributor-free': {} } }],
+        default: {},
+      }))
+      try {
+        const { c, h1 } = await compose(root, shardClient)
+        const refused = await c.runner.run(h1, { agentId: 'a1', genome: genome(missing), goalMd: 'g', timeoutMs: 5000 })
+        expect(refused.failure!.message).toMatch(/no credentials for "wandb"/)
+        expect(refused.failure!.message).toContain('Auth file')
+        expect(shardClient.createSession).not.toHaveBeenCalled()
+        expect(c.warnings.some((w) => /no credentials/i.test(w) && w.includes('wandb') && w.includes('Auth file'))).toBe(true)
         await c.cleanup()
       } finally {
         rmSync(root, { recursive: true, force: true })

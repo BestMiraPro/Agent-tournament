@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import type { Provider } from '../runtime/provider.js'
@@ -12,9 +12,11 @@ import { OpenCodeAgentRunner } from '../runtime/opencode/agent-runner.js'
 import { OpenCodeClient } from '../runtime/opencode/client.js'
 import { OpenCodeProvider } from '../runtime/opencode/provider.js'
 import {
+  hasProvider,
   hostModelsCatalog,
   missingModels,
   modelUnavailableMessage,
+  providerOf,
   readRuntimeCatalog,
   type RuntimeCatalog,
 } from '../runtime/opencode/discovery.js'
@@ -46,6 +48,19 @@ export interface ComposeSeams {
   createShardClient: (baseUrl: string, timeoutMs: number) => OpenCodeClient
   /** The host catalogue file to pin in shards, or null when the host has none. */
   hostModelsFile: () => string | null
+  /** What a host path is, so a docker auth file can be checked before anything starts. */
+  inspectPath: (path: string) => PathKind
+}
+
+export type PathKind = 'file' | 'directory' | 'missing'
+
+export function pathKind(path: string): PathKind {
+  try {
+    const stat = statSync(path)
+    return stat.isDirectory() ? 'directory' : 'file'
+  } catch {
+    return 'missing'
+  }
 }
 
 /**
@@ -66,6 +81,7 @@ export const defaultSeams: ComposeSeams = {
   removeContainerFn: removeContainer,
   createShardClient: (baseUrl, timeoutMs) => new OpenCodeClient({ baseUrl, timeoutMs }),
   hostModelsFile: () => hostModelsCatalog(process.env, homedir(), existsSync),
+  inspectPath: pathKind,
 }
 
 export interface ShardServer {
@@ -171,6 +187,18 @@ export async function composeRun(
   } catch (e) {
     throw new Error(`workspace root ${workspaceRoot}: ${e instanceof Error ? e.message : String(e)}`)
   }
+  if (spec.sandbox === 'docker' && spec.authFile) {
+    // Docker bind-mounts whatever this names where auth.json belongs. A folder there leaves
+    // every container without credentials, so each keyed provider fails only after minutes
+    // of setup — refuse it now instead.
+    const kind = s.inspectPath(spec.authFile)
+    if (kind !== 'file') {
+      throw new Error(
+        `Auth file ${spec.authFile} ${kind === 'directory' ? 'is a folder, not a credentials file' : 'does not exist'}. ` +
+          'Leave "Auth file" blank to use your OpenCode login, or point it at an auth.json file.',
+      )
+    }
+  }
   if (spec.sandbox === 'docker') {
     await assertHostCapacity(config, s.readCapacity as never, onWarning)
   }
@@ -217,11 +245,22 @@ export async function composeRun(
           const catalog = await readRuntimeCatalog(s.createShardClient(baseUrl, 10_000))
           shardCatalogs.set(baseUrl, { shardIndex, catalog })
           const missing = missingModels(catalog, config.roster.map((r) => r.modelId))
-          if (missing.length > 0) {
+          const runtime = `OpenCode ${catalog.version ?? 'version unknown'}`
+          const noCredentials = missing.filter((m) => !hasProvider(catalog, providerOf(m)))
+          const notListed = missing.filter((m) => hasProvider(catalog, providerOf(m)))
+          if (noCredentials.length > 0) {
+            const providers = [...new Set(noCredentials.map(providerOf))].map((p) => `"${p}"`).join(', ')
             reportOnce(
-              `${missing.length} selected worker model(s) unavailable in Docker runtime ` +
-                `(OpenCode ${catalog.version ?? 'version unknown'}); agents on them will fail before any prompt:\n` +
-                missing.map((m) => `  - ${m}`).join('\n'),
+              `No credentials for ${providers} reached the Docker runtime (${runtime}); agents on these models will fail before any prompt. ` +
+                'Check the Auth file setting (leave it blank to use your OpenCode login):\n' +
+                noCredentials.map((m) => `  - ${m}`).join('\n'),
+            )
+          }
+          if (notListed.length > 0) {
+            reportOnce(
+              `${notListed.length} selected worker model(s) unavailable in Docker runtime ` +
+                `(${runtime}); agents on them will fail before any prompt:\n` +
+                notListed.map((m) => `  - ${m}`).join('\n'),
             )
           }
         } catch (e) {
@@ -299,7 +338,10 @@ export async function composeRun(
           modelUnavailable: (handle, modelId) => {
             const entry = shardCatalogs.get(sandbox.endpoint(handle).baseUrl)
             if (!entry || entry.catalog.models.has(modelId)) return null
-            return modelUnavailableMessage(modelId, entry.catalog.version, entry.shardIndex)
+            return modelUnavailableMessage(
+              modelId, entry.catalog.version, entry.shardIndex,
+              !hasProvider(entry.catalog, providerOf(modelId)),
+            )
           },
         },
       )
