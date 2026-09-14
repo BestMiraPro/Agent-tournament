@@ -39,6 +39,18 @@ describe('startShardContainer', () => {
     expect(calls.some((c) => c[0] === 'run')).toBe(false)
   })
 
+  test('passes a host model catalogue through to docker run', async () => {
+    let runArgs: string[] = []
+    const fake = vi.fn(async (args: string[]) => {
+      if (args[0] === 'inspect') return { stdout: '', stderr: 'No such object', code: 1 }
+      if (args[0] === 'run') { runArgs = args; return { stdout: 'cid', stderr: '', code: 0 } }
+      if (args[0] === 'port') return { stdout: '127.0.0.1:41000', stderr: '', code: 0 }
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    await startShardContainer({ ...spec, modelsFile: '/host/models.json' }, fake, async () => true)
+    expect(runArgs.join(' ')).toContain('/host/models.json:/root/.cache/opencode/models.json:ro')
+  })
+
   test('removes a stopped container before starting a fresh one', async () => {
     const calls: string[][] = []
     let running = false

@@ -133,6 +133,22 @@ export class OpenCodeClient {
     }
   }
 
+  /**
+   * The runtime's own reported version, or null when it reports none usable.
+   *
+   * Used to name the runtime in a "model unavailable" failure: host and shard can differ,
+   * so the message must say which runtime refused the model.
+   */
+  async version(): Promise<string | null> {
+    try {
+      const body = await this.request<{ version?: unknown } | null>('GET', '/global/health', { timeoutMs: 3000 })
+      const version = body?.version
+      return typeof version === 'string' && /^[0-9A-Za-z.+-]{1,40}$/.test(version) ? version : null
+    } catch {
+      return null
+    }
+  }
+
   async providers(): Promise<ProvidersResponse> {
     return this.request<ProvidersResponse>('GET', '/config/providers')
   }

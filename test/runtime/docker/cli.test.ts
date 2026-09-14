@@ -77,6 +77,25 @@ describe('buildRunArgs', () => {
     expect(buildRunArgs({ ...base, authFile: null }).join(' ')).not.toContain('auth.json')
   })
 
+  // A fresh container has no models.dev cache, so OpenCode 1.18.21 answers from its bundled
+  // catalogue until a background fetch lands — the September 13 shards lost that race and
+  // lacked two W&B models the host listed. Pinning the host's catalogue removes the race.
+  test('pins a host model catalogue read-only and stops the runtime replacing it', () => {
+    const args = buildRunArgs({ ...base, modelsFile: '/host/models.json' })
+    const a = args.join(' ')
+    expect(a).toContain('-v /host/models.json:/root/.cache/opencode/models.json:ro')
+    expect(a).toContain('-e OPENCODE_DISABLE_MODELS_FETCH=1')
+    expect(args.at(-1)).toBe('agent-arena:latest')
+  })
+
+  test('leaves the runtime catalogue alone when no host catalogue is given', () => {
+    for (const spec of [base, { ...base, modelsFile: null }]) {
+      const a = buildRunArgs(spec).join(' ')
+      expect(a).not.toContain('models.json')
+      expect(a).not.toContain('OPENCODE_DISABLE_MODELS_FETCH')
+    }
+  })
+
   test('names the container', () => {
     expect(buildRunArgs(base).join(' ')).toContain('--name arena-run1-0')
   })

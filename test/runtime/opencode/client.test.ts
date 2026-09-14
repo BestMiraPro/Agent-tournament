@@ -19,6 +19,24 @@ describe('OpenCodeClient', () => {
     expect(seen).toContain('directory=%2Fwork%2Fagent-01')
   })
 
+  test('version reads the runtime version from the health endpoint', async () => {
+    let seen = ''
+    stubFetch(async (url) => { seen = url; return ok({ healthy: true, version: '1.18.21' }) })
+    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
+    expect(await c.version()).toBe('1.18.21')
+    expect(seen).toContain('/global/health')
+  })
+
+  test('version is null when the server reports no usable version', async () => {
+    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
+    stubFetch(async () => ok({ healthy: true }))
+    expect(await c.version()).toBeNull()
+    stubFetch(async () => ok({ healthy: true, version: `1.0 ${'x'.repeat(80)}` }))
+    expect(await c.version()).toBeNull()
+    stubFetch(async () => new Response('down', { status: 503 }))
+    expect(await c.version()).toBeNull()
+  })
+
   test('throws a descriptive error on a non-2xx response', async () => {
     stubFetch(async () => new Response('nope', { status: 500 }))
     const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })

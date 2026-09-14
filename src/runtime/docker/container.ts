@@ -9,6 +9,8 @@ export interface ShardContainerSpec {
   memory: string
   cpus: number
   authFile: string | null
+  /** Host models.dev catalogue pinned read-only in the container, when the host has one. */
+  modelsFile?: string | null
   healthTimeoutMs?: number
 }
 
@@ -58,6 +60,7 @@ export async function startShardContainer(
         memory: spec.memory,
         cpus: spec.cpus,
         authFile: spec.authFile,
+        modelsFile: spec.modelsFile ?? null,
       }),
       120_000,
     )

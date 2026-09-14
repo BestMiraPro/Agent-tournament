@@ -1,4 +1,5 @@
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import type { Provider } from '../runtime/provider.js'
 import type { AgentRunner } from '../runtime/agent-runner.js'
@@ -10,6 +11,13 @@ import type { Sandbox } from '../runtime/sandbox.js'
 import { OpenCodeAgentRunner } from '../runtime/opencode/agent-runner.js'
 import { OpenCodeClient } from '../runtime/opencode/client.js'
 import { OpenCodeProvider } from '../runtime/opencode/provider.js'
+import {
+  hostModelsCatalog,
+  missingModels,
+  modelUnavailableMessage,
+  readRuntimeCatalog,
+  type RuntimeCatalog,
+} from '../runtime/opencode/discovery.js'
 import { attachServer, startServer, type ServerHandle } from '../runtime/opencode/server.js'
 import { AGENT_IMAGE, assertHostCapacity, makeClientResolver, sweepBeforeRun, validateRosterModels } from '../cli.js'
 import { ensureImage } from '../runtime/docker/image.js'
@@ -34,6 +42,10 @@ export interface ComposeSeams {
   ) => Promise<void>
   startShardContainerFn: typeof startShardContainer
   removeContainerFn: typeof removeContainer
+  /** A client for one shard's own OpenCode server. */
+  createShardClient: (baseUrl: string, timeoutMs: number) => OpenCodeClient
+  /** The host catalogue file to pin in shards, or null when the host has none. */
+  hostModelsFile: () => string | null
 }
 
 /**
@@ -52,6 +64,8 @@ export const defaultSeams: ComposeSeams = {
     validateRosterModels(client, directory, config, { onWarning }),
   startShardContainerFn: startShardContainer,
   removeContainerFn: removeContainer,
+  createShardClient: (baseUrl, timeoutMs) => new OpenCodeClient({ baseUrl, timeoutMs }),
+  hostModelsFile: () => hostModelsCatalog(process.env, homedir(), existsSync),
 }
 
 export interface ShardServer {
@@ -185,6 +199,38 @@ export async function composeRun(
         }, onWarning).catch(() => [])
       }
       await s.ensureImageFn(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
+      const modelsFile = s.hostModelsFile()
+      // Each shard's catalogue, read once per actual container start and keyed by its
+      // endpoint, so a replacement container is checked afresh rather than trusted.
+      const shardCatalogs = new Map<string, { shardIndex: number; catalog: RuntimeCatalog }>()
+      const reportedCatalogIssues = new Set<string>()
+      const reportOnce = (message: string) => {
+        if (reportedCatalogIssues.has(message)) return
+        reportedCatalogIssues.add(message)
+        onWarning(message)
+      }
+      // Host validation above proves nothing about a shard: it is a separate OpenCode
+      // runtime with its own catalogue. Ask the shard itself, before any worker prompt.
+      const checkShardCatalog = async (shardIndex: number, baseUrl: string) => {
+        shardCatalogs.delete(baseUrl)
+        try {
+          const catalog = await readRuntimeCatalog(s.createShardClient(baseUrl, 10_000))
+          shardCatalogs.set(baseUrl, { shardIndex, catalog })
+          const missing = missingModels(catalog, config.roster.map((r) => r.modelId))
+          if (missing.length > 0) {
+            reportOnce(
+              `${missing.length} selected worker model(s) unavailable in Docker runtime ` +
+                `(OpenCode ${catalog.version ?? 'version unknown'}); agents on them will fail before any prompt:\n` +
+                missing.map((m) => `  - ${m}`).join('\n'),
+            )
+          }
+        } catch (e) {
+          reportOnce(
+            `Could not read the model catalogue of Docker shard ${shardIndex}, so its worker models ` +
+              `are not checked before prompting: ${(e as Error).message.slice(0, 200)}`,
+          )
+        }
+      }
       const shardServers: ShardServer[] = []
       const shardListeners = new Set<(server: ShardServer) => void>()
       const publishShardServer = (server: ShardServer) => {
@@ -227,11 +273,13 @@ export async function composeRun(
               memory: config.containerMemory,
               cpus: config.containerCpus,
               authFile: spec.authFile,
+              modelsFile,
             },
             undefined,
-            async (baseUrl) => new OpenCodeClient({ baseUrl, timeoutMs: 10_000 }).health(),
+            async (baseUrl) => s.createShardClient(baseUrl, 10_000).health(),
             onWarning,
           )
+          await checkShardCatalog(started.shardIndex, started.baseUrl)
           publishShardServer({ shardIndex: started.shardIndex, baseUrl: started.baseUrl })
           return started
         },
@@ -242,9 +290,18 @@ export async function composeRun(
       })
       const runner = new OpenCodeAgentRunner(
         makeClientResolver(sandbox, server.client, (baseUrl) =>
-          new OpenCodeClient({ baseUrl, timeoutMs: config.agentTimeoutMs })),
+          s.createShardClient(baseUrl, config.agentTimeoutMs)),
         sandbox,
-        { onSessionCreated: sessionHook },
+        {
+          onSessionCreated: sessionHook,
+          // Per agent rather than per roster entry: agents added or bred mid-run carry
+          // models the roster check at shard start never saw.
+          modelUnavailable: (handle, modelId) => {
+            const entry = shardCatalogs.get(sandbox.endpoint(handle).baseUrl)
+            if (!entry || entry.catalog.models.has(modelId)) return null
+            return modelUnavailableMessage(modelId, entry.catalog.version, entry.shardIndex)
+          },
+        },
       )
       return {
         config, sandbox, provider, runner,

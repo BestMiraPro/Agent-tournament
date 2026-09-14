@@ -183,4 +183,89 @@ describe('composeRun', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  describe('shard model catalogue', () => {
+    const missing = 'wandb/deepseek-ai/DeepSeek-V4-Pro-0813'
+    const present = 'wandb/zai-org/GLM-5.2'
+    const genome = (modelId: string) => ({ strategyMd: 's', notesMd: '', modelId, temperature: 0.7 })
+    const shardClientWith = (providers: () => Promise<unknown>) => ({
+      health: vi.fn(async () => true),
+      version: vi.fn(async () => '1.18.21'),
+      providers: vi.fn(providers),
+      createSession: vi.fn(async () => ({ id: 'ses_ok' })),
+      prompt: vi.fn(async () => ({ info: { cost: 0 }, parts: [] })),
+      abort: vi.fn(async () => {}),
+    })
+    const compose = async (root: string, shardClient: ReturnType<typeof shardClientWith>) => {
+      const seams = mockSeams()
+      seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
+      const startShardContainerFn = vi.fn(async (spec: { shardIndex: number }) => ({
+        name: `arena-run-${spec.shardIndex}`,
+        baseUrl: `http://127.0.0.1:${42000 + spec.shardIndex}`,
+        shardIndex: spec.shardIndex,
+      }))
+      const c = await composeRun(parseRunSpec({
+        name: 'd', goal: 'g', sandbox: 'docker',
+        roster: [{ modelId: missing, count: 1, temperature: 0.7 }, { modelId: present, count: 1, temperature: 0.7 }],
+        workspaceRoot: root, authFile: join(root, 'auth.json'),
+      }), {
+        // The host preflight (validateModels) passes: the host catalogue has both models.
+        ...seams,
+        startShardContainerFn,
+        removeContainerFn: vi.fn(async () => {}),
+        createShardClient: () => shardClient,
+        hostModelsFile: () => '/host/opencode/models.json',
+      } as never)
+      await c.planFor!(['a1', 'a2'])
+      const [h1, h2] = await Promise.all([c.sandbox.provision('a1', {}), c.sandbox.provision('a2', {})])
+      return { c, h1, h2, startShardContainerFn }
+    }
+
+    test('a model the host lists but the shard does not is refused before any prompt, naming the runtime', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-catalog-'))
+      const shardClient = shardClientWith(async () => ({
+        providers: [{ id: 'wandb', models: { 'deepseek-ai/DeepSeek-V4-Pro': {}, 'zai-org/GLM-5.2': {} } }],
+        default: {},
+      }))
+      try {
+        const { c, h1, h2, startShardContainerFn } = await compose(root, shardClient)
+        expect(startShardContainerFn.mock.calls[0]![0]).toMatchObject({ modelsFile: '/host/opencode/models.json' })
+        // Once per actual shard start, not once per agent.
+        expect(shardClient.providers).toHaveBeenCalledTimes(startShardContainerFn.mock.calls.length)
+
+        const refused = await c.runner.run(h1, { agentId: 'a1', genome: genome(missing), goalMd: 'g', timeoutMs: 5000 })
+        expect(refused.status).toBe('error')
+        expect(refused.failure).toMatchObject({ code: 'MODEL_UNAVAILABLE' })
+        expect(refused.failure!.message).toContain(missing)
+        expect(refused.failure!.message).toContain('Docker runtime (OpenCode 1.18.21')
+        expect(shardClient.createSession).not.toHaveBeenCalled()
+        expect(shardClient.prompt).not.toHaveBeenCalled()
+        expect(c.warnings.some((w) => w.includes(missing) && w.includes('Docker runtime') && w.includes('1.18.21'))).toBe(true)
+        expect(c.warnings.some((w) => w.includes(present))).toBe(false)
+
+        // The healthy, explicitly selected worker still runs, and the roster is untouched.
+        const healthy = await c.runner.run(h2, { agentId: 'a2', genome: genome(present), goalMd: 'g', timeoutMs: 5000 })
+        expect(shardClient.createSession).toHaveBeenCalledTimes(1)
+        expect(healthy.failure?.code).not.toBe('MODEL_UNAVAILABLE')
+        expect(c.config.roster.map((r) => r.modelId)).toEqual([missing, present])
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('an unreadable shard catalogue is reported and does not block workers', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-catalog-'))
+      const shardClient = shardClientWith(async () => { throw new Error('catalogue down') })
+      try {
+        const { c, h1 } = await compose(root, shardClient)
+        expect(c.warnings.some((w) => /could not read the model catalogue/i.test(w))).toBe(true)
+        await c.runner.run(h1, { agentId: 'a1', genome: genome(missing), goalMd: 'g', timeoutMs: 5000 })
+        expect(shardClient.createSession).toHaveBeenCalledTimes(1)
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  })
 })

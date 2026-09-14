@@ -49,6 +49,8 @@ export interface RunSpec {
   memory: string
   cpus: number
   authFile: string | null
+  /** Host models.dev catalogue to pin inside the container; see buildRunArgs. */
+  modelsFile?: string | null
   pidsLimit?: number
   maxFileBytes?: number
   maxOpenFiles?: number
@@ -96,6 +98,18 @@ export function buildRunArgs(spec: RunSpec): string[] {
     '-v', `${spec.hostDir}:/work`,
     ...(spec.authFile
       ? ['-v', `${spec.authFile}:/root/.local/share/opencode/auth.json:ro`]
+      : []),
+    // A fresh container has no models.dev cache, so OpenCode answers from the catalogue
+    // bundled into its binary until a background fetch lands. The September 13 shards lost
+    // that race: their bundled catalogue lacked two W&B models the host listed, and every
+    // agent on them failed with ProviderModelNotFoundError. Pinning the host's catalogue
+    // read-only, with the fetch off, makes the shard resolve what the host validated.
+    // Read-only also keeps agents from rewriting provider endpoints in it.
+    ...(spec.modelsFile
+      ? [
+          '-v', `${spec.modelsFile}:/root/.cache/opencode/models.json:ro`,
+          '-e', 'OPENCODE_DISABLE_MODELS_FETCH=1',
+        ]
       : []),
     spec.image,
   ]

@@ -108,6 +108,47 @@ describe('OpenCodeAgentRunner', () => {
   })
 })
 
+describe('OpenCodeAgentRunner model availability', () => {
+  class CountingClient extends FakeClient {
+    sessions = 0
+    async createSession() { this.sessions++; return { id: 'ses_1' } }
+  }
+  const reason = 'Model unavailable in Docker runtime (OpenCode 1.18.21, shard 0): wandb/x/y is not in its model catalogue'
+  const onModel = (modelId: string) => ({ ...ctx('s'), genome: { ...ctx('s').genome, modelId } })
+
+  test('refuses a model the runtime does not list before any session or prompt', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    const c = new CountingClient(okResponse)
+    const checked: string[] = []
+    const runner = new OpenCodeAgentRunner(c as never, sb, {
+      modelUnavailable: (handle, modelId) => { checked.push(`${handle.agentId} ${modelId}`); return reason },
+    })
+    const res = await runner.run(h, onModel('wandb/x/y'))
+
+    expect(checked).toEqual(['a1 wandb/x/y'])
+    expect(c.sessions).toBe(0)
+    expect(c.lastBody).toBeNull()
+    expect(res.status).toBe('error')
+    expect(res.failure).toEqual({ message: reason, code: 'MODEL_UNAVAILABLE' })
+    expect(res.errorText).toBe(reason)
+    // Nothing was dispatched, so zero usage is a fact rather than a placeholder.
+    expect(res.usageKnown).not.toBe(false)
+    expect(res.tokensIn + res.tokensOut + res.costUsd).toBe(0)
+    expect(() => runner.assertReadyForRound()).not.toThrow()
+  })
+
+  test('runs normally when the runtime lists the model', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'x')
+    const c = new CountingClient(okResponse)
+    const res = await new OpenCodeAgentRunner(c as never, sb, { modelUnavailable: () => null }).run(h, onModel('wandb/x/y'))
+    expect(c.sessions).toBe(1)
+    expect(res.status).toBe('ok')
+  })
+})
+
 describe('abortAll', () => {
   // Sessions need distinct ids and a prompt that stays in flight until the test
   // says otherwise — otherwise there is nothing tracked for abortAll to abort.

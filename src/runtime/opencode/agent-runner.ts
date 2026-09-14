@@ -1,5 +1,5 @@
 import { resolve as resolvePath } from 'node:path'
-import { describeFailure, describeProviderError, errorTextFor } from '../../core/failure.js'
+import { describeFailure, describeProviderError, errorTextFor, failureFromText } from '../../core/failure.js'
 import { serializeGenome } from '../../core/genome.js'
 import type { QuiesceStatus } from '../../engine/capture.js'
 import type { AgentRunContext, AgentRunner, AgentRunResult } from '../agent-runner.js'
@@ -19,6 +19,12 @@ export interface AgentRunnerOptions {
    * every event for this agent has already been emitted and dropped.
    */
   onSessionCreated?: (agentId: string, sessionId: string) => void
+  /**
+   * Why the runtime serving this handle cannot resolve `modelId`, or null when it can or
+   * nobody knows. Consulted before any session exists, so a model the runtime lacks fails
+   * as itself instead of as an OpenCode 500 after a session and a prompt.
+   */
+  modelUnavailable?: (handle: AgentHandle, modelId: string) => string | null
 }
 
 /** The contract every agent is held to; the judged artifact is SUBMISSION.md. */
@@ -124,6 +130,19 @@ export class OpenCodeAgentRunner implements AgentRunner {
     this.assertAvailable(handle.agentId, handle.workspacePath)
     const started = Date.now()
     const zero = { tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0 }
+
+    let unavailable: string | null = null
+    try {
+      unavailable = this.options.modelUnavailable?.(handle, ctx.genome.modelId) ?? null
+    } catch {
+      /* a broken check must not fail a worker the runtime might serve */
+    }
+    if (unavailable !== null) {
+      // Nothing is tracked or dispatched, so the zero usage below is observed, not assumed.
+      const failure = failureFromText(unavailable, 'MODEL_UNAVAILABLE')
+      return { status: 'error', errorText: failure.message, failure, ...zero, durationMs: Date.now() - started }
+    }
+
     const client = this.resolve(handle)
 
     let settle = (): void => {}
