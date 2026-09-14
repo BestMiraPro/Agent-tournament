@@ -1,0 +1,60 @@
+{
+  "_source": "Captured 2026-09-14 from opencode 1.18.21 (the version pinned in docker/Dockerfile.agent): GET /doc for the prompt body and event schemas, GET /agent?directory=<dir> for a directory holding the body-less competitor profile. No prompt was sent. Host-specific external_directory allowances (skills, tool-output, temp) are omitted; only rules for the permissions the profile sets remain, in OpenCode's order.",
+  "promptBodyProperties": ["messageID", "model", "agent", "noReply", "tools", "format", "system", "variant", "parts"],
+  "competitorAgent": {
+    "name": "competitor",
+    "mode": "all",
+    "model": { "modelID": "deepseek-ai/DeepSeek-V4-Pro", "providerID": "wandb" },
+    "temperature": 1.25,
+    "prompt": "",
+    "rules": [
+      { "permission": "doom_loop", "pattern": "*", "action": "ask" },
+      { "permission": "external_directory", "pattern": "*", "action": "ask" },
+      { "permission": "question", "pattern": "*", "action": "deny" },
+      { "permission": "read", "pattern": "*", "action": "allow" },
+      { "permission": "read", "pattern": "*.env", "action": "ask" },
+      { "permission": "read", "pattern": "*.env.*", "action": "ask" },
+      { "permission": "read", "pattern": "*.env.example", "action": "allow" },
+      { "permission": "edit", "pattern": "*", "action": "allow" },
+      { "permission": "bash", "pattern": "*", "action": "allow" },
+      { "permission": "webfetch", "pattern": "*", "action": "deny" },
+      { "permission": "external_directory", "pattern": "*", "action": "deny" },
+      { "permission": "doom_loop", "pattern": "*", "action": "deny" },
+      { "permission": "question", "pattern": "*", "action": "deny" },
+      { "permission": "read", "pattern": "*", "action": "allow" },
+      { "permission": "read", "pattern": "*.env", "action": "deny" },
+      { "permission": "read", "pattern": "*.env.*", "action": "deny" },
+      { "permission": "read", "pattern": "*.env.example", "action": "allow" }
+    ]
+  },
+  "defaultBuildExternalDirectory": { "permission": "external_directory", "pattern": "*", "action": "ask" },
+  "events": {
+    "permissionAsked": {
+      "directory": "/work/0db9903d-e9fd-41b5-9bac-e296cdba63e4",
+      "payload": {
+        "id": "evt_permission_asked",
+        "type": "permission.asked",
+        "properties": {
+          "id": "per_09ae707db001hkVxFvycSDQcW0",
+          "sessionID": "ses_f65192873ffeQvWfVwbTavXRfs",
+          "permission": "external_directory",
+          "patterns": ["/tmp/*"],
+          "metadata": {},
+          "always": ["/tmp/*"]
+        }
+      }
+    },
+    "permissionReplied": {
+      "directory": "/work/0db9903d-e9fd-41b5-9bac-e296cdba63e4",
+      "payload": {
+        "id": "evt_permission_replied",
+        "type": "permission.replied",
+        "properties": {
+          "sessionID": "ses_f65192873ffeQvWfVwbTavXRfs",
+          "requestID": "per_09ae707db001hkVxFvycSDQcW0",
+          "reply": "reject"
+        }
+      }
+    }
+  }
+}

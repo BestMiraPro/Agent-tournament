@@ -9,6 +9,9 @@ import { splitModelId } from './model-id.js'
 
 export const SUBMISSION_FILE = 'SUBMISSION.md'
 
+/** The profile PREPARE writes to `.opencode/agents/competitor.md`; OpenCode names agents by file. */
+export const COMPETITOR_AGENT = 'competitor'
+
 /** Resolves which OpenCode server (client) serves a given agent's shard. */
 export type ClientResolver = (handle: AgentHandle) => OpenCodeClient
 
@@ -175,6 +178,9 @@ export class OpenCodeAgentRunner implements AgentRunner {
 
       const body = {
         model: splitModelId(ctx.genome.modelId),
+        // Named explicitly: without it OpenCode runs its implicit `build` agent and the
+        // profile's temperature and unattended permission policy never apply.
+        agent: COMPETITOR_AGENT,
         system: ctx.genome.strategyMd,
         parts: [{ type: 'text' as const, text: buildAgentPrompt(ctx.goalMd) }],
       }

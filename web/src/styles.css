@@ -240,6 +240,8 @@ textarea:focus-visible, .cell--selectable:focus-visible {
 .cell__usage { font-size: .68rem; color: var(--text-faint); }
 /* A failure is shown on the card where it happened, not only inside the drawer. */
 .cell__failure { margin-top: .15rem; font-size: .66rem; color: var(--failed); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* Stalled on an unanswered permission request: distinct from both work and failure. */
+.cell__permission { margin-top: .15rem; font-size: .66rem; color: #f5b041; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 /* Ranked but failed: never styled as a podium place, whatever the number says. */
 .cell__rank--failed { color: var(--failed); background: none; box-shadow: none; border-color: rgba(255, 95, 95, .4); }
 

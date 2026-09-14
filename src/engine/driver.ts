@@ -1,5 +1,5 @@
 import { describeFailure, errorTextFor, failureFromText } from '../core/failure.js'
-import { serializeGenome } from '../core/genome.js'
+import { serializeCompetitorProfile } from '../core/genome.js'
 import { planSelection } from '../core/selection.js'
 import type { Genome, RunConfig, SubmissionStatus } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
@@ -256,7 +256,7 @@ export class TournamentEngine {
         await this.d.sandbox.writeFile(
           h,
           '.opencode/agents/competitor.md',
-          serializeGenome(p.genome, { label: p.agent.label }),
+          serializeCompetitorProfile(p.genome, { label: p.agent.label }),
         )
         return h
       }, {

@@ -24,6 +24,25 @@ export type EngineEvent =
   | { type: 'agent.activity'; runId: string; agentId: string; kind: 'tool' | 'text' | 'file'; detail: string }
   | {
       /**
+       * An OpenCode permission request for this agent, and its answer. A request that is
+       * never answered stalls the agent while it still looks "working", so it is surfaced.
+       */
+      type: 'agent.permission'
+      runId: string
+      agentId: string
+      requestId: string
+      state: 'asked' | 'replied'
+      /** Present when asked. */
+      permission?: string
+      /** Present when asked; bounded. */
+      patterns?: string[]
+      /** Present when replied. */
+      reply?: 'once' | 'always' | 'reject'
+      /** When the bridge saw it, so a wait can show its age. */
+      at: number
+    }
+  | {
+      /**
        * The agent's terminal usage totals, sent at most once per attempt and only when
        * they were actually observed. Consumers set these values; they never add them up.
        */

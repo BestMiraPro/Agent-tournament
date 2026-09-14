@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { mapOpenCodeEvent, nextBridgeDelay, parseSseFrames, startEventBridge } from '../../src/server/event-bridge.js'
 
@@ -67,7 +68,7 @@ describe('mapOpenCodeEvent', () => {
       { type: 'file.edited', properties: { sessionID: 'ses_1', file: 'SUBMISSION.md' } },
       'run-1', lookup,
     )
-    expect(e?.kind).toBe('file')
+    expect(e?.type === 'agent.activity' && e.kind).toBe('file')
   })
 
   test('returns null for an unmapped session', () => {
@@ -82,6 +83,40 @@ describe('mapOpenCodeEvent', () => {
 
   test('returns null for an event with no session id', () => {
     expect(mapOpenCodeEvent({ type: 'file.edited', properties: {} }, 'run-1', lookup)).toBeNull()
+  })
+
+  describe('permission requests', () => {
+    const contract = JSON.parse(readFileSync('test/fixtures/opencode-1.18.21/permission-contract.json', 'utf8'))
+    const shardLookup = (sessionId: string) => (sessionId === 'ses_f65192873ffeQvWfVwbTavXRfs' ? 'agent-2' : null)
+
+    test('an asked permission becomes a visible waiting state with its request and age anchor', () => {
+      const e = mapOpenCodeEvent(contract.events.permissionAsked.payload, 'run-1', shardLookup, () => 1_000)
+      expect(e).toEqual({
+        type: 'agent.permission', runId: 'run-1', agentId: 'agent-2',
+        requestId: 'per_09ae707db001hkVxFvycSDQcW0', state: 'asked',
+        permission: 'external_directory', patterns: ['/tmp/*'], at: 1_000,
+      })
+    })
+
+    test('a reply resolves that request', () => {
+      const e = mapOpenCodeEvent(contract.events.permissionReplied.payload, 'run-1', shardLookup, () => 2_000)
+      expect(e).toEqual({
+        type: 'agent.permission', runId: 'run-1', agentId: 'agent-2',
+        requestId: 'per_09ae707db001hkVxFvycSDQcW0', state: 'replied', reply: 'reject', at: 2_000,
+      })
+    })
+
+    test('request details are bounded and malformed requests are ignored', () => {
+      const asked = contract.events.permissionAsked.payload
+      const many = mapOpenCodeEvent(
+        { ...asked, properties: { ...asked.properties, patterns: Array.from({ length: 20 }, (_, i) => `/p${i}/${'x'.repeat(500)}`) } },
+        'run-1', shardLookup,
+      )
+      expect(many?.type === 'agent.permission' && many.patterns).toHaveLength(5)
+      expect(many?.type === 'agent.permission' && many.patterns!.every((p) => p.length <= 200)).toBe(true)
+      expect(mapOpenCodeEvent({ ...asked, properties: { ...asked.properties, id: 42 } }, 'run-1', shardLookup)).toBeNull()
+      expect(mapOpenCodeEvent(asked, 'run-1', lookup)).toBeNull()
+    })
   })
 })
 

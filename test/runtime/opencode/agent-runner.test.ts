@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, test, vi } from 'vitest'
-import { OpenCodeAgentRunner, QUIESCE_GRACE_MS, buildAgentPrompt } from '../../../src/runtime/opencode/agent-runner.js'
+import { COMPETITOR_AGENT, OpenCodeAgentRunner, QUIESCE_GRACE_MS, buildAgentPrompt } from '../../../src/runtime/opencode/agent-runner.js'
 import { MockSandbox } from '../../../src/runtime/mock-sandbox.js'
 import type { PromptBody, PromptResponse } from '../../../src/runtime/opencode/client.js'
 import { OpenCodeHttpError } from '../../../src/runtime/opencode/client.js'
@@ -55,6 +56,21 @@ describe('OpenCodeAgentRunner', () => {
     const g = { ...ctx('s'), genome: { ...ctx('s').genome, modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash' } }
     await new OpenCodeAgentRunner(c as never, sb).run(h, g)
     expect(c.lastBody?.model).toEqual({ providerID: 'wandb', modelID: 'deepseek-ai/DeepSeek-V4-Flash' })
+  })
+
+  test('selects the competitor profile by name, using a field the pinned runtime accepts', async () => {
+    // Without it every session ran as OpenCode's implicit `build` agent (the September 13
+    // logs say agent=build), so the profile's temperature and permissions never applied.
+    const contract = JSON.parse(readFileSync('test/fixtures/opencode-1.18.21/permission-contract.json', 'utf8'))
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'x')
+    const c = new FakeClient(okResponse)
+    await new OpenCodeAgentRunner(c as never, sb).run(h, ctx('BE CONCISE'))
+    expect(c.lastBody?.agent).toBe(COMPETITOR_AGENT)
+    expect(COMPETITOR_AGENT).toBe(contract.competitorAgent.name)
+    expect(contract.promptBodyProperties).toContain('agent')
+    expect(c.lastBody?.system).toBe('BE CONCISE')
   })
 
   test('reports ok and carries cost and cache tokens through', async () => {

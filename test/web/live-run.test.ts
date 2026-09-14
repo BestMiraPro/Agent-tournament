@@ -74,6 +74,37 @@ describe('liveReducer', () => {
   })
 })
 
+describe('permission waits', () => {
+  const asked = {
+    type: 'agent.permission', runId: 'r', agentId: 'a', requestId: 'per_1', state: 'asked',
+    permission: 'external_directory', patterns: ['/tmp/*'], at: 5_000,
+  }
+
+  test('an asked permission shows the agent waiting, from when it was asked', () => {
+    let s = liveReducer(initialLiveState, { type: 'agent.status', runId: 'r', agentId: 'a', status: 'running' })
+    s = liveReducer(s, asked)
+    expect(s.agents.a!.status).toBe('running')
+    expect(s.agents.a!.permission).toEqual({ requestId: 'per_1', permission: 'external_directory', patterns: ['/tmp/*'], since: 5_000 })
+  })
+
+  test('a reply to that request ends the wait and says how it was answered', () => {
+    let s = liveReducer(initialLiveState, asked)
+    s = liveReducer(s, { type: 'agent.permission', runId: 'r', agentId: 'a', requestId: 'per_other', state: 'replied', reply: 'once', at: 6_000 })
+    expect(s.agents.a!.permission?.requestId).toBe('per_1')
+    s = liveReducer(s, { type: 'agent.permission', runId: 'r', agentId: 'a', requestId: 'per_1', state: 'replied', reply: 'reject', at: 7_000 })
+    expect(s.agents.a!.permission).toBeNull()
+    expect(s.agents.a!.activity).toBe('Permission rejected: external_directory')
+  })
+
+  test('an ended attempt or a new round is not left waiting', () => {
+    let s = liveReducer(initialLiveState, asked)
+    s = liveReducer(s, { type: 'agent.status', runId: 'r', agentId: 'a', status: 'failed' })
+    expect(s.agents.a!.permission).toBeNull()
+    s = liveReducer(liveReducer(initialLiveState, asked), { type: 'round.status', runId: 'r', roundIdx: 2, status: 'preparing' })
+    expect(s.agents.a?.permission ?? null).toBeNull()
+  })
+})
+
 describe('nextDelay', () => {
   test('attempt 0 waits 1s', () => {
     expect(nextDelay(0)).toBe(1000)

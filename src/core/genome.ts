@@ -20,6 +20,45 @@ export function serializeGenome(g: Genome, opts: { label: string }): string {
   ].join('\n')
 }
 
+/**
+ * The OpenCode agent profile an agent runs as: `.opencode/agents/competitor.md`, selected by
+ * name on every prompt.
+ *
+ * Frontmatter only. OpenCode turns a profile body into the agent prompt, which replaces its
+ * base system prompt (the one that teaches the model its tools); the evolving strategy keeps
+ * arriving through the prompt's `system` field, as before.
+ *
+ * The permission block is the unattended policy, verified against opencode 1.18.21 (see
+ * test/fixtures/opencode-1.18.21/permission-contract.json). Rules are appended after the
+ * runtime defaults and the last match wins. Every default `ask` a competitor can reach is
+ * answered here, because nobody is watching to answer it: on September 13 a Muse Spark
+ * agent asked for `external_directory /tmp/*` and waited until it was cancelled.
+ * Denials are ordinary tool errors the agent can work around; nothing is widened beyond
+ * the workspace.
+ */
+export function serializeCompetitorProfile(g: Genome, opts: { label: string }): string {
+  return [
+    '---',
+    `description: ${opts.label}`,
+    `model: ${g.modelId}`,
+    `temperature: ${g.temperature}`,
+    'permission:',
+    '  edit: allow',
+    '  bash: allow',
+    '  webfetch: deny',
+    '  external_directory: deny',
+    '  doom_loop: deny',
+    '  question: deny',
+    '  read:',
+    '    "*": allow',
+    '    "*.env": deny',
+    '    "*.env.*": deny',
+    '    "*.env.example": allow',
+    '---',
+    '',
+  ].join('\n')
+}
+
 export function parseGenome(md: string): Genome {
   const normalized = md.replace(/\r\n/g, '\n')
   if (!normalized.startsWith('---\n')) {

@@ -37,6 +37,9 @@ export function nextBridgeDelay(attempt: number): number {
   return Math.min(1000 * 2 ** attempt, 10_000)
 }
 
+/** A permission request's patterns are shown on a card; a handful says enough. */
+const MAX_PERMISSION_PATTERNS = 5
+
 interface RawEvent {
   type?: string
   properties?: Record<string, unknown>
@@ -52,7 +55,8 @@ export function mapOpenCodeEvent(
   raw: RawEvent,
   runId: string,
   lookupAgent: (sessionId: string) => string | null,
-): Extract<EngineEvent, { type: 'agent.activity' }> | null {
+  now: () => number = Date.now,
+): Extract<EngineEvent, { type: 'agent.activity' | 'agent.permission' }> | null {
   const sessionId = raw.properties?.sessionID
   if (typeof sessionId !== 'string') return null
   const agentId = lookupAgent(sessionId)
@@ -62,6 +66,24 @@ export function mapOpenCodeEvent(
     ({ type: 'agent.activity' as const, runId, agentId, kind, detail })
 
   switch (raw.type) {
+    // Shapes verified against opencode 1.18.21's EventPermissionAsked / EventPermissionReplied.
+    case 'permission.asked': {
+      const p = raw.properties ?? {}
+      if (typeof p.id !== 'string' || typeof p.permission !== 'string') return null
+      const patterns = Array.isArray(p.patterns)
+        ? p.patterns.filter((x): x is string => typeof x === 'string').slice(0, MAX_PERMISSION_PATTERNS).map((x) => x.slice(0, 200))
+        : []
+      return {
+        type: 'agent.permission', runId, agentId, requestId: p.id, state: 'asked',
+        permission: p.permission.slice(0, 80), patterns, at: now(),
+      }
+    }
+    case 'permission.replied': {
+      const p = raw.properties ?? {}
+      if (typeof p.requestID !== 'string') return null
+      if (p.reply !== 'once' && p.reply !== 'always' && p.reply !== 'reject') return null
+      return { type: 'agent.permission', runId, agentId, requestId: p.requestID, state: 'replied', reply: p.reply, at: now() }
+    }
     case 'message.part.updated': {
       const part = raw.properties?.part as { type?: string; tool?: string; text?: string } | undefined
       if (part?.type === 'tool') return activity('tool', part.tool ?? 'tool')

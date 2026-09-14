@@ -137,7 +137,7 @@ describe('TournamentEngine', () => {
     expect(scores.some((s) => s.score === 0)).toBe(true)
   })
 
-  test('writes the genome into the agent workspace so it can be read by an agent runner', async () => {
+  test('writes the competitor profile into the agent workspace, without the strategy', async () => {
     const { engine, repos, sandbox } = makeMockEngine({ seed: 1, populationSize: 4 })
     const run = engine.createRun('test', 'goal')
     const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
@@ -150,9 +150,13 @@ describe('TournamentEngine', () => {
     expect(written).not.toBeNull()
 
     const parsed = parseGenome(written!)
-    expect(parsed.strategyMd).toBe(storedGenome.strategyMd)
     expect(parsed.modelId).toBe(storedGenome.modelId)
     expect(parsed.temperature).toBe(storedGenome.temperature)
+    // A profile body would replace OpenCode's base system prompt; the strategy travels in
+    // the prompt's `system` field instead, so the profile carries none.
+    expect(parsed.strategyMd).toBe('')
+    expect(written).not.toContain(storedGenome.strategyMd)
+    expect(written).toContain('external_directory: deny')
   })
 
   test('records the resolved criteria on the round', async () => {

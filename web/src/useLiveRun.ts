@@ -11,6 +11,16 @@ export interface LiveAgent {
   failure: AgentFailure | null
   /** Whether usage was actually reported. Until it is, the counts above are not facts. */
   usageReported: boolean
+  /** An unanswered OpenCode permission request: the agent is stalled, not working. */
+  permission?: PendingPermission | null
+}
+
+export interface PendingPermission {
+  requestId: string
+  permission: string
+  patterns: string[]
+  /** When the request was seen (ms since epoch). */
+  since: number
 }
 
 export interface LiveScore {
@@ -53,7 +63,7 @@ function stateFromSnapshot(snapshot: RunSnapshot): LiveState {
   }
 }
 
-const blank: LiveAgent = { status: 'pending', activity: '', tokensIn: 0, tokensOut: 0, costUsd: 0, failure: null, usageReported: false }
+const blank: LiveAgent = { status: 'pending', activity: '', tokensIn: 0, tokensOut: 0, costUsd: 0, failure: null, usageReported: false, permission: null }
 
 /** Pure so it can be tested without a browser or a socket. */
 export function liveReducer(state: LiveState, event: { type: string } & Record<string, unknown>): LiveState {
@@ -80,7 +90,34 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
       const failure = status === 'failed' ? ((event.failure as AgentFailure | undefined) ?? null) : null
       return {
         ...state,
-        agents: { ...state.agents, [agentId]: { ...current, status, failure } },
+        agents: {
+          ...state.agents,
+          // An attempt that ended is not waiting on anyone any more.
+          [agentId]: { ...current, status, failure, permission: status === 'running' || status === 'pending' ? current.permission ?? null : null },
+        },
+      }
+    }
+    case 'agent.permission': {
+      if (!agentId) return state
+      const requestId = event.requestId as string
+      if (event.state === 'asked') {
+        const permission: PendingPermission = {
+          requestId,
+          permission: event.permission as string,
+          patterns: (event.patterns as string[] | undefined) ?? [],
+          since: event.at as number,
+        }
+        return { ...state, agents: { ...state.agents, [agentId]: { ...current, permission } } }
+      }
+      // Only the reply to the request being shown ends that wait.
+      if (current.permission?.requestId !== requestId) return state
+      const answered = event.reply === 'reject' ? 'rejected' : 'granted'
+      return {
+        ...state,
+        agents: {
+          ...state.agents,
+          [agentId]: { ...current, permission: null, activity: `Permission ${answered}: ${current.permission.permission}` },
+        },
       }
     }
     case 'agent.activity':

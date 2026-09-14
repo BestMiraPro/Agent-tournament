@@ -1,6 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
 import type { SnapshotAgent } from '../api.js'
-import type { LiveAgent, LiveState } from '../useLiveRun.js'
+import type { LiveAgent, LiveState, PendingPermission } from '../useLiveRun.js'
 
 const STATUS_LABEL: Record<string, string> = {
   pending: 'waiting',
@@ -22,6 +22,14 @@ export function usageLabel(live: LiveAgent | undefined): string {
   if (!live) return ' '
   if (live.usageReported) return `${live.tokensIn + live.tokensOut} tok`
   return live.status === 'done' || live.status === 'failed' ? 'Usage unavailable' : 'Usage pending'
+}
+
+/** What an agent stalled on an unanswered permission request is waiting for, and for how long. */
+export function permissionLabel(p: PendingPermission, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - p.since) / 1000))
+  const age = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`
+  const target = p.patterns.length > 0 ? ` ${p.patterns.join(', ')}` : ''
+  return `Waiting for permission: ${p.permission}${target} · ${age}`
 }
 
 export function AgentGrid({ agents, live, onSelect }: {
@@ -88,7 +96,13 @@ export function AgentGrid({ agents, live, onSelect }: {
               {l?.failure && (
                 <div className="cell__failure" title={l.failure.message}>{l.failure.message}</div>
               )}
-              <div className="cell__activity">{l?.activity || ' '}</div>
+              {l?.permission ? (
+                <div className="cell__permission" title={permissionLabel(l.permission, Date.now())}>
+                  {permissionLabel(l.permission, Date.now())}
+                </div>
+              ) : (
+                <div className="cell__activity">{l?.activity || ' '}</div>
+              )}
               <div className="cell__usage">{usageLabel(l)}</div>
             </div>
           )

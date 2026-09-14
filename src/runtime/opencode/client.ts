@@ -36,6 +36,8 @@ export interface PromptResponse {
 
 export interface PromptBody {
   model: OpenCodeModelRef
+  /** Named agent profile; OpenCode uses its implicit `build` agent when absent. */
+  agent?: string
   system?: string
   parts: { type: 'text'; text: string }[]
   format?: { type: 'json_schema'; schema: unknown; retryCount?: number }
