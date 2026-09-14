@@ -1,75 +1,104 @@
-import { describe, expect, test, vi, afterEach } from 'vitest'
-import { OpenCodeClient, OpenCodeHttpError, extractStructured, extractText } from '../../../src/runtime/opencode/client.js'
+import { createServer, type Server, type ServerResponse } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { describe, expect, test, afterEach } from 'vitest'
+import {
+  OpenCodeClient,
+  OpenCodeHttpError,
+  extractStructured,
+  extractText,
+  type HttpTransport,
+} from '../../../src/runtime/opencode/client.js'
 
-afterEach(() => vi.unstubAllGlobals())
+const servers: Server[] = []
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((s) => new Promise<void>((resolve) => {
+    s.closeAllConnections()
+    s.close(() => resolve())
+  })))
+})
 
-const stubFetch = (impl: (url: string, init: RequestInit) => Promise<Response>) =>
-  vi.stubGlobal('fetch', vi.fn(impl as unknown as typeof fetch))
+/** A loopback server answering every request with `respond`; records each request's url and body. */
+async function serve(respond: (res: ServerResponse, url: string, body: string) => void) {
+  const seen: { url: string; body: string }[] = []
+  const server = createServer((req, res) => {
+    let body = ''
+    req.on('data', (c: Buffer) => { body += c.toString() })
+    req.on('end', () => {
+      seen.push({ url: req.url ?? '', body })
+      respond(res, req.url ?? '', body)
+    })
+  })
+  servers.push(server)
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  return { baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, seen }
+}
 
-const ok = (body: unknown) =>
-  new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+const ok = (res: ServerResponse, body: unknown) => {
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(body))
+}
+const status = (res: ServerResponse, code: number, text: string) => {
+  res.writeHead(code)
+  res.end(text)
+}
 
 describe('OpenCodeClient', () => {
   test('createSession passes the directory as a query parameter', async () => {
-    let seen = ''
-    stubFetch(async (url) => { seen = url; return ok({ id: 'ses_1' }) })
-    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
+    const srv = await serve((res) => ok(res, { id: 'ses_1' }))
+    const c = new OpenCodeClient({ baseUrl: srv.baseUrl, timeoutMs: 1000 })
     const s = await c.createSession('/work/agent-01', 'title')
     expect(s.id).toBe('ses_1')
-    expect(seen).toContain('directory=%2Fwork%2Fagent-01')
+    expect(srv.seen[0]!.url).toContain('directory=%2Fwork%2Fagent-01')
   })
 
   test('version reads the runtime version from the health endpoint', async () => {
-    let seen = ''
-    stubFetch(async (url) => { seen = url; return ok({ healthy: true, version: '1.18.21' }) })
-    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
+    const srv = await serve((res) => ok(res, { healthy: true, version: '1.18.21' }))
+    const c = new OpenCodeClient({ baseUrl: srv.baseUrl, timeoutMs: 1000 })
     expect(await c.version()).toBe('1.18.21')
-    expect(seen).toContain('/global/health')
+    expect(srv.seen[0]!.url).toContain('/global/health')
   })
 
   test('version is null when the server reports no usable version', async () => {
-    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
-    stubFetch(async () => ok({ healthy: true }))
+    let reply: (res: ServerResponse) => void = (res) => ok(res, { healthy: true })
+    const srv = await serve((res) => reply(res))
+    const c = new OpenCodeClient({ baseUrl: srv.baseUrl, timeoutMs: 1000 })
     expect(await c.version()).toBeNull()
-    stubFetch(async () => ok({ healthy: true, version: `1.0 ${'x'.repeat(80)}` }))
+    reply = (res) => ok(res, { healthy: true, version: `1.0 ${'x'.repeat(80)}` })
     expect(await c.version()).toBeNull()
-    stubFetch(async () => new Response('down', { status: 503 }))
+    reply = (res) => status(res, 503, 'down')
     expect(await c.version()).toBeNull()
   })
 
   test('throws a descriptive error on a non-2xx response', async () => {
-    stubFetch(async () => new Response('nope', { status: 500 }))
-    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
+    const srv = await serve((res) => status(res, 500, 'nope'))
+    const c = new OpenCodeClient({ baseUrl: srv.baseUrl, timeoutMs: 1000 })
     await expect(c.createSession('/w', 't')).rejects.toThrow(/500/)
   })
 
   test('aborts a request that exceeds the timeout', async () => {
-    stubFetch((_url, init) =>
-      new Promise((_resolve, reject) => {
-        init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
-      }),
-    )
-    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 30 })
-    await expect(c.createSession('/w', 't')).rejects.toThrow()
+    const srv = await serve(() => { /* never answers */ })
+    const c = new OpenCodeClient({ baseUrl: srv.baseUrl, timeoutMs: 30 })
+    await expect(c.createSession('/w', 't')).rejects.toMatchObject({ name: 'OpenCodeTimeoutError' })
   })
 
   test('normalizes its own deadline but preserves an unrelated AbortError', async () => {
-    stubFetch((_url, init) => new Promise((_resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
-    }))
-    const c = new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 5 })
+    const hanging: HttpTransport = ({ signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+    })
+    const c = new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 5, transport: hanging })
     await expect(c.createSession('/w', 't')).rejects.toMatchObject({ name: 'OpenCodeTimeoutError' })
     const unrelated = new DOMException('other cancellation', 'AbortError')
-    stubFetch(async () => { throw unrelated })
-    await expect(c.createSession('/w', 't')).rejects.toBe(unrelated)
+    const throwing: HttpTransport = async () => { throw unrelated }
+    const d = new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 1000, transport: throwing })
+    await expect(d.createSession('/w', 't')).rejects.toBe(unrelated)
   })
 
   test('a 500 with an OpenCode error body keeps its status, name and ref structured', async () => {
     // The exact body stored for run 6eb22c7c: the ref is what maps a generic 500 to the
     // ProviderModelNotFoundError in the shard's own log, so it must survive as data.
     const body = '{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_0672e772"}}'
-    stubFetch(async () => new Response(body, { status: 500 }))
-    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
+    const srv = await serve((res) => status(res, 500, body))
+    const c = new OpenCodeClient({ baseUrl: srv.baseUrl, timeoutMs: 1000 })
     const error = await c.prompt('ses_1', '/w', { model: { providerID: 'p', modelID: 'm' }, parts: [] })
       .then(() => null, (e: unknown) => e)
     expect(error).toBeInstanceOf(OpenCodeHttpError)
@@ -78,8 +107,8 @@ describe('OpenCodeClient', () => {
   })
 
   test('a non-JSON error body still reports the status, with no name or ref', async () => {
-    stubFetch(async () => new Response('nope', { status: 503 }))
-    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
+    const srv = await serve((res) => status(res, 503, 'nope'))
+    const c = new OpenCodeClient({ baseUrl: srv.baseUrl, timeoutMs: 1000 })
     const error = await c.createSession('/w', 't').then(() => null, (e: unknown) => e)
     expect(error).toBeInstanceOf(OpenCodeHttpError)
     expect(error).toMatchObject({ httpStatus: 503 })
@@ -88,22 +117,22 @@ describe('OpenCodeClient', () => {
   })
 
   test('a transport failure reaches the caller with its cause intact', async () => {
-    const transport = new TypeError('fetch failed', { cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } })
-    stubFetch(async () => { throw transport })
-    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
+    const failure = new TypeError('fetch failed', { cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } })
+    const transport: HttpTransport = async () => { throw failure }
+    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000, transport })
     const error = await c.createSession('/w', 't').then(() => null, (e: unknown) => e)
     expect((error as { cause?: { code?: string } }).cause?.code).toBe('UND_ERR_HEADERS_TIMEOUT')
   })
 
   test('prompt sends model, system and parts', async () => {
-    let body: any = null
-    stubFetch(async (_url, init) => { body = JSON.parse(String(init.body)); return ok({ info: {}, parts: [] }) })
-    const c = new OpenCodeClient({ baseUrl: 'http://x:1', timeoutMs: 1000 })
+    const srv = await serve((res) => ok(res, { info: {}, parts: [] }))
+    const c = new OpenCodeClient({ baseUrl: srv.baseUrl, timeoutMs: 1000 })
     await c.prompt('ses_1', '/w', {
       model: { providerID: 'p', modelID: 'm' },
       system: 'STRATEGY',
       parts: [{ type: 'text', text: 'hello' }],
     })
+    const body = JSON.parse(srv.seen[0]!.body)
     expect(body.model).toEqual({ providerID: 'p', modelID: 'm' })
     expect(body.system).toBe('STRATEGY')
     expect(body.parts[0].text).toBe('hello')

@@ -67,6 +67,16 @@ export function describeFailure(e: unknown): AgentFailure {
   if (e instanceof Error && e.name === 'OpenCodeTimeoutError') {
     return { message: cap(redact(e.message), MAX_MESSAGE), code: 'OPENCODE_TIMEOUT' }
   }
+  if (e instanceof Error && e.name === 'OpenCodeTransportError') {
+    // The socket failed; this says nothing about whether the remote agent stopped.
+    const code = causeCode(e)
+    const cause = (e as { cause?: unknown }).cause
+    const detail = cause instanceof Error ? cause.message : e.message
+    return {
+      message: cap(redact(`Transport failure: ${detail}${code ? ` (${code})` : ''}`), MAX_MESSAGE),
+      ...(code ? { code } : {}),
+    }
+  }
   if (e instanceof Error) {
     const code = causeCode(e)
     if (code) {

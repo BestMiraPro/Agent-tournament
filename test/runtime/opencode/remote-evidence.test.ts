@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { OpenCodeAgentRunner, QUIESCE_GRACE_MS } from '../../../src/runtime/opencode/agent-runner.js'
-import { OpenCodeClient, type PromptResponse } from '../../../src/runtime/opencode/client.js'
+import { OpenCodeClient, type HttpTransport, type PromptResponse } from '../../../src/runtime/opencode/client.js'
 import { MockSandbox } from '../../../src/runtime/mock-sandbox.js'
 import { DockerSandbox } from '../../../src/runtime/docker/sandbox.js'
 import { captureSubmission, quiesceAgent, verifyCapture } from '../../../src/engine/capture.js'
@@ -180,17 +180,16 @@ describe('remote execution evidence', () => {
   test('real client fetch deadline is a timeout even when AbortSignal rejects before the runner timer', async () => {
     const { sandbox, handle } = await fixture()
     let aborts = 0
-    const fakeFetch: typeof fetch = async (input, init) => {
-      const path = new URL(String(input)).pathname
-      if (path === '/session') return Response.json({ id: 'session' })
-      if (path.endsWith('/abort')) { aborts++; return Response.json(null) }
-      if (path.endsWith('/message')) return new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+    const transport: HttpTransport = async ({ url, signal }) => {
+      const path = url.pathname
+      if (path === '/session') return { status: 200, text: JSON.stringify({ id: 'session' }) }
+      if (path.endsWith('/abort')) { aborts++; return { status: 200, text: 'null' } }
+      if (path.endsWith('/message')) return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
       })
-      throw new Error(`unexpected fetch ${path}`)
+      throw new Error(`unexpected request ${path}`)
     }
-    vi.stubGlobal('fetch', fakeFetch)
-    const runner = new OpenCodeAgentRunner(new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 50 }), sandbox)
+    const runner = new OpenCodeAgentRunner(new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 50, transport }), sandbox)
     const run = runner.run(handle, context())
     await vi.advanceTimersByTimeAsync(50)
     expect((await run).status).toBe('timeout')
@@ -200,15 +199,14 @@ describe('remote execution evidence', () => {
 
   test.each([null, {}])('malformed successful HTTP response %j is not terminal evidence', async (response) => {
     const { sandbox, handle } = await fixture()
-    const fakeFetch: typeof fetch = async (input) => {
-      const path = new URL(String(input)).pathname
-      if (path === '/session') return Response.json({ id: 'session' })
-      if (path.endsWith('/abort')) return Response.json(null)
-      if (path.endsWith('/message')) return Response.json(response)
-      throw new Error(`unexpected fetch ${path}`)
+    const transport: HttpTransport = async ({ url }) => {
+      const path = url.pathname
+      if (path === '/session') return { status: 200, text: JSON.stringify({ id: 'session' }) }
+      if (path.endsWith('/abort')) return { status: 200, text: 'null' }
+      if (path.endsWith('/message')) return { status: 200, text: JSON.stringify(response) }
+      throw new Error(`unexpected request ${path}`)
     }
-    vi.stubGlobal('fetch', fakeFetch)
-    const runner = new OpenCodeAgentRunner(new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 50 }), sandbox)
+    const runner = new OpenCodeAgentRunner(new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 50, transport }), sandbox)
     expect((await runner.run(handle, context())).status).toBe('error')
     expect(await grace(runner.quiesce(handle))).toBe('unconfirmed')
   })

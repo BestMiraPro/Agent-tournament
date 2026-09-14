@@ -1,3 +1,5 @@
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { isSafeCode, isSafeRef } from '../../core/failure.js'
 import type { OpenCodeModelRef } from './model-id.js'
 
@@ -48,7 +50,74 @@ export interface OpenCodeClientOptions {
   baseUrl: string
   /** Per-request timeout. Dead models hang rather than erroring, so this is mandatory. */
   timeoutMs: number
+  /** Test seam; production uses `nodeHttpTransport`. */
+  transport?: HttpTransport
 }
+
+/** One HTTP exchange. Resolves with any status; rejects only for transport failure or abort. */
+export type HttpTransport = (req: {
+  method: string
+  url: URL
+  body: string | undefined
+  timeoutMs: number
+  signal: AbortSignal
+}) => Promise<{ status: number; text: string }>
+
+/** A socket-level failure talking to OpenCode. Its `cause` carries the Node error and its code. */
+export class OpenCodeTransportError extends Error {
+  constructor(cause: unknown) {
+    super(`OpenCode transport failure: ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+    this.name = 'OpenCodeTransportError'
+  }
+}
+
+/**
+ * How long a socket may sit idle before the transport gives up on its own.
+ *
+ * Always longer than the request's own deadline, so the application deadline is the one
+ * that decides. Node's built-in fetch cannot promise that: it carries a fixed 300s
+ * headers timeout, and an OpenCode prompt sends no headers until the agent is done — so
+ * every agent that worked past five minutes lost its response ("fetch failed" at ~307s on
+ * September 13) while the configured deadline was 600s. The margin only backstops a
+ * socket that a missed abort would otherwise leave open forever.
+ */
+export function transportAllowanceMs(timeoutMs: number): number {
+  return timeoutMs + 30_000
+}
+
+/**
+ * `node:http(s)` with no deadline of its own beyond the idle backstop above; the caller's
+ * AbortSignal ends the exchange and destroys the socket. Adds no dependency.
+ */
+export const nodeHttpTransport: HttpTransport = ({ method, url, body, timeoutMs, signal }) =>
+  new Promise((resolve, reject) => {
+    const send = url.protocol === 'https:' ? httpsRequest : httpRequest
+    const headers: Record<string, string | number> = { 'content-type': 'application/json' }
+    if (body !== undefined) headers['content-length'] = Buffer.byteLength(body)
+    let settled = false
+    const fail = (error: unknown) => {
+      if (settled) return
+      settled = true
+      // An abort surfaces as its own AbortError so the client can classify its deadline.
+      reject(signal.aborted ? error : new OpenCodeTransportError(error))
+    }
+    const req = send(url, { method, headers, signal }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => {
+        if (settled) return
+        settled = true
+        resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') })
+      })
+      res.on('error', fail)
+      res.on('aborted', () => fail(Object.assign(new Error('response aborted'), { code: 'ECONNRESET' })))
+    })
+    req.setTimeout(transportAllowanceMs(timeoutMs), () => {
+      req.destroy(Object.assign(new Error(`socket idle beyond ${transportAllowanceMs(timeoutMs)}ms`), { code: 'OPENCODE_SOCKET_IDLE' }))
+    })
+    req.on('error', fail)
+    req.end(body)
+  })
 
 /** Our HTTP deadline expired; this says nothing about remote execution stopping. */
 export class OpenCodeTimeoutError extends Error {
@@ -105,14 +174,15 @@ export class OpenCodeClient {
     const timeoutMs = opts.timeoutMs ?? this.opts.timeoutMs
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const res = await fetch(url.toString(), {
+      const res = await (this.opts.transport ?? nodeHttpTransport)({
         method,
-        headers: { 'content-type': 'application/json' },
+        url,
         body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+        timeoutMs,
         signal: controller.signal,
       })
-      const text = await res.text()
-      if (!res.ok) {
+      const text = res.text
+      if (res.status < 200 || res.status >= 300) {
         throw new OpenCodeHttpError({ method, path, status: res.status, bodyText: text })
       }
       return (text ? JSON.parse(text) : null) as T
