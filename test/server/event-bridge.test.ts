@@ -85,6 +85,60 @@ describe('mapOpenCodeEvent', () => {
     expect(mapOpenCodeEvent({ type: 'file.edited', properties: {} }, 'run-1', lookup)).toBeNull()
   })
 
+  describe('activity items (schema-shaped 1.18.21 frames)', () => {
+    const frames = JSON.parse(readFileSync('test/fixtures/opencode-1.18.21/activity-events.json', 'utf8'))
+    const lookupShard = (sessionId: string) => (sessionId === 'ses_shard1' ? 'agent-1' : null)
+    const map = (name: string) => mapOpenCodeEvent(frames[name].payload, 'run-1', lookupShard, () => 1_000)
+
+    test('a running tool call is keyed by its call id with a command summary', () => {
+      expect(map('toolRunning')).toEqual({
+        type: 'agent.activity', runId: 'run-1', agentId: 'agent-1', kind: 'tool', detail: 'bash: node backtest.mjs',
+        item: { id: 'call_1', sessionId: 'ses_shard1', kind: 'tool', status: 'running', summary: 'bash: node backtest.mjs', observedAt: 1_000 },
+      })
+    })
+
+    test('the same call completes with its output, and a failed call keeps its error', () => {
+      expect(map('toolCompleted')).toMatchObject({
+        item: { id: 'call_1', status: 'completed', summary: 'bash: node backtest.mjs', output: 'sharpe=1.41 calmar=0.92\n' },
+      })
+      expect(map('toolError')).toMatchObject({
+        item: { id: 'call_2', status: 'error', summary: 'read: /tmp/data.csv' },
+      })
+      const failed = map('toolError')
+      expect(failed?.type === 'agent.activity' && failed.item!.output).toContain('prevents you from using this specific tool call')
+    })
+
+    test('assistant text and its deltas map to one part id; reasoning never does', () => {
+      expect(map('textPart')).toMatchObject({ kind: 'text', item: { id: 'prt_text', kind: 'text', summary: 'Planning the backtest' } })
+      expect(map('textDelta')).toMatchObject({ kind: 'text', item: { id: 'prt_text', kind: 'text', summary: ' next', append: true } })
+      expect(map('reasoningPart')).toBeNull()
+      const nonText = { ...frames.textDelta.payload, properties: { ...frames.textDelta.payload.properties, field: 'metadata' } }
+      expect(mapOpenCodeEvent(nonText, 'run-1', lookupShard)).toBeNull()
+    })
+
+    test('a session error becomes an error item', () => {
+      expect(map('sessionError')).toMatchObject({
+        kind: 'error', item: { id: 'error:ses_shard1', kind: 'error', status: 'error', summary: 'APIError: rate limited' },
+      })
+    })
+
+    test('output is bounded and credentials in commands are not relayed', () => {
+      const running = frames.toolRunning.payload
+      const secret = mapOpenCodeEvent({
+        ...running,
+        properties: { ...running.properties, part: { ...running.properties.part, state: {
+          status: 'completed',
+          input: { command: 'curl -H "Authorization: Bearer sk-live-123" https://user:pw@api.example.com/x' },
+          output: 'z'.repeat(20_000),
+        } } },
+      }, 'run-1', lookupShard)
+      const item = secret?.type === 'agent.activity' ? secret.item! : null
+      expect(item!.summary).not.toMatch(/sk-live-123|user:pw/)
+      expect(Buffer.byteLength(item!.output!)).toBeLessThanOrEqual(8 * 1024)
+      expect(item!.truncated).toBe(true)
+    })
+  })
+
   describe('permission requests', () => {
     const contract = JSON.parse(readFileSync('test/fixtures/opencode-1.18.21/permission-contract.json', 'utf8'))
     const shardLookup = (sessionId: string) => (sessionId === 'ses_f65192873ffeQvWfVwbTavXRfs' ? 'agent-2' : null)
@@ -184,6 +238,17 @@ describe('startEventBridge', () => {
     await vi.waitFor(() => expect(emitted).toHaveLength(1))
     bridge.stop()
     expect((emitted[0] as { kind: string }).kind).toBe('file')
+  })
+
+  test('reports when a subscription is established, so stream health is known apart from the browser socket', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: sseBody([]) })))
+    const connected: number[] = []
+    const bridge = startEventBridge({
+      baseUrl: 'http://127.0.0.1:4096', runId: 'run-1',
+      lookupAgent: () => null, emit: () => {}, onConnected: () => connected.push(1),
+    })
+    await vi.waitFor(() => expect(connected.length).toBeGreaterThanOrEqual(1))
+    bridge.stop()
   })
 
   test('reports an HTTP refusal instead of silently delivering nothing', async () => {

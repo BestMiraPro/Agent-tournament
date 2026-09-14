@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import { applyLiveEvent, createLiveSession, liveReducer, initialLiveState } from '../../web/src/useLiveRun.js'
-import { nextDelay } from '../../web/src/useLiveRun.js'
+import { mergeActivitySnapshot, nextDelay } from '../../web/src/useLiveRun.js'
+import { activityStreamWarning } from '../../web/src/lib/activity.js'
 
 describe('liveReducer', () => {
   test('marks an agent running', () => {
@@ -102,6 +103,55 @@ describe('permission waits', () => {
     expect(s.agents.a!.permission).toBeNull()
     s = liveReducer(liveReducer(initialLiveState, asked), { type: 'round.status', runId: 'r', roundIdx: 2, status: 'preparing' })
     expect(s.agents.a?.permission ?? null).toBeNull()
+  })
+})
+
+describe('live activity', () => {
+  const item = (over: Record<string, unknown> = {}) => ({
+    id: 'call_1', runId: 'r', roundIdx: 1, agentId: 'a', sessionId: 'ses', observedAt: 1_000,
+    kind: 'tool', status: 'running', summary: 'bash: node backtest.mjs', revision: 1, ...over,
+  })
+  const activityEvent = (over: Record<string, unknown> = {}) => {
+    const i = item(over)
+    return { type: 'agent.activity', runId: 'r', agentId: 'a', kind: i.kind, detail: i.summary, item: i }
+  }
+
+  test('the same tool call updates in place and records when evidence was last seen', () => {
+    let s = liveReducer(initialLiveState, activityEvent())
+    s = liveReducer(s, activityEvent({ status: 'completed', output: 'sharpe=1.41', observedAt: 2_000, revision: 2 }))
+    expect(s.agents.a!.items).toHaveLength(1)
+    expect(s.agents.a!.items![0]).toMatchObject({ status: 'completed', output: 'sharpe=1.41' })
+    expect(s.agents.a!.activity).toBe('bash: node backtest.mjs')
+    expect(s.agents.a!.lastObservedAt).toBe(2_000)
+    expect(s.activityRevision).toBe(2)
+  })
+
+  test('a client keeps a bounded timeline per agent', () => {
+    let s = initialLiveState
+    for (let i = 0; i < 130; i++) s = liveReducer(s, activityEvent({ id: `call_${i}`, revision: i + 1 }))
+    expect(s.agents.a!.items).toHaveLength(100)
+    expect(s.agents.a!.items![0]!.id).toBe('call_30')
+  })
+
+  test('upstream stream health is tracked apart from the browser socket', () => {
+    const s = liveReducer(initialLiveState, { type: 'bridge.status', runId: 'r', source: 'shard-0', state: 'reconnecting', at: 5 })
+    expect(s.wsStatus).toBe('connected')
+    expect(activityStreamWarning(s.streams)).toBe('Activity stream reconnecting')
+    const back = liveReducer(s, { type: 'bridge.status', runId: 'r', source: 'shard-0', state: 'connected', at: 6 })
+    expect(activityStreamWarning(back.streams)).toBeNull()
+    // Stream loss says nothing about the agent itself.
+    expect(Object.keys(back.agents)).toEqual([])
+  })
+
+  test('an older activity snapshot cannot replace newer streamed evidence', () => {
+    const streamed = liveReducer(initialLiveState, activityEvent({ status: 'completed', revision: 5 }))
+    const older = { revision: 3, roundIdx: 1, agents: { a: { items: [item({ status: 'running', revision: 3 })], lastObservedAt: 1_000, truncated: false, status: 'running', failure: null, usageReported: false } }, streams: {} }
+    expect(mergeActivitySnapshot(streamed, older as never)).toBe(streamed)
+    const newer = { ...older, revision: 7, agents: { a: { ...older.agents.a, items: [item({ status: 'completed', output: 'done', revision: 7 })] } } }
+    const merged = mergeActivitySnapshot(streamed, newer as never)
+    expect(merged.agents.a!.items![0]).toMatchObject({ output: 'done' })
+    expect(merged.agents.a!.status).toBe('running')
+    expect(merged.activityRevision).toBe(7)
   })
 })
 

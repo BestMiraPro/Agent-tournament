@@ -6,6 +6,7 @@ import { summarizeRoster } from './lib/roster.js'
 import { createStartGate, isCurrentRunRequest } from './lib/lifecycle.js'
 import { criteriaDraftSeed } from './lib/criteria.js'
 import { useLiveRun } from './useLiveRun.js'
+import { activityStreamWarning } from './lib/activity.js'
 import { AgentDrawer } from './components/AgentDrawer.js'
 import { AnalyticsPanel } from './components/AnalyticsPanel.js'
 import { RoundDetail } from './components/RoundDetail.js'
@@ -246,6 +247,10 @@ export function App() {
       {error && <p className="error">{error} <button onClick={() => { void refresh(snapshot.runId) }}>Retry</button></p>}
       {snapshot.warnings.length > 0 && <p className="muted">{snapshot.warnings.join(' · ')}</p>}
       {live.wsStatus === 'reconnecting' && <p className="muted reconnect-banner">Reconnecting…</p>}
+      {/* The upstream agent stream, not this page's socket: agents may still be working. */}
+      {activityStreamWarning(live.streams) && (
+        <p className="muted reconnect-banner">{activityStreamWarning(live.streams)}</p>
+      )}
       <RunSummary snapshot={snapshot} busy={busy} roundStats={roundStats} />
       <div className="export-bar">
         <select
@@ -334,6 +339,7 @@ export function App() {
           onClose={() => { setSelectedAgentId(null); gridRef.current?.focus() }}
           onRetired={() => { setSelectedAgentId(null); void refresh(snapshot.runId) }}
           live={live.agents[selectedAgentId]}
+          activityUnavailable={snapshot.activity === null}
         />
       )}
     </>

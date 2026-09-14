@@ -1,5 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
 import type { SnapshotAgent } from '../api.js'
+import { evidenceAgeLabel } from '../lib/activity.js'
 import type { LiveAgent, LiveState, PendingPermission } from '../useLiveRun.js'
 
 const STATUS_LABEL: Record<string, string> = {
@@ -45,6 +46,12 @@ export function AgentGrid({ agents, live, onSelect }: {
   const scoredAsFailed = new Set(live.scores.filter((s) => s.failed === true).map((s) => s.agentId))
   const [page, setPage] = useState(1)
   useEffect(() => { setPage(1) }, [agents.length])
+  // Ages are only honest if they advance while no event arrives, so re-render on a timer.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 5_000)
+    return () => clearInterval(timer)
+  }, [])
   const totalPages = Math.ceil(agents.length / PAGE_SIZE)
   const visible = agents.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
@@ -97,12 +104,15 @@ export function AgentGrid({ agents, live, onSelect }: {
                 <div className="cell__failure" title={l.failure.message}>{l.failure.message}</div>
               )}
               {l?.permission ? (
-                <div className="cell__permission" title={permissionLabel(l.permission, Date.now())}>
-                  {permissionLabel(l.permission, Date.now())}
+                <div className="cell__permission" title={permissionLabel(l.permission, now)}>
+                  {permissionLabel(l.permission, now)}
                 </div>
               ) : (
-                <div className="cell__activity">{l?.activity || ' '}</div>
+                <div className="cell__activity" title={l?.activity || undefined}>{l?.activity || ' '}</div>
               )}
+              {l?.lastObservedAt ? (
+                <div className="cell__evidence">{evidenceAgeLabel(l.lastObservedAt, now, status)}</div>
+              ) : null}
               <div className="cell__usage">{usageLabel(l)}</div>
             </div>
           )

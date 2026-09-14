@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { getRun, type AgentFailure, type RunSnapshot } from './api.js'
+import { getRun, type ActivityItem, type ActivitySnapshot, type AgentFailure, type RunSnapshot, type StreamHealth } from './api.js'
 
 export interface LiveAgent {
   status: 'pending' | 'running' | 'done' | 'failed'
@@ -13,7 +13,16 @@ export interface LiveAgent {
   usageReported: boolean
   /** An unanswered OpenCode permission request: the agent is stalled, not working. */
   permission?: PendingPermission | null
+  /** The current round's public activity, bounded. */
+  items?: ActivityItem[]
+  /** When the latest evidence was observed (ms since epoch). */
+  lastObservedAt?: number | null
+  /** Older items were dropped to stay inside the limits. */
+  activityTruncated?: boolean
 }
+
+/** A browser keeps no more of an agent's timeline than the server does. */
+const MAX_CLIENT_ITEMS = 100
 
 export interface PendingPermission {
   requestId: string
@@ -41,6 +50,10 @@ export interface LiveState {
   /** Why the latest round failed outright — distinct from a budget breach. */
   lastError: string | null
   wsStatus: 'connected' | 'reconnecting'
+  /** Upstream OpenCode event streams, by source - not the browser socket above. */
+  streams: Record<string, StreamHealth>
+  /** The newest server activity revision applied, so an older snapshot cannot overwrite it. */
+  activityRevision: number
 }
 
 export const initialLiveState: LiveState = {
@@ -52,15 +65,41 @@ export const initialLiveState: LiveState = {
   lastBreach: null,
   lastError: null,
   wsStatus: 'connected',
+  streams: {},
+  activityRevision: 0,
 }
 
 function stateFromSnapshot(snapshot: RunSnapshot): LiveState {
-  return {
+  return mergeActivitySnapshot({
     ...initialLiveState,
     scores: snapshot.scores.map(({ agentId, rank, score, failed }) => ({ agentId, rank, score, failed })).sort((a, b) => a.rank - b.rank),
     roundIdx: snapshot.lastRoundIdx,
     busy: snapshot.busy,
+  }, snapshot.activity)
+}
+
+/**
+ * Restores cached activity from a run snapshot - what a reconnecting or reloading browser
+ * would otherwise lose. A snapshot older than evidence already streamed is ignored whole.
+ */
+export function mergeActivitySnapshot(state: LiveState, activity: ActivitySnapshot | null | undefined): LiveState {
+  if (!activity || activity.revision < state.activityRevision) return state
+  const agents = { ...state.agents }
+  for (const [agentId, a] of Object.entries(activity.agents)) {
+    const current = agents[agentId] ?? blank
+    const latest = a.items.at(-1)
+    agents[agentId] = {
+      ...current,
+      status: a.status,
+      failure: a.failure,
+      usageReported: current.usageReported || a.usageReported,
+      items: a.items,
+      lastObservedAt: a.lastObservedAt,
+      activityTruncated: a.truncated,
+      activity: current.activity || latest?.summary.slice(-200) || '',
+    }
   }
+  return { ...state, agents, streams: { ...activity.streams }, activityRevision: activity.revision }
 }
 
 const blank: LiveAgent = { status: 'pending', activity: '', tokensIn: 0, tokensOut: 0, costUsd: 0, failure: null, usageReported: false, permission: null }
@@ -120,11 +159,44 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
         },
       }
     }
-    case 'agent.activity':
+    case 'agent.activity': {
       if (!agentId) return state
+      const item = event.item as ActivityItem | undefined
+      if (!item || typeof item.id !== 'string') {
+        return { ...state, agents: { ...state.agents, [agentId]: { ...current, activity: event.detail as string } } }
+      }
+      // The server broadcasts the reconciled item, so upserting by id never duplicates.
+      const items = [...(current.items ?? [])]
+      const index = items.findIndex((i) => i.id === item.id)
+      if (index >= 0) items[index] = item
+      else items.push(item)
+      const bounded = items.length > MAX_CLIENT_ITEMS ? items.slice(-MAX_CLIENT_ITEMS) : items
       return {
         ...state,
-        agents: { ...state.agents, [agentId]: { ...current, activity: event.detail as string } },
+        activityRevision: Math.max(state.activityRevision, item.revision ?? 0),
+        agents: {
+          ...state.agents,
+          [agentId]: {
+            ...current,
+            items: bounded,
+            activity: event.detail as string,
+            lastObservedAt: Math.max(current.lastObservedAt ?? 0, item.observedAt),
+            activityTruncated: (current.activityTruncated ?? false) || bounded.length < items.length,
+          },
+        },
+      }
+    }
+    case 'bridge.status':
+      return {
+        ...state,
+        streams: {
+          ...state.streams,
+          [event.source as string]: {
+            state: event.state as StreamHealth['state'],
+            ...(typeof event.message === 'string' ? { message: event.message } : {}),
+            at: event.at as number,
+          },
+        },
       }
     case 'agent.usage':
       if (!agentId) return state

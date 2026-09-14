@@ -3,6 +3,32 @@ import type { RoundStatus } from '../core/types.js'
 
 export type AgentLiveStatus = 'pending' | 'running' | 'done' | 'failed'
 
+export type ActivityKind = 'text' | 'tool' | 'file' | 'permission' | 'error'
+export type ActivityStatus = 'pending' | 'running' | 'completed' | 'error' | 'waiting'
+
+/** One piece of public agent activity as the event bridge observed it. */
+export interface ActivityItemInput {
+  /** Stable provider id: a tool call id, a text part id, a permission request id. */
+  id: string
+  sessionId: string
+  kind: ActivityKind
+  status?: ActivityStatus
+  summary: string
+  output?: string
+  truncated?: boolean
+  observedAt: number
+  /** A text delta for an item already seen — appended, never a new item. */
+  append?: boolean
+}
+
+/** An activity item as the run's cache stored it: placed in a run, round and revision. */
+export interface ActivityItem extends Omit<ActivityItemInput, 'append'> {
+  runId: string
+  roundIdx: number
+  agentId: string
+  revision: number
+}
+
 /**
  * Progress the engine itself knows about. Always available, including in mock mode.
  * Distinct from OpenCode activity events, which are best-effort detail and absent
@@ -21,7 +47,29 @@ export type EngineEvent =
       failure?: AgentFailure
     }
   | { type: 'agent.session'; runId: string; agentId: string; sessionId: string }
-  | { type: 'agent.activity'; runId: string; agentId: string; kind: 'tool' | 'text' | 'file'; detail: string }
+  | {
+      type: 'agent.activity'
+      runId: string
+      agentId: string
+      kind: ActivityKind
+      /** A short one-line summary for the card. */
+      detail: string
+      /** The item behind the summary; the bridge sends input, the cache broadcasts the stored item. */
+      item?: ActivityItemInput & Partial<Pick<ActivityItem, 'runId' | 'roundIdx' | 'agentId' | 'revision'>>
+    }
+  | {
+      /**
+       * Health of the upstream OpenCode event stream for one server. Separate from the
+       * browser's own socket: a dashboard can be connected while no agent evidence arrives.
+       */
+      type: 'bridge.status'
+      runId: string
+      /** `server` for a local run, `shard-<n>` for a Docker shard. */
+      source: string
+      state: 'connected' | 'reconnecting'
+      message?: string
+      at: number
+    }
   | {
       /**
        * An OpenCode permission request for this agent, and its answer. A request that is

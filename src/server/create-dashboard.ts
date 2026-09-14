@@ -14,6 +14,7 @@ import { MockProvider } from '../runtime/mock-provider.js'
 import { MockSandbox } from '../runtime/mock-sandbox.js'
 import { sweepOrphanContainers } from '../runtime/docker/sweep.js'
 import { buildApi } from './api.js'
+import { ActivityCache } from './activity.js'
 import { composeRun, defaultSeams, type ComposedRun, type RunIdHolder } from './compose-run.js'
 import type { RunSpec } from './run-spec.js'
 import { RunManager } from './run-manager.js'
@@ -72,7 +73,19 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
   }
 
   const broadcaster = new EventBroadcaster()
-  const emit = (e: EngineEvent) => broadcaster.broadcast(e)
+  const broadcast = (e: EngineEvent) => broadcaster.broadcast(e)
+  // Runs on the default engine have no per-run record, so their live activity is kept here;
+  // spec-driven runs keep their own cache on their record and get the raw broadcaster below.
+  const defaultActivity = new Map<string, ActivityCache>()
+  const emit = (e: EngineEvent) => {
+    let cache = defaultActivity.get(e.runId)
+    if (!cache) {
+      cache = new ActivityCache()
+      defaultActivity.set(e.runId, cache)
+    }
+    const out = cache.record(e)
+    if (out) broadcast(out)
+  }
 
   const provider = new MockProvider(42)
   const sandbox = new MockSandbox()
@@ -129,7 +142,8 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
         reflector: new Reflector(provider, next.reflect, next.roster.map((r) => r.modelId)),
       })
     },
-    emit,
+    emit: broadcast,
+    activityFor: (runId) => defaultActivity.get(runId)?.snapshot() ?? null,
     sweepWith: (cfg, runId, onWarning) => {
       // Every registered docker run owns live containers; excluding only the new run
       // would let its sweep destroy a concurrent run mid-tournament.

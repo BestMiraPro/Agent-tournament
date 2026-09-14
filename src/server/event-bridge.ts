@@ -1,4 +1,4 @@
-import type { EngineEvent, EventSink } from '../engine/events.js'
+import type { ActivityKind, EngineEvent, EventSink } from '../engine/events.js'
 
 /** Ceiling on an unterminated remainder, so a stream without separators cannot grow forever. */
 const MAX_SSE_REMAINDER = 1024 * 1024
@@ -39,6 +39,36 @@ export function nextBridgeDelay(attempt: number): number {
 
 /** A permission request's patterns are shown on a card; a handful says enough. */
 const MAX_PERMISSION_PATTERNS = 5
+const MAX_SUMMARY_CHARS = 300
+const MAX_ITEM_BYTES = 8 * 1024
+const TOOL_STATUSES = new Set(['pending', 'running', 'completed', 'error'])
+/** Input fields that name what a tool acted on. Everything else in a tool's input stays private. */
+const TOOL_TARGET_KEYS = ['command', 'filePath', 'path', 'pattern', 'url', 'query']
+
+/** Strips credentials an agent may have typed into a command before it is relayed anywhere. */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1[redacted]@')
+    .replace(/(authorization\s*[:=]\s*)[^"'\n]*/gi, '$1[redacted]')
+    .replace(/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/\b(api[_-]?key|token|secret|password)(\s*[:=]\s*)[^\s"']+/gi, '$1$2[redacted]')
+}
+
+function capChars(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`
+}
+
+function capBytes(text: string, max: number): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(text) <= max) return { text, truncated: false }
+  return { text: Buffer.from(text).subarray(0, max).toString('utf8').replace(/�+$/, ''), truncated: true }
+}
+
+function toolSummary(tool: string, input: unknown, title: unknown): string {
+  const fields = typeof input === 'object' && input !== null ? input as Record<string, unknown> : {}
+  const target = TOOL_TARGET_KEYS.map((k) => fields[k]).find((v): v is string => typeof v === 'string' && v.length > 0)
+  const detail = target ?? (typeof title === 'string' ? title : '')
+  return capChars(redactSecrets(detail ? `${tool}: ${detail}` : tool), MAX_SUMMARY_CHARS)
+}
 
 interface RawEvent {
   type?: string
@@ -62,7 +92,7 @@ export function mapOpenCodeEvent(
   const agentId = lookupAgent(sessionId)
   if (!agentId) return null
 
-  const activity = (kind: 'tool' | 'text' | 'file', detail: string) =>
+  const activity = (kind: ActivityKind, detail: string) =>
     ({ type: 'agent.activity' as const, runId, agentId, kind, detail })
 
   switch (raw.type) {
@@ -84,11 +114,62 @@ export function mapOpenCodeEvent(
       if (p.reply !== 'once' && p.reply !== 'always' && p.reply !== 'reject') return null
       return { type: 'agent.permission', runId, agentId, requestId: p.requestID, state: 'replied', reply: p.reply, at: now() }
     }
+    // Shapes verified against opencode 1.18.21's EventMessagePartUpdated / ToolPart / TextPart.
     case 'message.part.updated': {
-      const part = raw.properties?.part as { type?: string; tool?: string; text?: string } | undefined
-      if (part?.type === 'tool') return activity('tool', part.tool ?? 'tool')
-      if (part?.type === 'text') return activity('text', (part.text ?? '').slice(0, 200))
+      const part = raw.properties?.part as {
+        id?: unknown; type?: string; tool?: string; callID?: unknown; text?: string
+        state?: { status?: string; input?: unknown; title?: unknown; output?: unknown; error?: unknown }
+      } | undefined
+      if (part?.type === 'tool') {
+        const state = part.state ?? {}
+        const summary = toolSummary(part.tool ?? 'tool', state.input, state.title)
+        const id = typeof part.callID === 'string' ? part.callID : typeof part.id === 'string' ? part.id : null
+        if (id === null) return activity('tool', summary)
+        const status = typeof state.status === 'string' && TOOL_STATUSES.has(state.status)
+          ? state.status as 'pending' | 'running' | 'completed' | 'error'
+          : undefined
+        const rawOutput = status === 'completed' ? state.output : status === 'error' ? state.error : undefined
+        const output = typeof rawOutput === 'string' ? capBytes(redactSecrets(rawOutput), MAX_ITEM_BYTES) : null
+        return {
+          ...activity('tool', summary),
+          item: {
+            id, sessionId, kind: 'tool', ...(status ? { status } : {}), summary,
+            ...(output ? { output: output.text, ...(output.truncated ? { truncated: true } : {}) } : {}),
+            observedAt: now(),
+          },
+        }
+      }
+      if (part?.type === 'text') {
+        const text = part.text ?? ''
+        if (typeof part.id !== 'string') return activity('text', text.slice(0, 200))
+        const body = capBytes(redactSecrets(text), MAX_ITEM_BYTES)
+        return {
+          ...activity('text', body.text.slice(0, 200)),
+          item: { id: part.id, sessionId, kind: 'text', summary: body.text, ...(body.truncated ? { truncated: true } : {}), observedAt: now() },
+        }
+      }
+      // Reasoning and every other part type stay private.
       return null
+    }
+    case 'message.part.delta': {
+      const p = raw.properties ?? {}
+      if (p.field !== 'text' || typeof p.partID !== 'string' || typeof p.delta !== 'string') return null
+      // The delta may belong to a reasoning part; the cache only extends parts it has shown.
+      const delta = capBytes(redactSecrets(p.delta), MAX_ITEM_BYTES).text
+      return {
+        ...activity('text', delta.slice(-200)),
+        item: { id: p.partID, sessionId, kind: 'text', summary: delta, append: true, observedAt: now() },
+      }
+    }
+    case 'session.error': {
+      const error = raw.properties?.error as { name?: unknown; data?: { message?: unknown } } | undefined
+      const name = typeof error?.name === 'string' ? error.name : 'Error'
+      const message = typeof error?.data?.message === 'string' ? error.data.message : ''
+      const summary = capChars(redactSecrets(message ? `${name}: ${message}` : name), MAX_SUMMARY_CHARS)
+      return {
+        ...activity('error', summary),
+        item: { id: `error:${sessionId}`, sessionId, kind: 'error', status: 'error', summary, observedAt: now() },
+      }
     }
     case 'file.edited':
       return activity('file', String(raw.properties?.file ?? 'file'))
@@ -125,6 +206,8 @@ export function startEventBridge(opts: {
   lookupAgent: (sessionId: string) => string | null
   emit: EventSink
   onError?: (e: Error) => void
+  /** A subscription was accepted; evidence can flow again. */
+  onConnected?: () => void
 }): BridgeHandle {
   const controller = new AbortController()
   let retry: ReturnType<typeof setTimeout> | undefined
@@ -151,6 +234,11 @@ export function startEventBridge(opts: {
       })
       if (!res.ok) throw new Error(`OpenCode event stream refused the subscription: ${res.status}`)
       if (!res.body) throw new Error('OpenCode event stream returned no body')
+      try {
+        opts.onConnected?.()
+      } catch {
+        /* a health subscriber must never break the stream */
+      }
 
       const reader = res.body.getReader()
       try {

@@ -18,6 +18,7 @@ import { startServer, type ServerHandle } from '../runtime/opencode/server.js'
 import { discoverModels } from '../runtime/opencode/discovery.js'
 import { buildCsvRows, buildJsonDump } from './export.js'
 import { submissionView } from './submission-view.js'
+import { ActivityCache, type ActivitySnapshot } from './activity.js'
 
 export interface SpecDefaults {
   workspaceRoot?: string | null
@@ -43,6 +44,24 @@ export interface ApiDeps {
   emit?: EventSink
   sweepWith?: (config: RunConfig, runId: string, onWarning: (message: string) => void) => Promise<string[]>
   startModelsServer?: () => Promise<ServerHandle>
+  /** Live activity for runs on the default engine, which have no per-run record. */
+  activityFor?: (runId: string) => ActivitySnapshot | null
+}
+
+/** Bridge callbacks that report upstream stream health as its own event, never as agent state. */
+function streamHealth(runId: string, source: string, emit: EventSink) {
+  return {
+    onConnected: () => emit({ type: 'bridge.status', runId, source, state: 'connected', at: Date.now() }),
+    onError: (e: Error) =>
+      emit({ type: 'bridge.status', runId, source, state: 'reconnecting', message: e.message.slice(0, 200), at: Date.now() }),
+  }
+}
+
+/** The session an agent runs now: sessions are recorded in creation order. */
+function latestSessionFor(sessionMap: Map<string, string>, agentId: string): string | null {
+  let latest: string | null = null
+  for (const [sessionId, owner] of sessionMap) if (owner === agentId) latest = sessionId
+  return latest
 }
 
 function startDockerShardBridges(opts: {
@@ -65,6 +84,7 @@ function startDockerShardBridges(opts: {
         runId: opts.runId,
         lookupAgent: opts.lookupAgent,
         emit: opts.emit,
+        ...streamHealth(opts.runId, `shard-${server.shardIndex}`, opts.emit),
       }),
     })
   }
@@ -324,7 +344,16 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       } catch (e) {
         return reply.code(specErrorCode(e)).send({ error: specErrorMessage(e) })
       }
-      const emit: EventSink = deps.emit ?? (() => {})
+      const broadcast: EventSink = deps.emit ?? (() => {})
+      const activity = new ActivityCache({
+        currentSession: (agentId) => latestSessionFor(composed.sessionMap, agentId),
+      })
+      // Cached before it is broadcast, so a snapshot requested right after an event
+      // already holds it and a reconnecting browser cannot lose what it was sent.
+      const emit: EventSink = (e) => {
+        const out = activity.record(e)
+        if (out) broadcast(out)
+      }
       // Engine construction mirrors src/server/index.ts: composed pieces in
       // place of the mock literals, Judge/Reflector over the composed provider.
       const engine = new TournamentEngine({
@@ -360,6 +389,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       const record: RunRecord = {
         runId, spec, engine, manager, composed,
         bridges: [], warnings: composed.warnings, capacity: composed.capacity,
+        activity,
       }
       deps.registry?.set(record)
       const lookupAgent = (sessionId: string): string | null =>
@@ -368,17 +398,19 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
           runId, lookupAgent, emit,
+          ...streamHealth(runId, 'server', emit),
         }))
       } else if (spec.sandbox === 'docker') {
         if (composed.onShardServer) {
           record.bridges.push(startDockerShardBridges({ composed, runId, lookupAgent, emit }))
         } else {
           // Compatibility for injected compositions that expose a fixed list.
-          for (const shard of composed.shardServers) {
+          composed.shardServers.forEach((shard, index) => {
             record.bridges.push(startEventBridge({
               baseUrl: shard.baseUrl, runId, lookupAgent, emit,
+              ...streamHealth(runId, `shard-${index}`, emit),
             }))
-          }
+          })
         }
       }
       return reply.code(201).send({ runId, warnings: composed.warnings })
@@ -464,6 +496,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       ...snapshot,
       busy: mgr.isBusy(id),
       lastError: mgr.lastError(id),
+      // Null when this process holds no live history for the run — after a restart, say —
+      // which the UI reports as unavailable rather than showing an empty timeline.
+      activity: record?.activity?.snapshot() ?? deps.activityFor?.(id) ?? null,
     }
   })
 

@@ -1,0 +1,83 @@
+{
+  "_source": "Built 2026-09-14 from opencode 1.18.21's own OpenAPI schemas (GET /doc): EventMessagePartUpdated {sessionID, part, time}, EventMessagePartDelta {sessionID, messageID, partID, field, delta}, EventSessionError {sessionID, error}, ToolPart {id, sessionID, messageID, type, callID, tool, state}, ToolState pending|running|completed|error, TextPart, ReasoningPart. These are schema-shaped frames, not captured wire traffic: no model was prompted to produce them. Frames are the /global/event envelope {directory, payload}.",
+  "toolRunning": {
+    "directory": "/work/a1",
+    "payload": {
+      "id": "evt_1", "type": "message.part.updated",
+      "properties": {
+        "sessionID": "ses_shard1", "time": 1,
+        "part": {
+          "id": "prt_tool", "sessionID": "ses_shard1", "messageID": "msg_1", "type": "tool", "callID": "call_1", "tool": "bash",
+          "state": { "status": "running", "input": { "command": "node backtest.mjs", "description": "Run the backtest" }, "title": "Run the backtest", "metadata": {}, "time": { "start": 1 } }
+        }
+      }
+    }
+  },
+  "toolCompleted": {
+    "directory": "/work/a1",
+    "payload": {
+      "id": "evt_2", "type": "message.part.updated",
+      "properties": {
+        "sessionID": "ses_shard1", "time": 2,
+        "part": {
+          "id": "prt_tool", "sessionID": "ses_shard1", "messageID": "msg_1", "type": "tool", "callID": "call_1", "tool": "bash",
+          "state": { "status": "completed", "input": { "command": "node backtest.mjs" }, "output": "sharpe=1.41 calmar=0.92\n", "title": "Run the backtest", "metadata": {}, "time": { "start": 1, "end": 2 } }
+        }
+      }
+    }
+  },
+  "toolError": {
+    "directory": "/work/a1",
+    "payload": {
+      "id": "evt_3", "type": "message.part.updated",
+      "properties": {
+        "sessionID": "ses_shard1", "time": 3,
+        "part": {
+          "id": "prt_tool2", "sessionID": "ses_shard1", "messageID": "msg_1", "type": "tool", "callID": "call_2", "tool": "read",
+          "state": { "status": "error", "input": { "filePath": "/tmp/data.csv" }, "error": "The user has specified a rule which prevents you from using this specific tool call", "metadata": {}, "time": { "start": 3, "end": 3 } }
+        }
+      }
+    }
+  },
+  "textPart": {
+    "directory": "/work/a1",
+    "payload": {
+      "id": "evt_4", "type": "message.part.updated",
+      "properties": {
+        "sessionID": "ses_shard1", "time": 4,
+        "part": { "id": "prt_text", "sessionID": "ses_shard1", "messageID": "msg_2", "type": "text", "text": "Planning the backtest" }
+      }
+    }
+  },
+  "textDelta": {
+    "directory": "/work/a1",
+    "payload": {
+      "id": "evt_5", "type": "message.part.delta",
+      "properties": { "sessionID": "ses_shard1", "messageID": "msg_2", "partID": "prt_text", "field": "text", "delta": " next" }
+    }
+  },
+  "reasoningPart": {
+    "directory": "/work/a1",
+    "payload": {
+      "id": "evt_6", "type": "message.part.updated",
+      "properties": {
+        "sessionID": "ses_shard1", "time": 6,
+        "part": { "id": "prt_reason", "sessionID": "ses_shard1", "messageID": "msg_2", "type": "reasoning", "text": "private chain of thought" }
+      }
+    }
+  },
+  "reasoningDelta": {
+    "directory": "/work/a1",
+    "payload": {
+      "id": "evt_7", "type": "message.part.delta",
+      "properties": { "sessionID": "ses_shard1", "messageID": "msg_2", "partID": "prt_reason", "field": "text", "delta": " more private thought" }
+    }
+  },
+  "sessionError": {
+    "directory": "/work/a1",
+    "payload": {
+      "id": "evt_8", "type": "session.error",
+      "properties": { "sessionID": "ses_shard1", "error": { "name": "APIError", "data": { "message": "rate limited", "statusCode": 429 } } }
+    }
+  }
+}

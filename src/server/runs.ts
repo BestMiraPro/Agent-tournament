@@ -1,4 +1,5 @@
 import type { TournamentEngine } from '../engine/driver.js'
+import type { ActivityCache } from './activity.js'
 import type { BridgeHandle } from './event-bridge.js'
 import type { RunManager } from './run-manager.js'
 import type { ComposedRun } from './compose-run.js'
@@ -13,6 +14,8 @@ export interface RunRecord {
   bridges: BridgeHandle[]
   warnings: string[]
   capacity: { committed: number; maxContainers: number } | null
+  /** The current round's live activity; in memory only, released with the run. */
+  activity?: ActivityCache
 }
 
 export class RunRegistry {
@@ -60,4 +63,5 @@ export async function disposeRunRecord(record: RunRecord): Promise<void> {
   }
   await record.manager.disposeAll().catch(() => {})
   await record.composed.cleanup().catch(() => {})
+  record.activity?.clear()
 }

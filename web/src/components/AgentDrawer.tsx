@@ -3,6 +3,7 @@ import { getAgentDetail, retireAgent, serverError, type AgentDetail } from '../a
 import type { LiveAgent } from '../useLiveRun.js'
 import { lineDiff, type DiffLine } from '../lib/diff.js'
 import { Markdown } from './Markdown.js'
+import { ActivityTimeline } from './ActivityTimeline.js'
 import { submissionCostLabel } from '../lib/cost.js'
 
 const DIFF_PREFIX: Record<DiffLine['kind'], string> = { same: ' ', add: '+', del: '−' }
@@ -31,13 +32,15 @@ function fileName(f: unknown): string {
   return String(f)
 }
 
-export function AgentDrawer({ runId, agentId, onClose, onRetired, live }: {
+export function AgentDrawer({ runId, agentId, onClose, onRetired, live, activityUnavailable }: {
   runId: string
   agentId: string
   onClose: () => void
   onRetired?: () => void
   /** This agent's live state for the current round, so an open drawer follows it. */
   live?: LiveAgent
+  /** The server holds no live history for this run (it restarted since the run was active). */
+  activityUnavailable?: boolean
 }) {
   const [data, setData] = useState<AgentDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -138,6 +141,16 @@ export function AgentDrawer({ runId, agentId, onClose, onRetired, live }: {
                   liveFailure.ref ? `ref ${liveFailure.ref}` : null,
                 ].filter(Boolean).join(' · ')}
               </p>
+            </section>
+          )}
+          {(live || activityUnavailable) && (
+            <section>
+              <h3>Live activity</h3>
+              <ActivityTimeline
+                items={live?.items ?? []}
+                truncated={live?.activityTruncated ?? false}
+                unavailable={activityUnavailable ?? false}
+              />
             </section>
           )}
           {loading && <p>Loading…</p>}

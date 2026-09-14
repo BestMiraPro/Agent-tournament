@@ -26,6 +26,44 @@ export interface SnapshotScore {
   failed: boolean
 }
 
+/** Mirrors ActivityItem in src/engine/events.ts: one piece of public agent activity. */
+export interface ActivityItem {
+  id: string
+  runId: string
+  roundIdx: number
+  agentId: string
+  sessionId: string
+  observedAt: number
+  kind: 'text' | 'tool' | 'file' | 'permission' | 'error'
+  status?: 'pending' | 'running' | 'completed' | 'error' | 'waiting'
+  summary: string
+  output?: string
+  truncated?: boolean
+  revision: number
+}
+
+/** Mirrors StreamHealth in src/server/activity.ts. */
+export interface StreamHealth {
+  state: 'connected' | 'reconnecting'
+  message?: string
+  at: number
+}
+
+/** Mirrors ActivitySnapshot in src/server/activity.ts. */
+export interface ActivitySnapshot {
+  revision: number
+  roundIdx: number
+  agents: Record<string, {
+    items: ActivityItem[]
+    lastObservedAt: number | null
+    truncated: boolean
+    status: 'pending' | 'running' | 'done' | 'failed'
+    failure: AgentFailure | null
+    usageReported: boolean
+  }>
+  streams: Record<string, StreamHealth>
+}
+
 /** Mirrors AppliedCriteria in src/server/state.ts: what a round has on record. */
 export interface AppliedCriteria {
   roundIdx: number
@@ -51,6 +89,8 @@ export interface RunSnapshot {
   roster: { modelId: string; count: number; temperature: number }[]
   capacity: { committed: number; maxContainers: number } | null
   warnings: string[]
+  /** Live activity this server holds for the run; null when it holds none (e.g. after a restart). */
+  activity?: ActivitySnapshot | null
 }
 
 export interface AgentDetail {
