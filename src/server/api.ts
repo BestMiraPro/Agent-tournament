@@ -28,7 +28,7 @@ export interface SpecDefaults {
 export interface ApiDeps {
   repos: Repos
   manager: RunManager
-  createRun: (name: string, goal: string) => string
+  createRun: (name: string, goal: string, criteria?: string | null) => string
   composeRun?: (spec: RunSpec, opts?: { runIdHolder?: RunIdHolder }) => Promise<ComposedRun>
   composeWith?: (spec: RunSpec, opts?: { runIdHolder?: RunIdHolder }) => Promise<ComposedRun>
   /** Process-level fallbacks for spec fields a request may omit; see applySpecDefaults. */
@@ -126,7 +126,12 @@ function specErrorMessage(e: unknown): string {
 }
 
 const nonBlankString = z.string().refine((value) => value.trim().length > 0, 'must not be blank')
-const legacyRunBodySchema = z.object({ name: nonBlankString, goal: nonBlankString })
+const legacyRunBodySchema = z.object({
+  name: nonBlankString,
+  goal: nonBlankString,
+  // Optional creation criteria, persisted with the run as the round-1 draft default.
+  criteria: z.string().nullable().optional(),
+})
 const roundBodySchema = z.object({
   goalMd: nonBlankString,
   criteriaMd: z.string().nullable().optional(),
@@ -339,7 +344,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       })
       let runId: string
       try {
-        runId = engine.createRun(spec.name, spec.goal).id
+        runId = engine.createRun(spec.name, spec.goal, spec.criteria).id
       } catch (e) {
         await composed.cleanup().catch(() => {})
         return reply.code(specErrorCode(e)).send({ error: specErrorMessage(e) })
@@ -378,13 +383,13 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       }
       return reply.code(201).send({ runId, warnings: composed.warnings })
     }
-    let legacy: { name: string; goal: string }
+    let legacy: { name: string; goal: string; criteria?: string | null }
     try {
       legacy = legacyRunBodySchema.parse(body)
     } catch {
       return reply.code(400).send({ error: 'name and goal are required' })
     }
-    const runId = deps.createRun(legacy.name, legacy.goal)
+    const runId = deps.createRun(legacy.name, legacy.goal, legacy.criteria ?? null)
     return reply.code(201).send({ runId })
   })
 

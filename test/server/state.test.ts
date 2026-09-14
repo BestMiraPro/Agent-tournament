@@ -66,6 +66,52 @@ describe('buildRunSnapshot', () => {
   })
 })
 
+describe('buildRunSnapshot criteria', () => {
+  const CRITERIA = 'Calmar first\nOmega second'
+
+  test('carries the exact creation criteria before round 1', () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const run = repos.runs.create({
+      name: 'with criteria', initialGoal: 'g', initialCriteria: CRITERIA, config: DEFAULT_CONFIG, seedDir: null,
+    })
+    const s = buildRunSnapshot(repos, run.id)!
+    expect(s.initialCriteria).toBe(CRITERIA)
+    // Nothing has been applied yet: creation criteria are a draft default, not a round's.
+    expect(s.lastRoundCriteria).toBeNull()
+  })
+
+  test('a run created without criteria reports null rather than another run\'s', () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    repos.runs.create({ name: 'A', initialCriteria: CRITERIA, config: DEFAULT_CONFIG, seedDir: null })
+    const b = repos.runs.create({ name: 'B', config: DEFAULT_CONFIG, seedDir: null })
+    expect(buildRunSnapshot(repos, b.id)!.initialCriteria).toBeNull()
+  })
+
+  test('reports the criteria applied to the round in flight, so a refresh during work keeps them', () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const run = repos.runs.create({ name: 'r', initialCriteria: 'creation text', config: DEFAULT_CONFIG, seedDir: null })
+    const round = repos.rounds.create({ runId: run.id, idx: 1, goalMd: 'g' })
+    repos.rounds.setCriteria(round.id, CRITERIA, 'user')
+    repos.rounds.setStatus(round.id, 'running')
+    expect(buildRunSnapshot(repos, run.id)!.lastRoundCriteria).toEqual({
+      roundIdx: 1, criteriaMd: CRITERIA, source: 'user', status: 'running',
+    })
+  })
+
+  test('a round still waiting for generated criteria reports none, not the creation default', () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const run = repos.runs.create({ name: 'r', initialCriteria: 'creation text', config: DEFAULT_CONFIG, seedDir: null })
+    repos.rounds.create({ runId: run.id, idx: 1, goalMd: 'g' })
+    expect(buildRunSnapshot(repos, run.id)!.lastRoundCriteria).toEqual({
+      roundIdx: 1, criteriaMd: null, source: 'generated', status: 'pending',
+    })
+  })
+})
+
 test('snapshot carries sandbox and roster from run config', () => {
   const { repos, run } = setup()
   const s = buildRunSnapshot(repos, run.id, { sandbox: 'mock', roster: [], warnings: [], capacity: null } as never)!

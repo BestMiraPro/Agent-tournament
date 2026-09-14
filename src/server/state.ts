@@ -18,11 +18,28 @@ export interface SnapshotScore {
   rationaleMd: string
 }
 
+/** The criteria a round actually has on record, as distinct from any editor draft. */
+export interface AppliedCriteria {
+  roundIdx: number
+  /** Null while a round that asked for generated criteria is still waiting for them. */
+  criteriaMd: string | null
+  source: 'user' | 'generated'
+  status: string
+}
+
 export interface RunSnapshot {
   runId: string
   name: string
   lastRoundIdx: number
   goalMd: string | null
+  /**
+   * Criteria supplied when the run was created — the draft default before round 1. Kept
+   * on the server so it is visible in the editor and survives a reload, instead of living
+   * in a browser variable that could be sent without ever being shown.
+   */
+  initialCriteria: string | null
+  /** What the latest round (in flight or finished) has recorded; null before round 1. */
+  lastRoundCriteria: AppliedCriteria | null
   agents: SnapshotAgent[]
   scores: SnapshotScore[]
   sandbox: string
@@ -64,11 +81,18 @@ export function buildRunSnapshot(repos: Repos, runId: string, extra?: RunSnapsho
 
   let scores: SnapshotScore[] = []
   let goalMd: string | null = run.initialGoal
+  let lastRoundCriteria: AppliedCriteria | null = null
   if (lastRoundIdx > 0) {
     const rounds = repos.rounds.listForRun?.(runId) ?? []
     const last = rounds.find((r) => r.idx === lastRoundIdx)
     if (last) {
       goalMd = last.goalMd
+      lastRoundCriteria = {
+        roundIdx: last.idx,
+        criteriaMd: last.criteriaMd,
+        source: last.criteriaSource === 'user' ? 'user' : 'generated',
+        status: last.status,
+      }
       scores = repos.scores.forRound(last.id).map((s) => ({
         agentId: s.agentId,
         rank: s.rank,
@@ -80,7 +104,10 @@ export function buildRunSnapshot(repos: Repos, runId: string, extra?: RunSnapsho
   }
 
   return {
-    runId, name: run.name, lastRoundIdx, goalMd, agents: snapshotAgents, scores,
+    runId, name: run.name, lastRoundIdx, goalMd,
+    initialCriteria: run.initialCriteria,
+    lastRoundCriteria,
+    agents: snapshotAgents, scores,
     sandbox: extra?.sandbox ?? run.config.sandbox,
     roster: extra?.roster ?? run.config.roster,
     capacity: extra?.capacity ?? null,

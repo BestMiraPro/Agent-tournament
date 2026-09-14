@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS runs (
   status TEXT NOT NULL,
   config_json TEXT NOT NULL,
   seed_dir TEXT,
-  initial_goal TEXT
+  initial_goal TEXT,
+  initial_criteria TEXT
 );
 
 CREATE TABLE IF NOT EXISTS rounds (

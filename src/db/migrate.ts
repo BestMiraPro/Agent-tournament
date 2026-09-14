@@ -7,6 +7,9 @@ import type { Db } from './open.js'
  */
 const ADDITIONS: { table: string; column: string; ddl: string }[] = [
   { table: 'runs', column: 'initial_goal', ddl: 'TEXT' },
+  // Nullable with no default: runs created before this column never recorded creation
+  // criteria, and a fabricated value would make them claim criteria nobody supplied.
+  { table: 'runs', column: 'initial_criteria', ddl: 'TEXT' },
   { table: 'submissions', column: 'tokens_cache_read', ddl: 'INTEGER DEFAULT 0' },
   { table: 'submissions', column: 'tokens_cache_write', ddl: 'INTEGER DEFAULT 0' },
 ]

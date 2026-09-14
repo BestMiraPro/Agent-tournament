@@ -15,6 +15,8 @@ export interface RunRow {
   config: RunConfig
   seedDir: string | null
   initialGoal: string | null
+  /** Criteria supplied when the run was created: the round-1 draft default, never applied silently. */
+  initialCriteria: string | null
 }
 
 export interface RoundRow {
@@ -51,14 +53,17 @@ function decodeConfig(json: string): RunConfig {
 export function makeRepos(db: Db) {
   return {
     runs: {
-      create(input: { name: string; initialGoal?: string | null; config: RunConfig; seedDir: string | null }): RunRow {
+      create(input: {
+        name: string; initialGoal?: string | null; initialCriteria?: string | null; config: RunConfig; seedDir: string | null
+      }): RunRow {
         const row: RunRow = {
           id: id(), name: input.name, createdAt: now(),
           status: 'active', config: input.config, seedDir: input.seedDir, initialGoal: input.initialGoal ?? null,
+          initialCriteria: input.initialCriteria ?? null,
         }
         db.prepare(
-          'INSERT INTO runs (id, name, created_at, status, config_json, seed_dir, initial_goal) VALUES (?,?,?,?,?,?,?)',
-        ).run(row.id, row.name, row.createdAt, row.status, encodeConfig(row.config), row.seedDir, row.initialGoal)
+          'INSERT INTO runs (id, name, created_at, status, config_json, seed_dir, initial_goal, initial_criteria) VALUES (?,?,?,?,?,?,?,?)',
+        ).run(row.id, row.name, row.createdAt, row.status, encodeConfig(row.config), row.seedDir, row.initialGoal, row.initialCriteria)
         return row
       },
       get(runId: string): RunRow | null {
@@ -67,6 +72,7 @@ export function makeRepos(db: Db) {
         return {
           id: r.id, name: r.name, createdAt: r.created_at, status: r.status,
           config: decodeConfig(r.config_json), seedDir: r.seed_dir, initialGoal: r.initial_goal,
+          initialCriteria: r.initial_criteria ?? null,
         }
       },
       updateConfig(runId: string, config: RunConfig): void {

@@ -4,6 +4,7 @@ import { abortRound, createAgent, createRunFull, deleteRun, getRoundStats, getRu
 import { parsePricing } from './lib/pricing.js'
 import { summarizeRoster } from './lib/roster.js'
 import { createStartGate, isCurrentRunRequest } from './lib/lifecycle.js'
+import { criteriaDraftSeed } from './lib/criteria.js'
 import { useLiveRun } from './useLiveRun.js'
 import { AgentDrawer } from './components/AgentDrawer.js'
 import { AnalyticsPanel } from './components/AnalyticsPanel.js'
@@ -35,9 +36,6 @@ export function App() {
   // The same round-stats fetch feeds the summary strip + round-detail selector —
   // retained, not refetched, so no new polling beyond this existing call.
   const [roundStats, setRoundStats] = useState<RoundStats[]>([])
-  // Setup criteria is a single-session default for round 1 only — rounds own
-  // criteria after that, so a reload before round 1 loses it (no persistence).
-  const [pendingCriteria, setPendingCriteria] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const live = useLiveRun(snapshot)
   const gridRef = useRef<HTMLDivElement>(null)
@@ -128,7 +126,6 @@ export function App() {
       return
     }
     if (navigation.current !== createNavigation) { setCreating(false); return }
-    setPendingCriteria(value.criteria)
     selectedRun.current = runId
     navigation.current++
     const initialNavigation = navigation.current
@@ -277,26 +274,28 @@ export function App() {
             roundIdx={activeRoundIdx}
             onRun={(goalMd, criteriaMd) => {
               if (!startGate.current.tryStart()) return
-              // First round after a setup-created run carries the setup
-              // criteria (blank = null = auto-generate); an explicit
-              // RoundControls entry always wins, and later rounds fall back to
-              // null/auto — the RoundControls path below is untouched.
-              const first = pendingCriteria?.trim() ? pendingCriteria : null
+              // Exactly the visible draft, null when cleared: creation criteria reach
+              // round 1 by being shown in the editor, never through a hidden fallback.
               setStarting(true)
-              void startRound(snapshot.runId, goalMd, criteriaMd ?? first)
-                .then(() => { setPendingCriteria(null); void refresh(snapshot.runId) })
+              void startRound(snapshot.runId, goalMd, criteriaMd)
+                .then(() => { void refresh(snapshot.runId) })
                 .catch((e) => setError(serverError(e)))
                 .finally(() => { startGate.current.finish(); setStarting(false) })
             }}
-            criteria={lastRound?.criteriaMd ?? null}
+            criteria={criteriaDraftSeed(snapshot)}
+            appliedCriteria={snapshot.lastRoundCriteria}
             criteriaSource={lastRound?.criteriaSource ?? null}
             metaDigest={lastRound?.metaDigest ?? null}
             rosterModels={[...new Set(snapshot.roster.map((r) => r.modelId))]}
             agents={snapshot.agents.map((a) => ({ agentId: a.agentId, label: a.label }))}
             onOverrideCriteria={(text) =>
               overrideCriteria(snapshot.runId, activeRoundIdx, text)
-                .then(() => 'Criteria override recorded.')
-                .catch((e) => serverError(e))}
+                .then(() => {
+                  // Re-read so the applied view shows what the server now holds.
+                  void refresh(snapshot.runId)
+                  return { ok: true, message: `Override applied to round ${activeRoundIdx}.` }
+                })
+                .catch((e) => ({ ok: false, message: serverError(e) }))}
             onAddAgent={(input) =>
               createAgent(snapshot.runId, input)
                 .then((r) => { void refresh(snapshot.runId); return { ok: true as const, message: `Added ${r.label}.` } })

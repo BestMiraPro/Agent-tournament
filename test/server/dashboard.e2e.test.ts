@@ -61,6 +61,72 @@ describe('dashboard end to end', () => {
     }
   })
 
+  test('creation criteria persist, show before round 1, apply to the round, and stay per run', async () => {
+    // Setup criteria used to live only in a browser variable: the textbox showed nothing,
+    // a reload lost them, and they could still be sent behind the operator's back.
+    const CRITERIA = 'Calmar first\nOmega second'
+    const dashboard = createDashboard({ population: 2 })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let entered!: () => void
+    const judging = new Promise<void>((resolve) => { entered = resolve })
+    const original = Judge.prototype.resolveCriteria
+    const resolveSpy = vi.spyOn(Judge.prototype, 'resolveCriteria').mockImplementation(
+      async function (this: Judge, goalMd: string, criteriaMd: string | null) {
+        entered()
+        await gate
+        return original.call(this, goalMd, criteriaMd)
+      },
+    )
+    const snapshot = async (runId: string) =>
+      JSON.parse((await dashboard.app.inject({ method: 'GET', url: `/api/runs/${runId}` })).body)
+
+    try {
+      const roster = [{ modelId: 'mock/model', count: 2, temperature: 0.7 }]
+      const createdA = await dashboard.app.inject({
+        method: 'POST', url: '/api/runs',
+        payload: { name: 'A', goal: 'g', sandbox: 'mock', roster, criteria: CRITERIA },
+      })
+      expect(createdA.statusCode).toBe(201)
+      const { runId: a } = JSON.parse(createdA.body) as { runId: string }
+      const createdB = await dashboard.app.inject({
+        method: 'POST', url: '/api/runs',
+        payload: { name: 'B', goal: 'g', sandbox: 'mock', roster, criteria: null },
+      })
+      const { runId: b } = JSON.parse(createdB.body) as { runId: string }
+      const createdLegacy = await dashboard.app.inject({
+        method: 'POST', url: '/api/runs', payload: { name: 'L', goal: 'g', criteria: 'legacy rules' },
+      })
+      const { runId: legacy } = JSON.parse(createdLegacy.body) as { runId: string }
+
+      expect((await snapshot(a)).initialCriteria).toBe(CRITERIA)
+      expect((await snapshot(a)).lastRoundCriteria).toBeNull()
+      expect((await snapshot(b)).initialCriteria).toBeNull()
+      expect((await snapshot(legacy)).initialCriteria).toBe('legacy rules')
+
+      const started = await dashboard.app.inject({
+        method: 'POST', url: `/api/runs/${a}/rounds`, payload: { goalMd: 'g', criteriaMd: CRITERIA },
+      })
+      expect(started.statusCode).toBe(202)
+
+      // Mid-round, before criteria resolve, a refresh still returns what was submitted.
+      await judging
+      expect((await snapshot(a)).lastRoundCriteria).toMatchObject({ roundIdx: 1, criteriaMd: CRITERIA, source: 'user' })
+      expect((await snapshot(b)).lastRoundCriteria).toBeNull()
+
+      release()
+      await dashboard.registry.get(a)!.manager.waitForIdle(a)
+      const round = dashboard.repos.rounds.listForRun(a)[0]!
+      expect(round.criteriaMd).toBe(CRITERIA)
+      expect(round.criteriaSource).toBe('user')
+      expect((await snapshot(b)).initialCriteria).toBeNull()
+    } finally {
+      release?.()
+      resolveSpy.mockRestore()
+      await dashboard.shutdown()
+    }
+  })
+
   test('a browser client sees a round play out over the websocket', async () => {
     const db = openDb(':memory:')
     const repos = makeRepos(db)

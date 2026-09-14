@@ -98,4 +98,49 @@ describe('openDb', () => {
       await rm(dir, { recursive: true, force: true }).catch(() => {})
     }
   })
+
+  test('migrates a runs table that predates initial criteria, without inventing any', async () => {
+    // The immediately previous schema: it already has initial_goal, not initial_criteria.
+    // A historical run never recorded its creation criteria, so the only honest value is
+    // null — a fabricated default would make old runs claim criteria nobody supplied.
+    const dir = await mkdtemp(join(tmpdir(), 'agent-tournament-migrate-criteria-test-'))
+    const dbPath = join(dir, 'old.sqlite')
+    try {
+      const old = new DatabaseSync(dbPath)
+      old.exec(`CREATE TABLE runs (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
+        status TEXT NOT NULL, config_json TEXT NOT NULL, seed_dir TEXT, initial_goal TEXT
+      )`)
+      old.prepare('INSERT INTO runs VALUES (?,?,?,?,?,?,?)')
+        .run('old-run', 'old run', Date.now(), 'active', '{}', null, 'kept goal')
+      old.close()
+
+      const migrated = openDb(dbPath)
+      const row = makeRepos(migrated).runs.get('old-run')!
+      expect(row.initialCriteria).toBeNull()
+      expect(row.initialGoal).toBe('kept goal')
+      migrated.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  test('preserves multiline initial criteria exactly across a file-backed reopen', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-tournament-criteria-test-'))
+    const dbPath = join(dir, 'criteria.sqlite')
+    const criteria = 'Calmar first\nOmega second\n  indented third'
+    try {
+      const first = openDb(dbPath)
+      const run = makeRepos(first).runs.create({
+        name: 'criteria test', initialGoal: 'g', initialCriteria: criteria, config: DEFAULT_CONFIG, seedDir: null,
+      })
+      first.close()
+
+      const second = openDb(dbPath)
+      expect(makeRepos(second).runs.get(run.id)!.initialCriteria).toBe(criteria)
+      second.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  })
 })

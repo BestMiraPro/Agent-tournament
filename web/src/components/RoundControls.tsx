@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { shouldHydrateCriteria } from '../lib/lifecycle.js'
+import { criteriaDraftState, criteriaForSubmit } from '../lib/criteria.js'
 import { Markdown } from './Markdown.js'
-import type { AddAgentStrategy } from '../api.js'
+import type { AddAgentStrategy, AppliedCriteria } from '../api.js'
 
 export interface AddAgentFormInput {
   modelId: string
@@ -13,7 +14,7 @@ export interface AddAgentFormInput {
 // callbacks. All new props are optional so existing usages keep compiling.
 export function RoundControls({
   goal, busy, starting = false, roundIdx, onRun,
-  criteria, criteriaSource, metaDigest,
+  criteria, criteriaSource, metaDigest, appliedCriteria = null,
   rosterModels, agents,
   onOverrideCriteria, onAddAgent, onAbort,
 }: {
@@ -22,21 +23,25 @@ export function RoundControls({
   starting?: boolean
   roundIdx: number
   onRun: (goalMd: string, criteriaMd: string | null) => void
+  /** The draft to start from; see criteriaDraftSeed. */
   criteria?: string | null
   criteriaSource?: 'user' | 'generated' | null
   metaDigest?: string | null
+  /** What the latest round has on record, shown apart from the editable draft. */
+  appliedCriteria?: AppliedCriteria | null
   rosterModels?: string[]
   agents?: { agentId: string; label: string }[]
-  onOverrideCriteria?: (text: string) => Promise<string | null>
+  onOverrideCriteria?: (text: string) => Promise<{ ok: boolean; message: string }>
   onAddAgent?: (input: AddAgentFormInput) => Promise<{ ok: boolean; message: string }>
   onAbort?: () => Promise<string | null>
 }) {
   const [text, setText] = useState(goal)
-  // Prefill arrives async (round-stats fetch), so sync when the prop changes.
+  // The seed can change after mount (a refresh lands), so sync it — unless the operator
+  // has already typed, in which case their draft is never replaced.
   const [criteriaText, setCriteriaText] = useState(criteria ?? '')
   const criteriaDirty = useRef(false)
   useEffect(() => { if (shouldHydrateCriteria(criteriaDirty.current)) setCriteriaText(criteria ?? '') }, [criteria])
-  const [overrideMsg, setOverrideMsg] = useState<string | null>(null)
+  const [overrideResult, setOverrideResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [aborting, setAborting] = useState(false)
   const [abortMsg, setAbortMsg] = useState<string | null>(null)
   // The snapshot refresh shows idle when the in-flight round settles.
@@ -51,7 +56,7 @@ export function RoundControls({
   const [cloneId, setCloneId] = useState('')
   const [addMsg, setAddMsg] = useState<string | null>(null)
 
-  const trimmedCriteria = criteriaText.trim()
+  const draftState = criteriaDraftState(criteriaText, appliedCriteria, busy)
   const models = rosterModels ?? []
   const agentList = agents ?? []
   const effectiveModel = model || models[0] || ''
@@ -79,9 +84,20 @@ export function RoundControls({
         onChange={(e) => setText(e.target.value)}
         disabled={busy}
       />
-      <button onClick={() => onRun(text, trimmedCriteria === '' ? null : criteriaText)} disabled={busy || starting || text.trim().length === 0}>
+      <button onClick={() => onRun(text, criteriaForSubmit(criteriaText))} disabled={busy || starting || text.trim().length === 0}>
         {busy ? `Round ${roundIdx} in progress…` : starting ? 'Starting round…' : `Run round ${roundIdx + 1}`}
       </button>
+      {appliedCriteria && (
+        <section className="criteria-applied" aria-label={`Criteria applied to round ${appliedCriteria.roundIdx}`}>
+          <h3>
+            Applied to round {appliedCriteria.roundIdx}{' '}
+            <span className={`badge badge--${appliedCriteria.source}`}>{appliedCriteria.source}</span>
+          </h3>
+          {appliedCriteria.criteriaMd === null
+            ? <p className="muted">Generated when judging starts.</p>
+            : <p style={{ whiteSpace: 'pre-wrap' }}>{appliedCriteria.criteriaMd}</p>}
+        </section>
+      )}
       <label htmlFor="criteria">Judging criteria (empty = auto-generate from goal)</label>
       <textarea
         id="criteria"
@@ -90,13 +106,26 @@ export function RoundControls({
         placeholder="auto-generate from goal"
         onChange={(e) => { criteriaDirty.current = true; setCriteriaText(e.target.value) }}
       />
+      {draftState === 'unsaved-override' && (
+        <p className="muted">Unsaved override — it is not applied to round {roundIdx} until you press Override.</p>
+      )}
+      {draftState === 'next-round' && (
+        <p className="muted">Applies to round {roundIdx + 1} when you run it.</p>
+      )}
       {busy && onOverrideCriteria && (
         <>
-          <button onClick={() => { void onOverrideCriteria(criteriaText).then(setOverrideMsg) }}>
+          <button onClick={() => {
+            setOverrideResult(null)
+            // The draft is left exactly as typed whatever happens, so a rejected override
+            // (a 409 once judging has started) never discards the operator's text.
+            void onOverrideCriteria(criteriaText).then(setOverrideResult)
+          }}>
             Override running round
           </button>
           <p className="muted">Criteria can be changed until judging starts.</p>
-          {overrideMsg && <p className="muted">{overrideMsg}</p>}
+          {overrideResult && (
+            <p className={overrideResult.ok ? 'muted' : 'error'}>{overrideResult.message}</p>
+          )}
         </>
       )}
       {metaDigest != null && (

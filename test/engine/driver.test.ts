@@ -188,6 +188,61 @@ describe('TournamentEngine', () => {
   })
 })
 
+describe('criteria persistence', () => {
+  const CRITERIA = 'Calmar first\nOmega second'
+
+  test('createRun stores the exact initial criteria, a blank as null, and legacy callers as null', () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 2 })
+    expect(repos.runs.get(engine.createRun('a', 'goal', CRITERIA).id)!.initialCriteria).toBe(CRITERIA)
+    expect(repos.runs.get(engine.createRun('b', 'goal', '  \n ').id)!.initialCriteria).toBeNull()
+    expect(repos.runs.get(engine.createRun('c', 'goal').id)!.initialCriteria).toBeNull()
+  })
+
+  test('submitted criteria are on the round row before PREPARE, so a refresh during work shows them', async () => {
+    // The row used to receive criteria only at the judging boundary, so for the whole of
+    // PREPARE and WORK a reload showed the round as having no criteria at all.
+    let inspect: () => void = () => {}
+    const { engine, repos } = makeMockEngine({
+      seed: 1, populationSize: 2,
+      preparePopulation: async () => { inspect() },
+    })
+    const run = engine.createRun('r', 'goal')
+    let duringPrepare: { criteriaMd: string | null; source: string } | null = null
+    inspect = () => {
+      const row = repos.rounds.listForRun(run.id).at(-1)!
+      duringPrepare = { criteriaMd: row.criteriaMd, source: row.criteriaSource }
+    }
+
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: CRITERIA })
+    expect(duringPrepare).toEqual({ criteriaMd: CRITERIA, source: 'user' })
+    const row = repos.rounds.listForRun(run.id).at(-1)!
+    expect(row.criteriaMd).toBe(CRITERIA)
+    expect(row.criteriaSource).toBe('user')
+  })
+
+  test('without submitted criteria the row stays unset until judging generates them', async () => {
+    let inspect: () => void = () => {}
+    const { engine, repos } = makeMockEngine({
+      seed: 1, populationSize: 2,
+      preparePopulation: async () => { inspect() },
+    })
+    const run = engine.createRun('r', 'goal', 'creation default the round was not given')
+    let duringPrepare: { criteriaMd: string | null; source: string } | null = null
+    inspect = () => {
+      const row = repos.rounds.listForRun(run.id).at(-1)!
+      duringPrepare = { criteriaMd: row.criteriaMd, source: row.criteriaSource }
+    }
+
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    // Explicit null means generate: the creation default must not be applied behind it.
+    expect(duringPrepare).toEqual({ criteriaMd: null, source: 'generated' })
+    const row = repos.rounds.listForRun(run.id).at(-1)!
+    expect(row.criteriaSource).toBe('generated')
+    expect(row.criteriaMd).not.toBe('creation default the round was not given')
+    expect(row.criteriaMd).not.toBeNull()
+  })
+})
+
 describe('cooperative abort', () => {
   test('abort during PREPARE: queued agents stop, runner and judge never called', async () => {
     const { engine, repos, sandbox } = makeMockEngine({ seed: 1, populationSize: 4 })

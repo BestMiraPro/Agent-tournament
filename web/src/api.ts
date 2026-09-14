@@ -16,11 +16,23 @@ export interface SnapshotScore {
   rationaleMd: string
 }
 
+/** Mirrors AppliedCriteria in src/server/state.ts: what a round has on record. */
+export interface AppliedCriteria {
+  roundIdx: number
+  criteriaMd: string | null
+  source: 'user' | 'generated'
+  status: string
+}
+
 export interface RunSnapshot {
   runId: string
   name: string
   lastRoundIdx: number
   goalMd: string | null
+  /** Saved creation criteria: the round-1 draft default. */
+  initialCriteria: string | null
+  /** The latest round's recorded criteria; null before round 1. */
+  lastRoundCriteria: AppliedCriteria | null
   agents: SnapshotAgent[]
   scores: SnapshotScore[]
   busy: boolean

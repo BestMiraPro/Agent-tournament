@@ -67,7 +67,7 @@ export class TournamentEngine {
     }
   }
 
-  createRun(name: string, initialGoal: string) {
+  createRun(name: string, initialGoal: string, initialCriteria: string | null = null) {
     const { repos, config } = this.d
 
     // The population is built purely from roster counts, so a roster that does not
@@ -90,7 +90,11 @@ export class TournamentEngine {
       models: config.roster.map((r) => r.modelId),
     })
 
-    const run = repos.runs.create({ name, initialGoal, config, seedDir: config.seedDir })
+    const run = repos.runs.create({
+      name, initialGoal, config, seedDir: config.seedDir,
+      // A blank setup field means "generate", so it is stored as no criteria at all.
+      initialCriteria: initialCriteria !== null && initialCriteria.trim() !== '' ? initialCriteria : null,
+    })
     this.budgets.set(run.id, budget)
 
     let index = 0
@@ -189,6 +193,12 @@ export class TournamentEngine {
     const roundIdx = repos.rounds.lastIdx(runId) + 1
     const round = repos.rounds.create({ runId, idx: roundIdx, goalMd: input.goalMd })
     repos.rounds.markStarted(round.id)
+    // Blank or null means generate. Anything else is written to the round row now,
+    // before PREPARE, rather than at the judging boundary: until then a reload during
+    // PREPARE or WORK showed the round as having no criteria at all.
+    const submittedCriteria =
+      input.criteriaMd !== null && input.criteriaMd.trim() !== '' ? input.criteriaMd : null
+    if (submittedCriteria !== null) repos.rounds.setCriteria(round.id, submittedCriteria, 'user')
 
     try {
       // Round counters reset; run totals and any run-level breach deliberately survive.
@@ -524,11 +534,12 @@ export class TournamentEngine {
       if (this.aborted.has(runId)) throw new Error('round aborted by user')
       repos.rounds.setStatus(round.id, 'judging')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'judging' })
-      // WHY re-read the row: an override that lands mid-round must win over the
-      // POST body. A fresh row defaults to criteriaSource 'generated' (rounds.create),
-      // so the fast path is byte-identical to today.
+      // WHY re-read the row: an override accepted mid-round must win over what was
+      // submitted. Submitted criteria were written to the row at creation, so a later
+      // accepted override has already replaced them there; a row still marked
+      // 'generated' means nothing was submitted and nothing was overridden.
       const rowNow = repos.rounds.get(round.id)
-      const effective = rowNow?.criteriaSource === 'user' ? rowNow.criteriaMd : input.criteriaMd
+      const effective = rowNow?.criteriaSource === 'user' ? rowNow.criteriaMd : submittedCriteria
       const { criteriaMd, source } = await judge.resolveCriteria(
         input.goalMd,
         effective,

@@ -108,7 +108,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
   const app = buildApi({
     repos,
     manager,
-    createRun: (name, goal) => engine.createRun(name, goal).id,
+    createRun: (name, goal, criteria) => engine.createRun(name, goal, criteria ?? null).id,
     registry,
     composeWith,
     // Applied before the spec is validated, which is the only place they can take

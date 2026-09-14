@@ -22,7 +22,8 @@ function round(idx: number, goalMd: string, scoreScale: RoundStats['scoreScale']
 }
 
 const snapshot: RunSnapshot = {
-  runId: 'run', name: 'Run', lastRoundIdx: 3, goalMd: 'goal', agents: [], scores: [],
+  runId: 'run', name: 'Run', lastRoundIdx: 3, goalMd: 'goal', initialCriteria: null, lastRoundCriteria: null,
+  agents: [], scores: [],
   busy: false, lastError: null, sandbox: 'mock', roster: [], capacity: null, warnings: [],
 }
 
