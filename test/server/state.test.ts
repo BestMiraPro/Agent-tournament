@@ -118,3 +118,32 @@ test('snapshot carries sandbox and roster from run config', () => {
   expect(s.sandbox).toBe('mock')
   expect(s.warnings).toEqual([])
 })
+
+test('snapshot scores say which ranked agents had failed, so a reload keeps that visible', () => {
+  const db = openDb(':memory:')
+  const repos = makeRepos(db)
+  const run = repos.runs.create({ name: 'r', config: DEFAULT_CONFIG, seedDir: null })
+  const round = repos.rounds.create({ runId: run.id, idx: 1, goalMd: 'g' })
+  const ok = repos.agents.create({ runId: run.id, label: 'ok', parentAgentId: null, bornRound: 1 })
+  const bad = repos.agents.create({ runId: run.id, label: 'bad', parentAgentId: null, bornRound: 1 })
+  const entries: [typeof ok, 'ok' | 'error'][] = [[ok, 'ok'], [bad, 'error']]
+  for (const [agent, status] of entries) {
+    const genome = repos.genomes.create({
+      agentId: agent.id, roundIdx: 1, strategyMd: 's', notesMd: '',
+      modelId: 'm/x', temperature: 0.7, parentGenomeId: null, origin: 'seed',
+    })
+    repos.submissions.create({
+      roundId: round.id, agentId: agent.id, genomeId: genome.id, submissionMd: null, fileManifest: [],
+      workspacePath: '', status, errorText: null,
+      tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0, durationMs: 0,
+    })
+  }
+  // A failed zero-score agent can still be persisted at rank 1.
+  repos.scores.insertMany(round.id, [
+    { roundId: round.id, agentId: bad.id, rank: 1, score: 0, rationaleMd: '', band: null },
+    { roundId: round.id, agentId: ok.id, rank: 2, score: 0, rationaleMd: '', band: null },
+  ])
+  const s = buildRunSnapshot(repos, run.id)!
+  expect(s.scores.find((x) => x.agentId === bad.id)?.failed).toBe(true)
+  expect(s.scores.find((x) => x.agentId === ok.id)?.failed).toBe(false)
+})

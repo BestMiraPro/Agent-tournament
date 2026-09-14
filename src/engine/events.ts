@@ -1,3 +1,4 @@
+import type { AgentFailure } from '../core/failure.js'
 import type { RoundStatus } from '../core/types.js'
 
 export type AgentLiveStatus = 'pending' | 'running' | 'done' | 'failed'
@@ -9,10 +10,23 @@ export type AgentLiveStatus = 'pending' | 'running' | 'done' | 'failed'
  */
 export type EngineEvent =
   | { type: 'round.status'; runId: string; roundIdx: number; status: RoundStatus }
-  | { type: 'agent.status'; runId: string; agentId: string; status: AgentLiveStatus }
+  | {
+      type: 'agent.status'
+      runId: string
+      agentId: string
+      status: AgentLiveStatus
+      /** The round this status belongs to, so a late event cannot relabel a newer round. */
+      roundIdx?: number
+      /** Present when status is 'failed': why, published the moment the attempt ended. */
+      failure?: AgentFailure
+    }
   | { type: 'agent.session'; runId: string; agentId: string; sessionId: string }
   | { type: 'agent.activity'; runId: string; agentId: string; kind: 'tool' | 'text' | 'file'; detail: string }
   | {
+      /**
+       * The agent's terminal usage totals, sent at most once per attempt and only when
+       * they were actually observed. Consumers set these values; they never add them up.
+       */
       type: 'agent.usage'
       runId: string
       agentId: string
@@ -24,9 +38,18 @@ export type EngineEvent =
       type: 'round.scored'
       runId: string
       roundIdx: number
-      scores: { agentId: string; rank: number; score: number }[]
+      /** `failed` marks ranked agents whose attempt did not succeed, so rank 1 is not read as a win. */
+      scores: { agentId: string; rank: number; score: number; failed?: boolean }[]
     }
-  | { type: 'round.complete'; runId: string; roundIdx: number; budgetBreach: string | null }
+  | {
+      type: 'round.complete'
+      runId: string
+      roundIdx: number
+      /** A real budget breach. Never used to carry an arbitrary failure. */
+      budgetBreach: string | null
+      /** Why the round failed outright, when it did. */
+      error?: string | null
+    }
 
 export type EventSink = (event: EngineEvent) => void
 

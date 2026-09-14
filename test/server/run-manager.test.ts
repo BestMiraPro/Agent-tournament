@@ -127,3 +127,16 @@ describe('RunManager', () => {
     expect(engine.dispose.mock.calls).toEqual([['repeat']])
   })
 })
+
+test('an arbitrary round failure is reported as a run error, not as a budget breach', async () => {
+  // Any failure used to be sent as `budgetBreach`, so the dashboard labelled a crashed
+  // planner or a provider outage as "Budget: ...".
+  const { engine } = fakeEngine({ fail: true })
+  const events: EngineEvent[] = []
+  const m = new RunManager(engine as never, (e) => events.push(e))
+  m.startRound('r1', { goalMd: 'g', criteriaMd: null })
+  await m.waitForIdle('r1')
+  const complete = events.find((e) => e.type === 'round.complete') as Extract<EngineEvent, { type: 'round.complete' }>
+  expect(complete.budgetBreach).toBeNull()
+  expect(complete.error).toBe('round exploded')
+})

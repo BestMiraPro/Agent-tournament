@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { getRun, type RunSnapshot } from './api.js'
+import { getRun, type AgentFailure, type RunSnapshot } from './api.js'
 
 export interface LiveAgent {
   status: 'pending' | 'running' | 'done' | 'failed'
@@ -7,15 +7,29 @@ export interface LiveAgent {
   tokensIn: number
   tokensOut: number
   costUsd: number
+  /** Why the current attempt failed, as published the moment it ended. */
+  failure: AgentFailure | null
+  /** Whether usage was actually reported. Until it is, the counts above are not facts. */
+  usageReported: boolean
+}
+
+export interface LiveScore {
+  agentId: string
+  rank: number
+  score: number
+  /** Ranked, but the attempt failed: never presented as a win. */
+  failed?: boolean
 }
 
 export interface LiveState {
   agents: Record<string, LiveAgent>
-  scores: { agentId: string; rank: number; score: number }[]
+  scores: LiveScore[]
   roundStatus: string
   roundIdx: number
   busy: boolean
   lastBreach: string | null
+  /** Why the latest round failed outright — distinct from a budget breach. */
+  lastError: string | null
   wsStatus: 'connected' | 'reconnecting'
 }
 
@@ -26,19 +40,20 @@ export const initialLiveState: LiveState = {
   roundIdx: 0,
   busy: false,
   lastBreach: null,
+  lastError: null,
   wsStatus: 'connected',
 }
 
 function stateFromSnapshot(snapshot: RunSnapshot): LiveState {
   return {
     ...initialLiveState,
-    scores: snapshot.scores.map(({ agentId, rank, score }) => ({ agentId, rank, score })).sort((a, b) => a.rank - b.rank),
+    scores: snapshot.scores.map(({ agentId, rank, score, failed }) => ({ agentId, rank, score, failed })).sort((a, b) => a.rank - b.rank),
     roundIdx: snapshot.lastRoundIdx,
     busy: snapshot.busy,
   }
 }
 
-const blank: LiveAgent = { status: 'pending', activity: '', tokensIn: 0, tokensOut: 0, costUsd: 0 }
+const blank: LiveAgent = { status: 'pending', activity: '', tokensIn: 0, tokensOut: 0, costUsd: 0, failure: null, usageReported: false }
 
 /** Pure so it can be tested without a browser or a socket. */
 export function liveReducer(state: LiveState, event: { type: string } & Record<string, unknown>): LiveState {
@@ -53,14 +68,21 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
         status === 'preparing'
           ? Object.fromEntries(Object.keys(state.agents).map((id) => [id, { ...blank }]))
           : state.agents
-      return { ...state, roundStatus: status, roundIdx: event.roundIdx as number, busy: true, agents }
+      return {
+        ...state, roundStatus: status, roundIdx: event.roundIdx as number, busy: true, agents,
+        // A new round is a new attempt: the previous round's outright failure no longer applies.
+        lastError: status === 'preparing' ? null : state.lastError,
+      }
     }
-    case 'agent.status':
+    case 'agent.status': {
       if (!agentId) return state
+      const status = event.status as LiveAgent['status']
+      const failure = status === 'failed' ? ((event.failure as AgentFailure | undefined) ?? null) : null
       return {
         ...state,
-        agents: { ...state.agents, [agentId]: { ...current, status: event.status as LiveAgent['status'] } },
+        agents: { ...state.agents, [agentId]: { ...current, status, failure } },
       }
+    }
     case 'agent.activity':
       if (!agentId) return state
       return {
@@ -75,9 +97,12 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
           ...state.agents,
           [agentId]: {
             ...current,
-            tokensIn: current.tokensIn + (event.tokensIn as number),
-            tokensOut: current.tokensOut + (event.tokensOut as number),
-            costUsd: current.costUsd + (event.costUsd as number),
+            // Terminal totals, set rather than summed, so a second report of the same
+            // attempt cannot double the count.
+            tokensIn: event.tokensIn as number,
+            tokensOut: event.tokensOut as number,
+            costUsd: event.costUsd as number,
+            usageReported: true,
           },
         },
       }
@@ -87,7 +112,12 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
         scores: [...(event.scores as LiveState['scores'])].sort((a, b) => a.rank - b.rank),
       }
     case 'round.complete':
-      return { ...state, busy: false, lastBreach: (event.budgetBreach as string | null) ?? null }
+      return {
+        ...state,
+        busy: false,
+        lastBreach: (event.budgetBreach as string | null) ?? null,
+        lastError: (event.error as string | null | undefined) ?? null,
+      }
     /**
      * Seed standings from the HTTP snapshot.
      *

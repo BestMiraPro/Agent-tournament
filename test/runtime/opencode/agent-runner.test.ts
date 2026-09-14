@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { OpenCodeAgentRunner, QUIESCE_GRACE_MS, buildAgentPrompt } from '../../../src/runtime/opencode/agent-runner.js'
 import { MockSandbox } from '../../../src/runtime/mock-sandbox.js'
 import type { PromptBody, PromptResponse } from '../../../src/runtime/opencode/client.js'
+import { OpenCodeHttpError } from '../../../src/runtime/opencode/client.js'
 
 class FakeClient {
   public lastBody: PromptBody | null = null
@@ -240,5 +241,59 @@ describe('session id exposure', () => {
     await sb.writeFile(h, 'SUBMISSION.md', 'x')
     const res = await new OpenCodeAgentRunner(new FakeClient(okResponse) as never, sb).run(h, ctx('s'))
     expect(res.status).toBe('ok')
+  })
+})
+
+/** A client whose prompt rejects, the way a real HTTP failure or dropped socket does. */
+class RejectingClient {
+  constructor(private error: unknown) {}
+  async createSession() { return { id: 'ses_1' } }
+  async prompt(): Promise<PromptResponse> { throw this.error }
+  async abort() {}
+}
+
+describe('OpenCodeAgentRunner failure details', () => {
+  // The exact body stored for run 6eb22c7c on September 13.
+  const BODY_500 =
+    '{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_0672e772"}}'
+
+  test('an OpenCode 500 keeps status, name and ref in the result, with usage marked unknown', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    const error = new OpenCodeHttpError({ method: 'POST', path: '/session/ses_1/message', status: 500, bodyText: BODY_500 })
+    const res = await new OpenCodeAgentRunner(new RejectingClient(error) as never, sb).run(h, ctx('s'))
+    expect(res.status).toBe('error')
+    expect(res.failure).toEqual({
+      message: 'OpenCode returned HTTP 500 UnknownError (ref err_0672e772)',
+      httpStatus: 500, code: 'UnknownError', ref: 'err_0672e772',
+    })
+    expect(res.usageKnown).toBe(false)
+    expect(res.errorText).toContain('err_0672e772')
+  })
+
+  test('a transport rejection keeps its cause code in the result and in the persisted text', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    const error = new TypeError('fetch failed', { cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } })
+    const res = await new OpenCodeAgentRunner(new RejectingClient(error) as never, sb).run(h, ctx('s'))
+    expect(res.status).toBe('error')
+    expect(res.failure?.code).toBe('UND_ERR_HEADERS_TIMEOUT')
+    expect(res.failure?.httpStatus).toBeUndefined()
+    expect(res.errorText).toContain('UND_ERR_HEADERS_TIMEOUT')
+    expect(res.usageKnown).toBe(false)
+  })
+
+  test('a provider error inside a terminal response is structured, and its usage stays known', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    const c = new FakeClient({
+      info: { cost: 0.1, error: { name: 'APIError', data: { statusCode: 404, message: 'Not Found' } } }, parts: [],
+    })
+    const res = await new OpenCodeAgentRunner(c as never, sb).run(h, ctx('s'))
+    expect(res.status).toBe('error')
+    expect(res.failure).toMatchObject({ httpStatus: 404, code: 'APIError' })
+    // The response arrived, so its usage is a fact rather than an unknown.
+    expect(res.usageKnown).not.toBe(false)
+    expect(res.costUsd).toBe(0.1)
   })
 })

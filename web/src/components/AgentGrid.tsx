@@ -1,6 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
 import type { SnapshotAgent } from '../api.js'
-import type { LiveState } from '../useLiveRun.js'
+import type { LiveAgent, LiveState } from '../useLiveRun.js'
 
 const STATUS_LABEL: Record<string, string> = {
   pending: 'waiting',
@@ -10,6 +10,19 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 const PAGE_SIZE = 24
+
+/**
+ * What the usage line can honestly say.
+ *
+ * A count is shown only once usage was actually reported — then even 0 is a fact. Before
+ * that it is pending; and an attempt that ended without any report has unavailable usage,
+ * which is not the same thing as having spent nothing.
+ */
+export function usageLabel(live: LiveAgent | undefined): string {
+  if (!live) return ' '
+  if (live.usageReported) return `${live.tokensIn + live.tokensOut} tok`
+  return live.status === 'done' || live.status === 'failed' ? 'Usage unavailable' : 'Usage pending'
+}
 
 export function AgentGrid({ agents, live, onSelect }: {
   agents: SnapshotAgent[]
@@ -21,6 +34,7 @@ export function AgentGrid({ agents, live, onSelect }: {
   // pressure — whether #1 is barely ahead or running away with it — was invisible
   // without opening each agent's drawer.
   const scoreOf = new Map(live.scores.map((s) => [s.agentId, s.score]))
+  const scoredAsFailed = new Set(live.scores.filter((s) => s.failed === true).map((s) => s.agentId))
   const [page, setPage] = useState(1)
   useEffect(() => { setPage(1) }, [agents.length])
   const totalPages = Math.ceil(agents.length / PAGE_SIZE)
@@ -34,13 +48,16 @@ export function AgentGrid({ agents, live, onSelect }: {
           const status = l?.status ?? 'pending'
           const rank = rankOf.get(a.agentId)
           const score = scoreOf.get(a.agentId)
+          // A failed agent can still hold rank 1 with a zero score; it is not a winner.
+          const failed = status === 'failed' || scoredAsFailed.has(a.agentId)
+          const statusLabel = STATUS_LABEL[status] ?? status
           return (
             <div
               key={a.agentId}
               className={`cell cell--${status}${onSelect ? ' cell--selectable' : ''}`}
               role={onSelect ? 'button' : undefined}
               tabIndex={onSelect ? 0 : undefined}
-              aria-label={`Agent ${a.label}, ${a.modelId}, ${STATUS_LABEL[status] ?? status}`}
+              aria-label={`Agent ${a.label}, ${a.modelId}, ${statusLabel}${l?.failure ? `: ${l.failure.message}` : ''}`}
               onClick={onSelect ? () => onSelect(a.agentId) : undefined}
               // Enter/Space are the keyboard equivalents of a click for role=button.
               onKeyDown={onSelect ? (e: KeyboardEvent) => {
@@ -52,21 +69,27 @@ export function AgentGrid({ agents, live, onSelect }: {
             >
               <div className="cell__head">
                 <span className="cell__label">{a.label}</span>
-                {/* data-rank lets the leader be styled distinctly; rank is the one
-                    number on this cell a spectator is actually looking for. */}
+                {/* data-rank styles the podium; a failed agent never gets it, whatever its rank. */}
                 {rank !== undefined && (
-                  <span className="cell__rank" data-rank={rank}>#{rank}</span>
+                  <span
+                    className={`cell__rank${failed ? ' cell__rank--failed' : ''}`}
+                    data-rank={failed ? undefined : rank}
+                    title={failed ? 'Ranked, but this attempt failed' : undefined}
+                  >
+                    #{rank}
+                  </span>
                 )}
               </div>
               <div className="cell__model" title={a.modelId}>{a.modelId}</div>
               {score !== undefined && (
                 <div className="cell__score">{score.toFixed(1)}</div>
               )}
-              <div className="cell__status">{STATUS_LABEL[status] ?? status}</div>
+              <div className="cell__status">{statusLabel}</div>
+              {l?.failure && (
+                <div className="cell__failure" title={l.failure.message}>{l.failure.message}</div>
+              )}
               <div className="cell__activity">{l?.activity || ' '}</div>
-              <div className="cell__usage">
-                {l ? `${l.tokensIn + l.tokensOut} tok` : ' '}
-              </div>
+              <div className="cell__usage">{usageLabel(l)}</div>
             </div>
           )
         })}

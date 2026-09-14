@@ -8,12 +8,22 @@ export interface SnapshotAgent {
   parentAgentId: string | null
 }
 
+/** Mirrors AgentFailure in src/core/failure.ts: why one attempt failed, safe to show. */
+export interface AgentFailure {
+  message: string
+  httpStatus?: number
+  code?: string
+  ref?: string
+}
+
 export interface SnapshotScore {
   agentId: string
   rank: number
   score: number
   band: string | null
   rationaleMd: string
+  /** The submission for that round did not succeed, so the rank is not a win. */
+  failed: boolean
 }
 
 /** Mirrors AppliedCriteria in src/server/state.ts: what a round has on record. */

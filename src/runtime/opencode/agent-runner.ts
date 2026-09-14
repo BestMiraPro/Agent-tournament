@@ -1,4 +1,5 @@
 import { resolve as resolvePath } from 'node:path'
+import { describeFailure, describeProviderError, errorTextFor } from '../../core/failure.js'
 import { serializeGenome } from '../../core/genome.js'
 import type { QuiesceStatus } from '../../engine/capture.js'
 import type { AgentRunContext, AgentRunner, AgentRunResult } from '../agent-runner.js'
@@ -193,6 +194,11 @@ export class OpenCodeAgentRunner implements AgentRunner {
           return {
             status: 'error',
             errorText: `${code}: ${res.info.error.data?.message ?? ''}`.slice(0, 500),
+            failure: describeProviderError({
+              name: res.info.error.name,
+              statusCode: res.info.error.data?.statusCode,
+              message: res.info.error.data?.message,
+            }),
             ...usage,
             durationMs: Date.now() - started,
           }
@@ -215,7 +221,14 @@ export class OpenCodeAgentRunner implements AgentRunner {
       if (tracked.promptDispatched) this.requestAbort(tracked)
       return {
         status: isTimeout ? 'timeout' : 'error',
-        errorText: isTimeout ? `agent exceeded ${ctx.timeoutMs}ms` : String(e).slice(0, 500),
+        // errorTextFor keeps the transport cause that String(e) dropped, so a reopened run
+        // can still tell a headers timeout from a refused connection.
+        errorText: isTimeout ? `agent exceeded ${ctx.timeoutMs}ms` : errorTextFor(e),
+        failure: e instanceof TimeoutError
+          ? { message: `Agent exceeded ${ctx.timeoutMs}ms`, code: 'AGENT_TIMEOUT' }
+          : describeFailure(e),
+        // No terminal response arrived, so these zeros are placeholders, not observed usage.
+        usageKnown: false,
         ...zero,
         durationMs: Date.now() - started,
       }

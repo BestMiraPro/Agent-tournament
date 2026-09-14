@@ -308,6 +308,10 @@ export function App() {
           <h2 style={{ fontSize: '.9rem' }}>Leaderboard</h2>
           <Leaderboard agents={snapshot.agents} live={live} />
           {live.lastBreach && <p className="error">Budget: {live.lastBreach}</p>}
+          {/* A round that failed outright, reported as itself rather than as a budget breach. */}
+          {(live.lastError ?? snapshot.lastError) && (
+            <p className="error">Round failed: {live.lastError ?? snapshot.lastError}</p>
+          )}
         </aside>
       </div>
       <AnalyticsPanel
@@ -329,6 +333,7 @@ export function App() {
           agentId={selectedAgentId}
           onClose={() => { setSelectedAgentId(null); gridRef.current?.focus() }}
           onRetired={() => { setSelectedAgentId(null); void refresh(snapshot.runId) }}
+          live={live.agents[selectedAgentId]}
         />
       )}
     </>

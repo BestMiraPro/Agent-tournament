@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getAgentDetail, retireAgent, serverError, type AgentDetail } from '../api.js'
+import type { LiveAgent } from '../useLiveRun.js'
 import { lineDiff, type DiffLine } from '../lib/diff.js'
 import { Markdown } from './Markdown.js'
 import { fmtCost } from '../lib/cost.js'
@@ -30,11 +31,13 @@ function fileName(f: unknown): string {
   return String(f)
 }
 
-export function AgentDrawer({ runId, agentId, onClose, onRetired }: {
+export function AgentDrawer({ runId, agentId, onClose, onRetired, live }: {
   runId: string
   agentId: string
   onClose: () => void
   onRetired?: () => void
+  /** This agent's live state for the current round, so an open drawer follows it. */
+  live?: LiveAgent
 }) {
   const [data, setData] = useState<AgentDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -64,6 +67,22 @@ export function AgentDrawer({ runId, agentId, onClose, onRetired }: {
     return () => { alive = false }
   }, [runId, agentId])
 
+  // When the agent this drawer shows finishes or fails, re-read its persisted detail in
+  // place. The drawer used to fetch once on open, so it went on showing the previous
+  // round until it was closed and reopened.
+  const terminal = live?.status === 'done' || live?.status === 'failed' ? live.status : null
+  const seenTerminal = useRef(terminal)
+  useEffect(() => {
+    if (terminal === seenTerminal.current) return
+    seenTerminal.current = terminal
+    if (terminal === null) return
+    let alive = true
+    getAgentDetail(runId, agentId)
+      .then((d) => { if (alive) { setData(d); setError(null); setLoading(false) } })
+      .catch(() => { /* keep what is shown; the live failure above still reports this attempt */ })
+    return () => { alive = false }
+  }, [runId, agentId, terminal])
+
   // The drawer is only mounted while open, so "while open" = "while mounted".
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -80,6 +99,7 @@ export function AgentDrawer({ runId, agentId, onClose, onRetired }: {
   const manifestFiles = sub && Array.isArray(sub.fileManifest) ? sub.fileManifest : null
   const bestRank = history.length > 0 ? Math.min(...history.map((h) => h.rank)) : null
   const lineage = data ? [...data.lineage].reverse() : []
+  const liveFailure = live?.status === 'failed' ? live.failure : null
 
   return (
     <div className="drawer-backdrop" onClick={onClose}>
@@ -106,6 +126,20 @@ export function AgentDrawer({ runId, agentId, onClose, onRetired }: {
         </div>
         {retireError && <p className="error drawer__retire-error">{retireError}</p>}
         <div className="drawer__body">
+          {/* Shown before persisted detail loads: this is the attempt happening now. */}
+          {liveFailure && (
+            <section>
+              <h3>Current round failure</h3>
+              <pre className="drawer__error">{liveFailure.message}</pre>
+              <p className="muted">
+                {[
+                  liveFailure.httpStatus !== undefined ? `HTTP ${liveFailure.httpStatus}` : null,
+                  liveFailure.code ?? null,
+                  liveFailure.ref ? `ref ${liveFailure.ref}` : null,
+                ].filter(Boolean).join(' · ')}
+              </p>
+            </section>
+          )}
           {loading && <p>Loading…</p>}
           {error && <p className="error">{error}</p>}
           {data && !loading && !error && (

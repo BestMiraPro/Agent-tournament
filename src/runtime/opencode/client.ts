@@ -1,3 +1,4 @@
+import { isSafeCode, isSafeRef } from '../../core/failure.js'
 import type { OpenCodeModelRef } from './model-id.js'
 
 export interface TokenUsage {
@@ -57,6 +58,38 @@ export class OpenCodeTimeoutError extends Error {
   }
 }
 
+/**
+ * A non-2xx response from OpenCode, kept structured.
+ *
+ * The message keeps its long-standing readable form. The fields exist because a 500's
+ * error name and `ref` are what map a generic failure to the server's own log — the
+ * September 13 W&B failures were HTTP 500 UnknownError whose refs resolved to
+ * ProviderModelNotFoundError — and flattening them into a string lost that. Only
+ * validated values are stored; the raw body never becomes a field.
+ */
+export class OpenCodeHttpError extends Error {
+  readonly httpStatus: number
+  readonly errorName: string | undefined
+  readonly ref: string | undefined
+
+  constructor(input: { method: string; path: string; status: number; bodyText: string }) {
+    super(`OpenCode ${input.method} ${input.path} failed: ${input.status} ${input.bodyText.slice(0, 300)}`)
+    this.name = 'OpenCodeHttpError'
+    this.httpStatus = input.status
+    let name: unknown
+    let ref: unknown
+    try {
+      const parsed = JSON.parse(input.bodyText) as { name?: unknown; data?: { ref?: unknown } }
+      name = parsed?.name
+      ref = parsed?.data?.ref
+    } catch {
+      /* not JSON: the status alone is what is known */
+    }
+    this.errorName = isSafeCode(name) ? name : undefined
+    this.ref = isSafeRef(ref) ? ref : undefined
+  }
+}
+
 export class OpenCodeClient {
   constructor(private opts: OpenCodeClientOptions) {}
 
@@ -80,7 +113,7 @@ export class OpenCodeClient {
       })
       const text = await res.text()
       if (!res.ok) {
-        throw new Error(`OpenCode ${method} ${path} failed: ${res.status} ${text.slice(0, 300)}`)
+        throw new OpenCodeHttpError({ method, path, status: res.status, bodyText: text })
       }
       return (text ? JSON.parse(text) : null) as T
     } catch (error) {

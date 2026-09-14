@@ -1,3 +1,4 @@
+import type { AgentFailure } from '../core/failure.js'
 import type { Genome, SubmissionStatus } from '../core/types.js'
 import type { QuiesceStatus } from '../engine/capture.js'
 import { trueFitness } from './mock-provider.js'
@@ -13,6 +14,13 @@ export interface AgentRunContext {
 export interface AgentRunResult {
   status: SubmissionStatus
   errorText: string | null
+  /** Structured, publishable reason for a non-ok status; `errorText` stays the stored text. */
+  failure?: AgentFailure
+  /**
+   * False when the token/cost fields are placeholders because nothing reported them — a
+   * lost response, a timeout. Absent or true means they are real, including a real zero.
+   */
+  usageKnown?: boolean
   tokensIn: number
   tokensOut: number
   tokensCacheRead: number

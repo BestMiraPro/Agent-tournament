@@ -283,6 +283,8 @@ export function makeMockEngine(opts: {
   onEvent?: EventSink
   /** Prepare the exact active population before the round provisions agents. */
   preparePopulation?: (agentIds: readonly string[]) => Promise<void>
+  /** Wrap the runner this helper would otherwise use, to inject specific results or throws. */
+  wrapRunner?: (inner: AgentRunner) => AgentRunner
 }) {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
@@ -328,13 +330,14 @@ export function makeMockEngine(opts: {
   const reflector = new Reflector(provider, config.reflect, ['mock/model'])
 
   const mockRunner = new MockAgentRunner(sandbox, opts.seed)
-  const runner: AgentRunner = opts.hangingRunner
+  const baseRunner: AgentRunner = opts.hangingRunner
     ? new HangingRunner()
     : opts.floodFilesFor !== undefined || sabotaging
       ? new MischiefRunner(mockRunner, sandbox, provisionOrder, !opts.unstoppableSaboteur)
       : opts.hugeTokensFor !== undefined
         ? new HugeTokensRunner(mockRunner)
         : mockRunner
+  const runner: AgentRunner = opts.wrapRunner ? opts.wrapRunner(baseRunner) : baseRunner
 
   const engine = new TournamentEngine({
     repos,

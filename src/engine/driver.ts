@@ -1,3 +1,4 @@
+import { describeFailure, errorTextFor, failureFromText } from '../core/failure.js'
 import { serializeGenome } from '../core/genome.js'
 import { planSelection } from '../core/selection.js'
 import type { Genome, RunConfig, SubmissionStatus } from '../core/types.js'
@@ -286,20 +287,37 @@ export class TournamentEngine {
         // eventually ends — matched by exactly one done/failed emission via `finish` below.
         this.emit({ type: 'agent.status', runId, agentId: p.agent.id, status: 'running' })
         const finish = (result: AgentRunResult): AgentRunResult => {
+          const failed = result.status !== 'ok'
+          // Published the moment this worker returns — before COLLECT, JUDGE or any sibling
+          // finishes — so a card can say why an agent failed while the round still runs.
           this.emit({
             type: 'agent.status',
             runId,
             agentId: p.agent.id,
-            status: result.status === 'ok' ? 'done' : 'failed',
+            roundIdx,
+            status: failed ? 'failed' : 'done',
+            ...(failed
+              ? {
+                  failure: result.failure ?? failureFromText(
+                    result.status === 'no_submission'
+                      ? 'The agent finished without writing SUBMISSION.md'
+                      : result.errorText ?? `The agent ended with status ${result.status}`,
+                  ),
+                }
+              : {}),
           })
-          this.emit({
-            type: 'agent.usage',
-            runId,
-            agentId: p.agent.id,
-            tokensIn: result.tokensIn,
-            tokensOut: result.tokensOut,
-            costUsd: result.costUsd,
-          })
+          // Usage nobody observed is not a known zero: a runner that lost its response
+          // marks it unknown, and nothing is published rather than a fabricated 0.
+          if (result.usageKnown !== false) {
+            this.emit({
+              type: 'agent.usage',
+              runId,
+              agentId: p.agent.id,
+              tokensIn: result.tokensIn,
+              tokensOut: result.tokensOut,
+              costUsd: result.costUsd,
+            })
+          }
           return result
         }
 
@@ -311,6 +329,7 @@ export class TournamentEngine {
           const failed: AgentRunResult = {
             status: 'error',
             errorText: `provisioning failed: ${prepError}`,
+            failure: failureFromText(`Provisioning failed: ${prepError}`, 'PROVISION_FAILED'),
             tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
             costUsd: 0, durationMs: 0,
           }
@@ -364,11 +383,25 @@ export class TournamentEngine {
             const timedOut: AgentRunResult = {
               status: 'timeout',
               errorText: `driver timeout after ${config.agentTimeoutMs}ms`,
+              failure: failureFromText(`Driver timeout after ${config.agentTimeoutMs}ms`, 'DRIVER_TIMEOUT'),
+              // The runner never returned, so nothing about its usage was observed.
+              usageKnown: false,
               tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
               costUsd: 0, durationMs: Date.now() - started,
             }
             return finish(timedOut)
           }
+          // A runner that throws rather than returning still ended this attempt. This used
+          // to publish nothing, leaving the card on "working" until the whole round ended;
+          // the error still propagates exactly as before.
+          this.emit({
+            type: 'agent.status',
+            runId,
+            agentId: p.agent.id,
+            roundIdx,
+            status: 'failed',
+            failure: describeFailure(e),
+          })
           throw e
         } finally {
           // Without this the loser of the race keeps a timer alive for the full
@@ -517,7 +550,7 @@ export class TournamentEngine {
           workspacePath: handle?.workspacePath ?? '',
           status,
           errorText: !res.ok
-            ? String(res.error).slice(0, 500)
+            ? errorTextFor(res.error)
             : quota.ok
               ? res.value.errorText
               : quota.reason,
@@ -584,7 +617,13 @@ export class TournamentEngine {
         type: 'round.scored',
         runId,
         roundIdx,
-        scores: judged.scores.map((s) => ({ agentId: s.agentId, rank: s.rank, score: s.score })),
+        // A failed agent can still be ranked; saying so stops a zero-score rank 1 reading as a win.
+        scores: judged.scores.map((s) => ({
+          agentId: s.agentId,
+          rank: s.rank,
+          score: s.score,
+          failed: judgeInputs.some((j) => j.agentId === s.agentId && j.status !== 'ok'),
+        })),
       })
 
       // REFLECT

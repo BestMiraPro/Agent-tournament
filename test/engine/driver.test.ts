@@ -6,7 +6,8 @@ import { Reflector } from '../../src/evolution/reflect.js'
 import { MockProvider } from '../../src/runtime/mock-provider.js'
 import { MockAgentRunner } from '../../src/runtime/agent-runner.js'
 import type { AgentHandle } from '../../src/runtime/sandbox.js'
-import type { AgentRunContext } from '../../src/runtime/agent-runner.js'
+import type { AgentRunContext, AgentRunner, AgentRunResult } from '../../src/runtime/agent-runner.js'
+import type { EngineEvent } from '../../src/engine/events.js'
 import { RunManager } from '../../src/server/run-manager.js'
 
 describe('TournamentEngine', () => {
@@ -240,6 +241,80 @@ describe('criteria persistence', () => {
     expect(row.criteriaSource).toBe('generated')
     expect(row.criteriaMd).not.toBe('creation default the round was not given')
     expect(row.criteriaMd).not.toBeNull()
+  })
+})
+
+describe('agent failure events', () => {
+  // The September 13 incident: an OpenCode 500 whose ref maps to a model lookup failure.
+  const FAILURE = {
+    message: 'OpenCode returned HTTP 500 UnknownError (ref err_0672e772)',
+    httpStatus: 500, code: 'UnknownError', ref: 'err_0672e772',
+  }
+  const isFirstAgent = (ctx: AgentRunContext) => ctx.genome.strategyMd.includes('variant 0,')
+  const failingFirst = (make: (ctx: AgentRunContext) => Promise<AgentRunResult>) =>
+    (inner: AgentRunner): AgentRunner => ({
+      run: (handle, ctx) => (isFirstAgent(ctx) ? make(ctx) : inner.run(handle, ctx)),
+      abortAll: () => inner.abortAll(),
+      quiesce: (handle) => inner.quiesce!(handle),
+    })
+  const failedResult = async (): Promise<AgentRunResult> => ({
+    status: 'error', errorText: 'OpenCode POST /session/ses_1/message failed: 500', failure: FAILURE, usageKnown: false,
+    tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0, durationMs: 5,
+  })
+  type StatusEvent = Extract<EngineEvent, { type: 'agent.status' }>
+
+  test('a failed agent is reported with its failure and round as soon as its worker returns', async () => {
+    const events: EngineEvent[] = []
+    const { engine } = makeMockEngine({
+      seed: 1, populationSize: 2, onEvent: (e) => events.push(e), wrapRunner: failingFirst(failedResult),
+    })
+    const run = engine.createRun('r', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const failedIdx = events.findIndex((e) => e.type === 'agent.status' && e.status === 'failed')
+    const failed = events[failedIdx] as StatusEvent
+    expect(failed.failure).toEqual(FAILURE)
+    expect(failed.roundIdx).toBe(1)
+    // Immediately, not after collection or scoring finish.
+    expect(failedIdx).toBeLessThan(events.findIndex((e) => e.type === 'round.status' && e.status === 'collecting'))
+
+    // Usage the runner never learned is not published as a known zero.
+    const usage = events.filter((e) => e.type === 'agent.usage') as Extract<EngineEvent, { type: 'agent.usage' }>[]
+    expect(usage.map((u) => u.agentId)).not.toContain(failed.agentId)
+    expect(usage).toHaveLength(1)
+  })
+
+  test('a runner that throws is still reported as failed at once, with its transport cause kept', async () => {
+    // A thrown worker used to skip the failed emission entirely, so its card stayed on
+    // "working" until the whole round ended — the path both Muse Spark agents took.
+    const events: EngineEvent[] = []
+    const { engine, repos } = makeMockEngine({
+      seed: 1, populationSize: 2, onEvent: (e) => events.push(e),
+      wrapRunner: failingFirst(async () => {
+        throw new TypeError('fetch failed', { cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } })
+      }),
+    })
+    const run = engine.createRun('r', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const failed = events.find((e) => e.type === 'agent.status' && e.status === 'failed') as StatusEvent | undefined
+    expect(failed?.failure?.code).toBe('UND_ERR_HEADERS_TIMEOUT')
+    const submission = repos.submissions.forRound(round.roundId).find((s) => s.agentId === failed?.agentId)
+    expect(submission?.errorText).toContain('UND_ERR_HEADERS_TIMEOUT')
+  })
+
+  test('scores say which ranked agents had failed', async () => {
+    const events: EngineEvent[] = []
+    const { engine } = makeMockEngine({
+      seed: 1, populationSize: 2, onEvent: (e) => events.push(e), wrapRunner: failingFirst(failedResult),
+    })
+    const run = engine.createRun('r', 'goal')
+    await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+
+    const failedId = (events.find((e) => e.type === 'agent.status' && e.status === 'failed') as StatusEvent).agentId
+    const scored = events.find((e) => e.type === 'round.scored') as Extract<EngineEvent, { type: 'round.scored' }>
+    expect(scored.scores.find((x) => x.agentId === failedId)?.failed).toBe(true)
+    expect(scored.scores.find((x) => x.agentId !== failedId)?.failed).toBe(false)
   })
 })
 

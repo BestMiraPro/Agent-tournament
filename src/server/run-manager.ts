@@ -52,7 +52,9 @@ export class RunManager {
         this.errors.set(runId, message)
         // The round driver already marks the round failed in the database; this makes
         // the failure visible to a dashboard that is only listening to events.
-        this.emit({ type: 'round.complete', runId, roundIdx: -1, budgetBreach: message })
+        // An error, not a budget breach: sending it as `budgetBreach` made the dashboard
+        // label a crashed planner or a provider outage "Budget: ...".
+        this.emit({ type: 'round.complete', runId, roundIdx: -1, budgetBreach: null, error: message })
       } finally {
         this.inFlight.delete(runId)
       }

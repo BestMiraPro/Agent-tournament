@@ -14,11 +14,38 @@ describe('liveReducer', () => {
     expect(s.agents['a']?.activity).toBe('read')
   })
 
-  test('accumulates usage', () => {
+  test('usage is the terminal total, set rather than summed, and marks usage as reported', () => {
+    // The engine reports one terminal total per agent. Summing would count it twice the
+    // moment any other source also reported usage for the same agent.
     let s = liveReducer(initialLiveState, { type: 'agent.usage', runId: 'r', agentId: 'a', tokensIn: 10, tokensOut: 5, costUsd: 0.1 })
+    expect(s.agents['a']?.usageReported).toBe(true)
     s = liveReducer(s, { type: 'agent.usage', runId: 'r', agentId: 'a', tokensIn: 20, tokensOut: 5, costUsd: 0.2 })
-    expect(s.agents['a']?.tokensIn).toBe(30)
-    expect(s.agents['a']?.costUsd).toBeCloseTo(0.3)
+    expect(s.agents['a']?.tokensIn).toBe(20)
+    expect(s.agents['a']?.costUsd).toBeCloseTo(0.2)
+  })
+
+  test('an agent with no usage report is not presented as having used zero', () => {
+    const s = liveReducer(initialLiveState, { type: 'agent.status', runId: 'r', agentId: 'a', status: 'running' })
+    expect(s.agents['a']?.usageReported).toBe(false)
+  })
+
+  test('a failed agent keeps its failure, and a new attempt clears it', () => {
+    const failure = { message: 'OpenCode returned HTTP 500 UnknownError (ref err_0672e772)', httpStatus: 500, code: 'UnknownError', ref: 'err_0672e772' }
+    let s = liveReducer(initialLiveState, { type: 'agent.status', runId: 'r', agentId: 'a', status: 'failed', roundIdx: 1, failure })
+    expect(s.agents['a']?.failure).toEqual(failure)
+    s = liveReducer(s, { type: 'round.status', runId: 'r', roundIdx: 2, status: 'preparing' })
+    expect(s.agents['a']?.failure).toBeNull()
+    expect(s.agents['a']?.usageReported).toBe(false)
+  })
+
+  test('a round that failed outright is a run error, not a budget breach', () => {
+    const s = liveReducer(initialLiveState, {
+      type: 'round.complete', runId: 'r', roundIdx: -1, budgetBreach: null, error: 'planner exploded',
+    })
+    expect(s.lastBreach).toBeNull()
+    expect(s.lastError).toBe('planner exploded')
+    const next = liveReducer(s, { type: 'round.status', runId: 'r', roundIdx: 2, status: 'preparing' })
+    expect(next.lastError).toBeNull()
   })
 
   test('stores scores by rank', () => {

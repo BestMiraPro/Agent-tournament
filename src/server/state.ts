@@ -16,6 +16,8 @@ export interface SnapshotScore {
   score: number
   band: string | null
   rationaleMd: string
+  /** The agent's submission for that round did not succeed; its rank is not a win. */
+  failed: boolean
 }
 
 /** The criteria a round actually has on record, as distinct from any editor draft. */
@@ -93,12 +95,16 @@ export function buildRunSnapshot(repos: Repos, runId: string, extra?: RunSnapsho
         source: last.criteriaSource === 'user' ? 'user' : 'generated',
         status: last.status,
       }
+      const failedAgents = new Set(
+        repos.submissions.forRound(last.id).filter((sub) => sub.status !== 'ok').map((sub) => sub.agentId),
+      )
       scores = repos.scores.forRound(last.id).map((s) => ({
         agentId: s.agentId,
         rank: s.rank,
         score: s.score,
         band: s.band,
         rationaleMd: s.rationaleMd,
+        failed: failedAgents.has(s.agentId),
       }))
     }
   }
