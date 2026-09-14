@@ -112,7 +112,10 @@ export const nodeHttpTransport: HttpTransport = ({ method, url, body, timeoutMs,
         resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') })
       })
       res.on('error', fail)
-      res.on('aborted', () => fail(Object.assign(new Error('response aborted'), { code: 'ECONNRESET' })))
+      // A response cut off mid-body closes without completing; `aborted` is deprecated.
+      res.on('close', () => {
+        if (!res.complete) fail(Object.assign(new Error('response closed before it completed'), { code: 'ECONNRESET' }))
+      })
     })
     req.setTimeout(transportAllowanceMs(timeoutMs), () => {
       req.destroy(Object.assign(new Error(`socket idle beyond ${transportAllowanceMs(timeoutMs)}ms`), { code: 'OPENCODE_SOCKET_IDLE' }))
