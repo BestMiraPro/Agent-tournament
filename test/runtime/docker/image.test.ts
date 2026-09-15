@@ -5,7 +5,7 @@ describe('readImageInventory', () => {
   const inventory = {
     schemaVersion: 1, toolchainId: 'abc',
     python: { version: '3.11.2', venv: '/opt/arena/venv', executable: '/opt/arena/venv/bin/python' },
-    tools: ['python3', 'node', 'git', 'opencode'].map((name) => ({ name, version: '1', executable: `/usr/bin/${name}` })),
+    tools: ['python3', 'node', 'git', 'opencode', 'rg'].map((name) => ({ name, version: '1', executable: `/usr/bin/${name}` })),
     pythonPackages: [],
   }
 

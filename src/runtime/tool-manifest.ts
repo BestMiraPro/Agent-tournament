@@ -14,7 +14,8 @@ import { z } from 'zod'
  * the run is disposed. The file is an inventory and a guide, never a copy of the tools.
  */
 
-export const REQUIRED_TOOLS = ['python3', 'node', 'git', 'opencode'] as const
+/** `rg` included: OpenCode's grep tool needs it, and an offline worker cannot download it. */
+export const REQUIRED_TOOLS = ['python3', 'node', 'git', 'opencode', 'rg'] as const
 
 /** Everything that defines the image. Its identity is a hash of exactly these files. */
 export const TOOLCHAIN_FILES = [

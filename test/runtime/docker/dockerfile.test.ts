@@ -22,6 +22,10 @@ describe('Dockerfile.agent', () => {
     expect(await read()).toMatch(/WORKDIR \/work/)
   })
 
+  test('preinstalls ripgrep, which OpenCode would otherwise try to download at first use', async () => {
+    expect(await read()).toMatch(/apt-get install[^\n]*ripgrep/)
+  })
+
   test('pins the base image by digest', async () => {
     expect(await read()).toMatch(/^FROM node:24-slim@sha256:[0-9a-f]{64}$/m)
   })

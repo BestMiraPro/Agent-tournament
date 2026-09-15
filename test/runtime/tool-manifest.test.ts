@@ -22,6 +22,7 @@ const inventory: ImageInventory = {
     { name: 'node', version: '24.15.0', executable: '/usr/local/bin/node' },
     { name: 'git', version: '2.39.5', executable: '/usr/bin/git' },
     { name: 'opencode', version: '1.18.21', executable: '/usr/local/bin/opencode' },
+    { name: 'rg', version: '13.0.0', executable: '/usr/bin/rg' },
   ],
   pythonPackages: [
     { name: 'numpy', version: '2.3.3' },
@@ -56,7 +57,7 @@ describe('image inventory', () => {
   test('names every required tool the image lacks', () => {
     const lacking = { ...inventory, tools: inventory.tools.filter((t) => t.name !== 'python3' && t.name !== 'git') }
     expect(() => parseImageInventory(JSON.stringify(lacking), inventory.toolchainId)).toThrow(/missing required tools: python3, git/)
-    expect(REQUIRED_TOOLS).toEqual(['python3', 'node', 'git', 'opencode'])
+    expect(REQUIRED_TOOLS).toEqual(['python3', 'node', 'git', 'opencode', 'rg'])
   })
 
   test('refuses malformed inventory instead of guessing', () => {
