@@ -14,6 +14,7 @@ const catalog = {
   anthropic: { api: null, npm: '@ai-sdk/anthropic' },
   bedrock: { api: null, npm: '@ai-sdk/amazon-bedrock' },
   opencode: { api: 'https://opencode.ai/zen/v1', npm: '@ai-sdk/openai-compatible' },
+  deepseek: { api: 'https://api.deepseek.com/v1', npm: '@ai-sdk/openai-compatible' },
 }
 
 describe('relayUpstreamsFromAuth', () => {
@@ -26,15 +27,23 @@ describe('relayUpstreamsFromAuth', () => {
   })
 
   test('says why a provider cannot be relayed, and never repeats a key while saying it', () => {
-    const { upstreams, unsupported } = relayUpstreamsFromAuth(auth, catalog, ['anthropic', 'bedrock', 'opencode', 'mystery'])
+    const { upstreams, unsupported } = relayUpstreamsFromAuth(auth, catalog, ['anthropic', 'bedrock', 'deepseek', 'mystery'])
     expect(upstreams).toEqual([])
     expect(unsupported).toEqual([
       { providerId: 'anthropic', reason: 'anthropic is signed in with an OAuth login, which the relay cannot carry; add an API key for it' },
       { providerId: 'bedrock', reason: 'bedrock uses an SDK the relay cannot carry' },
-      { providerId: 'opencode', reason: 'no API key for opencode in the credentials file' },
+      { providerId: 'deepseek', reason: 'no API key for deepseek in the credentials file' },
       { providerId: 'mystery', reason: 'mystery is not in the model catalogue' },
     ])
     expect(JSON.stringify(unsupported)).not.toMatch(/FAKE-/)
+  })
+
+  test('OpenCode Zen without a login uses the public key OpenCode itself sends, so free models still work', () => {
+    const { upstreams, unsupported } = relayUpstreamsFromAuth(auth, catalog, ['opencode'])
+    expect(upstreams).toEqual([{ providerId: 'opencode', baseUrl: 'https://opencode.ai/zen/v1', authStyle: 'bearer', apiKey: 'public' }])
+    expect(unsupported).toEqual([])
+    const signedIn = relayUpstreamsFromAuth(JSON.stringify({ opencode: { type: 'api', key: 'FAKE-ZEN-KEY' } }), catalog, ['opencode'])
+    expect(signedIn.upstreams[0]!.apiKey).toBe('FAKE-ZEN-KEY')
   })
 
   test('an unreadable credentials file is refused without echoing it', () => {

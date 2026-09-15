@@ -1,5 +1,12 @@
 import { upstreamFor, type RelayUpstream } from './provider-relay.js'
 
+/**
+ * What OpenCode's own client sends to OpenCode Zen when nobody is signed in (verified September 15
+ * 2026 against a fake upstream: `Authorization: Bearer public`). Only Zen's free models accept it; a
+ * paid Zen model without a key fails upstream with the provider's own error.
+ */
+export const OPENCODE_ZEN_PUBLIC_KEY = 'public'
+
 export interface CatalogProvider {
   api?: string | null
   npm?: string | null
@@ -44,6 +51,11 @@ export function relayUpstreamsFromAuth(
     const type = credential && typeof credential === 'object' ? (credential as { type?: unknown }).type : undefined
     if (type === 'oauth') {
       unsupported.push({ providerId, reason: `${providerId} is signed in with an OAuth login, which the relay cannot carry; add an API key for it` })
+      continue
+    }
+    if (credential === undefined && providerId === 'opencode') {
+      // Faithful to OpenCode without a login, so free Zen models keep working behind the relay.
+      upstreams.push({ ...target, apiKey: OPENCODE_ZEN_PUBLIC_KEY })
       continue
     }
     const key = credential && typeof credential === 'object' ? (credential as { key?: unknown }).key : undefined
