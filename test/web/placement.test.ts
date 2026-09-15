@@ -28,7 +28,7 @@ describe('setupEstimate', () => {
     const e = setupEstimate(plan({ population: 3, maxContainers: 8, isolation: 'protected' }), capacity)
     expect(e.placement).toBe('[1] [2] [3]')
     expect(e.sharing).toBe('Each agent has its own container.')
-    expect(e.ceilings).toBe('3 containers × 1g = 3.00 GiB memory, 3 CPUs')
+    expect(e.ceilings).toBe('3 containers × 1g + 3 gateways × 64m = 3.19 GiB memory, 3.75 CPUs')
     expect(e.refusal).toBeNull()
   })
 
@@ -36,8 +36,15 @@ describe('setupEstimate', () => {
     const e = setupEstimate(plan({ population: 4, isolation: 'protected' }), { ...capacity, reservedMemoryBytes: 3 * GiB })
     expect(e.fit).toEqual({
       state: 'does_not_fit',
-      message: 'Estimated not to fit: 4.00 GiB needed, 2.60 GiB left after 3.00 GiB reserved by other runs in this app.',
+      message: 'Estimated not to fit: 4.25 GiB needed, 2.60 GiB left after 3.00 GiB reserved by other runs in this app.',
     })
+  })
+
+  test('protected isolation counts each shard\'s gateway, exactly as the server reserves it', () => {
+    expect(setupEstimate(plan({ population: 4 }), capacity).ceilings).toBe('4 containers × 1g = 4.00 GiB memory, 4 CPUs')
+    const protectedPlan = setupEstimate(plan({ population: 4, isolation: 'protected' }), capacity)
+    expect(protectedPlan.ceilings).toBe('4 containers × 1g + 4 gateways × 64m = 4.25 GiB memory, 5 CPUs')
+    expect(protectedPlan.fit).toEqual({ state: 'fits', message: 'Estimated to fit: 4.25 GiB of 5.60 GiB Docker can commit.' })
   })
 
   test('a CPU ceiling over the host does not fit', () => {

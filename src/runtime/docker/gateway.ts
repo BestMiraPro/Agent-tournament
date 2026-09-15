@@ -1,4 +1,7 @@
+import { GATEWAY_CPUS, GATEWAY_MEMORY } from './gateway-limits.js'
 import { NETWORK_OWNER_LABEL } from './network.js'
+
+export { GATEWAY_CPUS, GATEWAY_MEMORY, GATEWAY_MEMORY_BYTES } from './gateway-limits.js'
 
 /**
  * One gateway container per protected shard: the only member of the shard's internal network
@@ -18,11 +21,6 @@ export const GATEWAY_API_PORT = 14096
 export const GATEWAY_RELAY_PORT = 8787
 
 export const GATEWAY_ALIAS = 'gateway'
-
-/** A gateway's ceilings, charged to its run's capacity reservation on top of its worker's. */
-export const GATEWAY_MEMORY = '64m'
-export const GATEWAY_MEMORY_BYTES = 64 * 1024 ** 2
-export const GATEWAY_CPUS = 0.25
 
 const SAFE_RUN_ID = /^[A-Za-z0-9._-]+$/
 

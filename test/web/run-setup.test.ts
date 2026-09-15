@@ -19,7 +19,7 @@ describe('docker placement choice', () => {
     expect(html).toContain('[1,5] [2,6] [3,7] [4]')
     expect(html).toContain('Protected isolation needs 7 containers for 7 agents')
     expect(html).toContain('Docker capacity could not be read')
-    expect(html).toContain('4 containers × 1g = 4.00 GiB memory, 4 CPUs')
+    expect(html).toContain('4 containers × 1g + 4 gateways × 64m = 4.25 GiB memory, 5 CPUs')
   })
 })
 

@@ -1,4 +1,5 @@
 import { parseMemoryLimit } from '../../../src/core/memory.js'
+import { GATEWAY_CPUS, GATEWAY_MEMORY, GATEWAY_MEMORY_BYTES } from '../../../src/runtime/docker/gateway-limits.js'
 import { placementPreview } from '../../../src/runtime/docker/shard.js'
 
 /** What GET /api/capacity reports: Docker's reading plus what this app has already reserved. */
@@ -52,8 +53,10 @@ export function setupEstimate(plan: PlacementPlan, capacity: CapacityInfo | null
   } catch {
     perContainer = null
   }
-  const memoryTotal = perContainer === null ? null : containers * perContainer
-  const cpuTotal = containers * plan.cpus
+  // A protected shard also runs a gateway, and the server reserves its ceilings with the worker's.
+  const gateways = plan.isolation === 'protected'
+  const memoryTotal = perContainer === null ? null : containers * (perContainer + (gateways ? GATEWAY_MEMORY_BYTES : 0))
+  const cpuTotal = containers * (plan.cpus + (gateways ? GATEWAY_CPUS : 0))
 
   const refusal =
     plan.isolation === 'protected' && population > maxContainers
@@ -100,8 +103,9 @@ export function setupEstimate(plan: PlacementPlan, capacity: CapacityInfo | null
           ? 'Agents share containers: an agent can read and change the files of the others in its container.'
           : 'Each agent has its own container.',
     ceilings:
-      `${containers} container${containers === 1 ? '' : 's'} × ${plan.memory} = ` +
-      `${memoryTotal === null ? 'unknown' : gib(memoryTotal)} memory, ${count(cpuTotal)} CPU${cpuTotal === 1 ? '' : 's'}`,
+      `${containers} container${containers === 1 ? '' : 's'} × ${plan.memory}` +
+      (gateways ? ` + ${containers} gateway${containers === 1 ? '' : 's'} × ${GATEWAY_MEMORY}` : '') +
+      ` = ${memoryTotal === null ? 'unknown' : gib(memoryTotal)} memory, ${count(cpuTotal)} CPU${cpuTotal === 1 ? '' : 's'}`,
     fit,
     refusal,
     memoryNote:
