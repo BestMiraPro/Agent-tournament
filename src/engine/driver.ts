@@ -256,7 +256,12 @@ export class TournamentEngine {
         await this.d.sandbox.writeFile(
           h,
           '.opencode/agents/competitor.md',
-          serializeCompetitorProfile(p.genome, { label: p.agent.label }),
+          // Only local runs widen the profile: Docker shards see the folder through a
+          // read-only mount, at a path the host path would not match anyway.
+          serializeCompetitorProfile(p.genome, {
+            label: p.agent.label,
+            contextDir: config.sandbox === 'local' ? config.contextDir ?? null : null,
+          }),
         )
         return h
       }, {

@@ -31,6 +31,11 @@ describe('buildRunArgs', () => {
     maxFileBytes: 268_435_456,
   }
 
+  test('mounts a context folder read-only at /context, and nothing when absent', () => {
+    expect(buildRunArgs({ ...base, contextDir: 'C:\\research' }).join(' ')).toContain('-v C:\\research:/context:ro')
+    expect(buildRunArgs(base).join(' ')).not.toContain('/context')
+  })
+
   test('publishes an ephemeral port bound to loopback only', () => {
     expect(buildRunArgs(base).join(' ')).toContain('-p 127.0.0.1:0:4096')
   })

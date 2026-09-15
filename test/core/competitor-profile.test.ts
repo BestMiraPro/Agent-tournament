@@ -31,10 +31,10 @@ function declaredRules(md: string): Rule[] {
   let nested: string | null = null
   for (const line of head.slice(start + 1)) {
     const top = /^ {2}([a-z_]+):\s*(allow|deny|ask)?$/.exec(line)
-    const inner = /^ {4}"([^"]+)":\s*(allow|deny|ask)$/.exec(line)
+    const inner = /^ {4}("(?:[^"\\]|\\.)+"):\s*(allow|deny|ask)$/.exec(line)
     if (top && top[2]) { nested = null; rules.push({ permission: top[1]!, pattern: '*', action: top[2] as Rule['action'] }) }
     else if (top) nested = top[1]!
-    else if (inner && nested) rules.push({ permission: nested, pattern: inner[1]!, action: inner[2] as Rule['action'] })
+    else if (inner && nested) rules.push({ permission: nested, pattern: JSON.parse(inner[1]!) as string, action: inner[2] as Rule['action'] })
   }
   return rules
 }
@@ -75,8 +75,25 @@ describe('competitor profile', () => {
     expect(rules.filter((r) => r.action === 'ask').every((r) => evaluate(rules, r.permission, r.pattern) !== 'ask')).toBe(true)
   })
 
+  test('a local context folder is readable but not editable; nothing else outside is', () => {
+    const withCtx = serializeCompetitorProfile(genome, { label: 'c', contextDir: 'C:\\Research Notes' })
+    // Runtime defaults, then this profile's own rules. A key may appear only once in YAML,
+    // so the folder rules replace `edit`/`external_directory` in place rather than repeat them.
+    const defaults = contract.competitorAgent.rules.slice(0, -declaredRules(md).length)
+    const rules = [...defaults, ...declaredRules(withCtx)]
+    expect(evaluate(rules, 'external_directory', 'C:/Research Notes/data.csv')).toBe('allow')
+    expect(evaluate(rules, 'external_directory', 'C:\\Research Notes\\data.csv')).toBe('allow')
+    expect(evaluate(rules, 'edit', 'C:/Research Notes/data.csv')).toBe('deny')
+    expect(evaluate(rules, 'external_directory', '/tmp/x')).toBe('deny')
+    expect(evaluate(rules, 'edit', '/work/a1/SUBMISSION.md')).toBe('allow')
+    const keys = withCtx.split('\n').filter((l) => /^ {2}[a-z_]+:/.test(l)).map((l) => l.trim().split(':')[0])
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
   test('the driver writes this profile, not the strategy-bearing genome file', () => {
     const driver = readFileSync('src/engine/driver.ts', 'utf8')
-    expect(driver).toMatch(/'\.opencode\/agents\/competitor\.md',\s*serializeCompetitorProfile\(/)
+    expect(driver).toMatch(
+      /'\.opencode\/agents\/competitor\.md',(?:\s*\/\/[^\n]*)*\s*serializeCompetitorProfile\(p\.genome, \{\s*label: p\.agent\.label,\s*contextDir:/,
+    )
   })
 })

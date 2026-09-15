@@ -36,6 +36,11 @@ describe('buildAgentPrompt', () => {
     expect(p).toContain('write a poem')
     expect(p).toContain('SUBMISSION.md')
   })
+
+  test('names the reference folder only when there is one', () => {
+    expect(buildAgentPrompt('g')).not.toContain('Reference material')
+    expect(buildAgentPrompt('g', '/context')).toContain('Reference material (read-only) is in /context.')
+  })
 })
 
 describe('OpenCodeAgentRunner', () => {

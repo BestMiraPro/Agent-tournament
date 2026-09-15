@@ -267,6 +267,53 @@ describe('composeRun', () => {
     }
   })
 
+  test('docker mounts the context folder in every shard and tells agents it is at /context', async () => {
+    const seams = mockSeams()
+    seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
+    const root = mkdtempSync(join(tmpdir(), 'compose-ctx-docker-'))
+    const ctx = mkdtempSync(join(tmpdir(), 'compose-ctx-folder-'))
+    const startShardContainerFn = vi.fn(async (spec: { shardIndex: number; contextDir?: string | null }) => ({
+      name: `arena-run-${spec.shardIndex}`,
+      baseUrl: `http://127.0.0.1:${43000 + spec.shardIndex}`,
+      shardIndex: spec.shardIndex,
+    }))
+    const shardClient = {
+      health: vi.fn(async () => true),
+      version: vi.fn(async () => '1.18.21'),
+      providers: vi.fn(async () => ({ providers: [{ id: 'w', models: { m: {} } }], default: {} })),
+      createSession: vi.fn(async () => ({ id: 'ses_ok' })),
+      prompt: vi.fn(async (_s: string, _d: string, _body: { parts: { text: string }[] }) => ({ info: { cost: 0 }, parts: [] })),
+      abort: vi.fn(async () => {}),
+    }
+    try {
+      const c = await composeRun(parseRunSpec({
+        name: 'd', goal: 'g', sandbox: 'docker',
+        roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
+        workspaceRoot: root, authFile: join(root, 'auth.json'), contextDir: ctx,
+      }), {
+        ...seams,
+        inspectPath: vi.fn((p: string) => (p === ctx ? 'directory' : 'file')),
+        startShardContainerFn,
+        removeContainerFn: vi.fn(async () => {}),
+        createShardClient: () => shardClient,
+      } as never)
+      await c.planFor!(['a1'])
+      const h = await c.sandbox.provision('a1', {})
+      expect(startShardContainerFn).toHaveBeenCalledWith(expect.objectContaining({ contextDir: ctx }), undefined, expect.any(Function), expect.any(Function))
+      await c.runner.run(h, {
+        agentId: 'a1', goalMd: 'g', timeoutMs: 1000,
+        genome: { strategyMd: 's', notesMd: '', modelId: 'w/m', temperature: 0.7 },
+      })
+      const text = shardClient.prompt.mock.calls[0]![2].parts[0]!.text
+      expect(text).toContain('Reference material (read-only) is in /context.')
+      expect(text).not.toContain(ctx)
+      await c.cleanup()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(ctx, { recursive: true, force: true })
+    }
+  })
+
   describe('shard model catalogue', () => {
     const missing = 'wandb/deepseek-ai/DeepSeek-V4-Pro-0813'
     const present = 'wandb/zai-org/GLM-5.2'

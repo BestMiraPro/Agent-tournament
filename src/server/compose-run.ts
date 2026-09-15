@@ -26,7 +26,7 @@ import { AGENT_IMAGE, assertHostCapacity, makeClientResolver, sweepBeforeRun, va
 import { ensureImage } from '../runtime/docker/image.js'
 import { readHostCapacity } from '../runtime/docker/capacity.js'
 import { startShardContainer } from '../runtime/docker/container.js'
-import { removeContainer } from '../runtime/docker/cli.js'
+import { CONTAINER_CONTEXT_PATH, removeContainer } from '../runtime/docker/cli.js'
 import { sweepOrphanContainers, type SweepOptions } from '../runtime/docker/sweep.js'
 import { DockerSandbox } from '../runtime/docker/sandbox.js'
 import type { RunSpec } from './run-spec.js'
@@ -348,6 +348,7 @@ export async function composeRun(
               memory: config.containerMemory,
               cpus: config.containerCpus,
               authFile: spec.authFile,
+              contextDir: spec.contextDir,
               modelsFile,
             },
             undefined,
@@ -369,6 +370,7 @@ export async function composeRun(
         sandbox,
         {
           onSessionCreated: sessionHook,
+          contextPath: spec.contextDir ? CONTAINER_CONTEXT_PATH : null,
           // Per agent rather than per roster entry: agents added or bred mid-run carry
           // models the roster check at shard start never saw.
           modelUnavailable: (handle, modelId) => {
@@ -398,7 +400,10 @@ export async function composeRun(
     const sandbox = new LocalSandbox(workspaceRoot)
     return {
       config, sandbox, provider,
-      runner: new OpenCodeAgentRunner(server.client, sandbox, { onSessionCreated: sessionHook }),
+      runner: new OpenCodeAgentRunner(server.client, sandbox, {
+        onSessionCreated: sessionHook,
+        contextPath: spec.contextDir,
+      }),
       planFor: null,
       serverHandle: server,
       shardServers: [{ baseUrl: '' }],

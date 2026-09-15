@@ -49,12 +49,17 @@ export interface RunSpec {
   memory: string
   cpus: number
   authFile: string | null
+  /** Host folder of reference material, mounted read-only at CONTAINER_CONTEXT_PATH. */
+  contextDir?: string | null
   /** Host models.dev catalogue to pin inside the container; see buildRunArgs. */
   modelsFile?: string | null
   pidsLimit?: number
   maxFileBytes?: number
   maxOpenFiles?: number
 }
+
+/** Where a run's context folder appears inside every shard. */
+export const CONTAINER_CONTEXT_PATH = '/context'
 
 /**
  * Every limit here exists to stop agent-authored code degrading the host.
@@ -96,6 +101,9 @@ export function buildRunArgs(spec: RunSpec): string[] {
     // Loopback only: never expose an unsecured opencode server on the network.
     '-p', '127.0.0.1:0:4096',
     '-v', `${spec.hostDir}:/work`,
+    // Reference material: the mount, not a permission rule, is what keeps it unchanged —
+    // agents run shell commands, which no tool rule can confine.
+    ...(spec.contextDir ? ['-v', `${spec.contextDir}:${CONTAINER_CONTEXT_PATH}:ro`] : []),
     ...(spec.authFile
       ? ['-v', `${spec.authFile}:/root/.local/share/opencode/auth.json:ro`]
       : []),

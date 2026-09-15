@@ -28,14 +28,22 @@ export interface AgentRunnerOptions {
    * as itself instead of as an OpenCode 500 after a session and a prompt.
    */
   modelUnavailable?: (handle: AgentHandle, modelId: string) => string | null
+  /**
+   * Where the run's read-only context folder is, as the agent sees it: `/context` inside a
+   * Docker shard, the host path for a local run. Null or absent when the run has none.
+   */
+  contextPath?: string | null
 }
 
 /** The contract every agent is held to; the judged artifact is SUBMISSION.md. */
-export function buildAgentPrompt(goalMd: string): string {
+export function buildAgentPrompt(goalMd: string, contextPath: string | null = null): string {
   return [
     'GOAL:',
     goalMd,
     '',
+    ...(contextPath
+      ? [`Reference material (read-only) is in ${contextPath}. Read what is relevant before you start; you cannot change it.`, '']
+      : []),
     `When you are finished, write your final answer to ${SUBMISSION_FILE} in your working directory.`,
     'Anything else you create is supporting evidence. Only ' + SUBMISSION_FILE + ' is judged.',
   ].join('\n')
@@ -182,7 +190,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
         // profile's temperature and unattended permission policy never apply.
         agent: COMPETITOR_AGENT,
         system: ctx.genome.strategyMd,
-        parts: [{ type: 'text' as const, text: buildAgentPrompt(ctx.goalMd) }],
+        parts: [{ type: 'text' as const, text: buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null) }],
       }
 
       let timer: ReturnType<typeof setTimeout> | undefined
