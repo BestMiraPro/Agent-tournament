@@ -10,6 +10,23 @@ const base = {
   roster: [{ modelId: 'mock/model', count: 4, temperature: 0.7 }],
 }
 
+describe('contextDir', () => {
+  test('defaults to null and blank means none', () => {
+    expect(parseRunSpec(base).contextDir).toBeNull()
+    expect(parseRunSpec({ ...base, contextDir: '   ' }).contextDir).toBeNull()
+  })
+
+  test('must be absolute', () => {
+    expect(() => parseRunSpec({ ...base, contextDir: 'research' })).toThrow(/contextDir must be an absolute path/)
+  })
+
+  test('lands in the run config', () => {
+    const dir = process.platform === 'win32' ? 'C:\\ctx' : '/ctx'
+    expect(runConfigFor(parseRunSpec({ ...base, contextDir: dir })).contextDir).toBe(dir)
+    expect(runConfigFor(parseRunSpec(base)).contextDir).toBeNull()
+  })
+})
+
 describe('parseRunSpec', () => {
   test('accepts a minimal mock spec', () => {
     const s = parseRunSpec(base)

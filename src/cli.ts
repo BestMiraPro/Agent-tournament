@@ -433,6 +433,7 @@ async function buildRealDeps(
         maxAgentTokens: config.budget.maxAgentTokens,
       },
       seedDir: config.seedDir,
+      contextDir: null,
       workspaceRoot: opts.workspaceRoot,
       authFile: opts.authFile ?? null,
       serverUrl: opts.serverUrl ?? null,

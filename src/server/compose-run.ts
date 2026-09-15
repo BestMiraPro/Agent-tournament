@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { resolve, sep } from 'node:path'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import type { Provider } from '../runtime/provider.js'
 import type { AgentRunner } from '../runtime/agent-runner.js'
@@ -132,7 +133,41 @@ export function runConfigFor(spec: RunSpec): RunConfig {
     containerCpus: spec.containerCpus ?? DEFAULT_CONFIG.containerCpus,
     pricing: { ...DEFAULT_CONFIG.pricing, ...spec.pricing },
     seedDir: spec.seedDir,
+    contextDir: spec.contextDir ?? null,
   }
+}
+
+/**
+ * Refuses a context folder that is not an existing folder, or that overlaps the workspace
+ * root in either direction: agents write under the root, and the folder must stay unchanged.
+ */
+export function assertContextFolder(
+  contextDir: string,
+  workspaceRoot: string,
+  inspect: (path: string) => PathKind,
+): void {
+  const kind = inspect(contextDir)
+  if (kind !== 'directory') {
+    throw new Error(
+      `Context folder ${contextDir} ${kind === 'file' ? 'is a file' : 'does not exist'}. ` +
+        'Point it at a folder of reference material, or leave it blank.',
+    )
+  }
+  const ctx = comparablePath(contextDir)
+  const ws = comparablePath(workspaceRoot)
+  if (ws === ctx || ws.startsWith(ctx + sep)) {
+    throw new Error(
+      `Context folder ${contextDir} must not contain the workspace root ${workspaceRoot}: agents write there, and the folder is meant to stay read-only.`,
+    )
+  }
+  if (ctx.startsWith(ws + sep)) {
+    throw new Error(`Context folder ${contextDir} must not be inside the workspace root ${workspaceRoot}: agents could change it.`)
+  }
+}
+
+function comparablePath(p: string): string {
+  const absolute = resolve(p).replace(/[\\/]+$/, '')
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute
 }
 
 /**
@@ -199,6 +234,7 @@ export async function composeRun(
       )
     }
   }
+  if (spec.contextDir) assertContextFolder(spec.contextDir, workspaceRoot, s.inspectPath)
   if (spec.sandbox === 'docker') {
     await assertHostCapacity(config, s.readCapacity as never, onWarning)
   }

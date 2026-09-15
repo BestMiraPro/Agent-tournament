@@ -58,6 +58,7 @@ const schema = z.object({
   seedDir: z.string().nullable().default(null),
   workspaceRoot: z.string().nullable().default(null),
   authFile: z.string().nullable().default(null),
+  contextDir: z.string().nullable().default(null),
   serverUrl: z.string().nullable().default(null),
   criteria: z.string().nullable().default(null),
 })
@@ -82,6 +83,8 @@ export interface RunSpec {
   seedDir: string | null
   workspaceRoot: string | null
   authFile: string | null
+  /** Absolute folder of read-only reference material; existence is checked at composition. */
+  contextDir: string | null
   serverUrl: string | null
   criteria: string | null
 }
@@ -107,6 +110,10 @@ export function parseRunSpec(input: unknown): RunSpec {
   }
   if (p.workspaceRoot && !path.isAbsolute(p.workspaceRoot)) {
     throw new Error('workspaceRoot must be an absolute path')
+  }
+  const contextDir = p.contextDir && p.contextDir.trim() !== '' ? p.contextDir.trim() : null
+  if (contextDir && !path.isAbsolute(contextDir)) {
+    throw new Error('contextDir must be an absolute path')
   }
   const containerMemory = p.containerMemory ?? DEFAULT_CONFIG.containerMemory
   let containerMemoryBytes: number
@@ -161,6 +168,7 @@ export function parseRunSpec(input: unknown): RunSpec {
     seedDir: p.seedDir,
     workspaceRoot: p.workspaceRoot,
     authFile: p.authFile,
+    contextDir,
     serverUrl: p.serverUrl,
     criteria: p.criteria,
   }

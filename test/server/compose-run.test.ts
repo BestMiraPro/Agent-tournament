@@ -74,6 +74,42 @@ describe('composeRun', () => {
     })
   })
 
+  describe('context folder', () => {
+    const localSpec = (root: string, contextDir: string) => parseRunSpec({
+      name: 'l', goal: 'g', sandbox: 'local',
+      roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
+      workspaceRoot: root, contextDir,
+    })
+
+    test('a file or a missing path is refused before any server starts', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-ctx-'))
+      try {
+        for (const kind of ['file', 'missing'] as const) {
+          const seams = { ...mockSeams(), inspectPath: vi.fn(() => kind) }
+          await expect(composeRun(localSpec(root, join(tmpdir(), 'ctx-x')), seams as never))
+            .rejects.toThrow(/Context folder .* (is a file|does not exist)/)
+          expect(seams.startHostServer).not.toHaveBeenCalled()
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('overlap with the workspace root either way is refused', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-ctx-'))
+      try {
+        const seams = { ...mockSeams(), inspectPath: vi.fn(() => 'directory' as const) }
+        await expect(composeRun(localSpec(join(root, 'ws'), root), seams as never))
+          .rejects.toThrow(/must not contain the workspace root/)
+        await expect(composeRun(localSpec(root, join(root, 'ctx')), seams as never))
+          .rejects.toThrow(/must not be inside the workspace root/)
+        expect(seams.startHostServer).not.toHaveBeenCalled()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  })
+
   test('docker without capacity fails before spending', async () => {
     const seams = mockSeams()
     seams.readCapacity.mockResolvedValueOnce({ totalMemoryBytes: 2 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })

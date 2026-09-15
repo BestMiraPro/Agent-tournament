@@ -84,6 +84,8 @@ export interface RunConfig {
   /** Ceiling on how many files one agent may leave behind (inode exhaustion). */
   maxWorkspaceFiles: number
   seedDir: string | null
+  /** Read-only reference folder for worker agents and the grader; null when the run has none. */
+  contextDir: string | null
   roster: RosterEntry[]
   judge: {
     modelId: string
@@ -155,6 +157,7 @@ export const DEFAULT_CONFIG: RunConfig = {
   maxWorkspaceBytes: 52_428_800,
   maxWorkspaceFiles: 2000,
   seedDir: null,
+  contextDir: null,
   roster: [
     { modelId: 'opencode/muse-spark-1.2-contributor-free', count: 5, temperature: 0.7 },
     { modelId: 'opencode/big-pickle', count: 5, temperature: 0.8 },
