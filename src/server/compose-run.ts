@@ -1,8 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import type { Provider } from '../runtime/provider.js'
 import type { AgentRunner } from '../runtime/agent-runner.js'
@@ -284,8 +284,29 @@ export function assertContextFolder(
 }
 
 function comparablePath(p: string): string {
-  const absolute = resolve(p).replace(/[\\/]+$/, '')
+  const absolute = canonicalFolder(resolve(p)).replace(/[\\/]+$/, '')
   return process.platform === 'win32' ? absolute.toLowerCase() : absolute
+}
+
+/**
+ * The folder's real, long-form path. For a path that does not exist yet, its nearest existing
+ * ancestor is resolved and the rest appended, so two spellings of one location still compare
+ * equal; a path with no resolvable ancestor at all is kept as written.
+ */
+export function canonicalFolder(p: string): string {
+  const missing: string[] = []
+  let current = resolve(p)
+  for (;;) {
+    try {
+      const real = realpathSync.native(current)
+      return missing.length > 0 ? join(real, ...missing.reverse()) : real
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return p
+      missing.push(basename(current))
+      current = parent
+    }
+  }
 }
 
 /**
@@ -353,7 +374,15 @@ export async function composeRun(
       )
     }
   }
-  if (spec.contextDir) assertContextFolder(spec.contextDir, workspaceRoot, s.inspectPath)
+  if (spec.contextDir) {
+    // OpenCode matches permission patterns against a folder's real path, so a short (8.3) or
+    // linked spelling left the grader's allow rule matching nothing and every read of the
+    // folder was refused (September 15 relay acceptance run). Everything below uses this one.
+    const contextDir = canonicalFolder(spec.contextDir)
+    spec = { ...spec, contextDir }
+    config.contextDir = contextDir
+    assertContextFolder(contextDir, workspaceRoot, s.inspectPath)
+  }
   // Host reads only, before capacity or any server: a protected run the relay cannot carry is refused now.
   const relayPlan = spec.sandbox === 'docker' && config.isolation === 'protected' ? await planRelay(spec, config, s) : null
   // Each protected shard also runs a gateway, and its ceilings are part of what the run reserves.

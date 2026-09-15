@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
@@ -104,23 +104,31 @@ describe('composeRun', () => {
     })
   })
 
-  test('a real run starts its host server with web search on and writes the grader profile', async () => {
+  test('a real run starts its host server with web search on and writes the grader profile for the real folder path', async () => {
     const seams = mockSeams()
     seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
     const root = mkdtempSync(join(tmpdir(), 'compose-grader-'))
     const ctx = mkdtempSync(join(tmpdir(), 'compose-grader-ctx-'))
+    // A linked spelling of the folder, like the 8.3 path that left the grader unable to read
+    // it: OpenCode checks permissions against the real path, so the profile must name that.
+    const linked = `${ctx}-link`
+    symlinkSync(ctx, linked, 'junction')
+    const real = realpathSync.native(ctx)
     try {
       const c = await composeRun(parseRunSpec({
         name: 'l', goal: 'g', sandbox: 'local',
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
-        workspaceRoot: root, contextDir: ctx,
+        workspaceRoot: root, contextDir: linked,
       }), { ...seams, inspectPath: vi.fn(() => 'directory' as const) } as never)
       expect(seams.startHostServer).toHaveBeenCalledWith(expect.objectContaining({ env: { OPENCODE_ENABLE_EXA: '1' } }))
       const profile = join(root, '.arena-grader', '.opencode', 'agents', 'grader.md')
       expect(existsSync(profile)).toBe(true)
-      expect(readFileSync(profile, 'utf8')).toContain(`${JSON.stringify(`${ctx.replace(/\\/g, '/')}/*`)}: allow`)
+      expect(readFileSync(profile, 'utf8')).toContain(`${JSON.stringify(`${real.replace(/\\/g, '/')}/*`)}: allow`)
+      expect(readFileSync(profile, 'utf8')).not.toContain('-link')
+      expect(c.config.contextDir).toBe(real)
       await c.cleanup()
     } finally {
+      rmSync(linked, { recursive: true, force: true })
       rmSync(root, { recursive: true, force: true })
       rmSync(ctx, { recursive: true, force: true })
     }
@@ -616,7 +624,7 @@ describe('composeRun', () => {
     const seams = mockSeams()
     seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
     const root = mkdtempSync(join(tmpdir(), 'compose-ctx-docker-'))
-    const ctx = mkdtempSync(join(tmpdir(), 'compose-ctx-folder-'))
+    const ctx = realpathSync.native(mkdtempSync(join(tmpdir(), 'compose-ctx-folder-')))
     const startShardContainerFn = vi.fn(async (spec: { shardIndex: number; contextDir?: string | null }) => ({
       name: `arena-run-${spec.shardIndex}`,
       baseUrl: `http://127.0.0.1:${43000 + spec.shardIndex}`,
@@ -663,7 +671,7 @@ describe('composeRun', () => {
     const seams = mockSeams()
     seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
     const root = mkdtempSync(join(tmpdir(), 'compose-tools-'))
-    const ctx = mkdtempSync(join(tmpdir(), 'compose-tools-ctx-'))
+    const ctx = realpathSync.native(mkdtempSync(join(tmpdir(), 'compose-tools-ctx-')))
     writeFileSync(join(ctx, 'prices.csv'), 'a,b\n1,2\n')
     const starts: { toolsDir?: string | null; image: string }[] = []
     const startShardContainerFn = vi.fn(async (spec: { shardIndex: number; toolsDir?: string | null; image: string }) => {
