@@ -19,7 +19,9 @@ import type { Reflector } from '../evolution/reflect.js'
 import type { TopPerformer } from '../evolution/prompts.js'
 import type { Judge, JudgeInput } from '../judge/judge.js'
 import type { AgentRunner, AgentRunResult } from '../runtime/agent-runner.js'
+import { CONTAINER_CONTEXT_PATH } from '../runtime/docker/cli.js'
 import { runPool } from '../runtime/pool.js'
+import { TOOLS_MOUNT } from '../runtime/tool-manifest.js'
 import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
 
 export interface EngineDeps {
@@ -256,11 +258,11 @@ export class TournamentEngine {
         await this.d.sandbox.writeFile(
           h,
           '.opencode/agents/competitor.md',
-          // Only local runs widen the profile: Docker shards see the folder through a
-          // read-only mount, at a path the host path would not match anyway.
+          // What the agent may read outside its workspace: a local run's folder by its host
+          // path; a Docker worker's read-only mounts by their container paths.
           serializeCompetitorProfile(p.genome, {
             label: p.agent.label,
-            contextDir: config.sandbox === 'local' ? config.contextDir ?? null : null,
+            readableDirs: readableDirsFor(config),
           }),
         )
         return h
@@ -788,6 +790,14 @@ export class TournamentEngine {
       await disposeAll.call(this.d.sandbox).catch(() => {})
     }
   }
+}
+
+/** Folders outside the workspace an agent's profile lets it read, never edit. */
+export function readableDirsFor(config: Pick<RunConfig, 'sandbox' | 'contextDir'>): string[] {
+  if (config.sandbox === 'docker') {
+    return [...(config.contextDir ? [CONTAINER_CONTEXT_PATH] : []), TOOLS_MOUNT]
+  }
+  return config.sandbox === 'local' && config.contextDir ? [config.contextDir] : []
 }
 
 /** Marker for the driver's own timeout, so a runner's rejection is not mistaken for one. */

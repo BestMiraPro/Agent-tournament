@@ -56,6 +56,38 @@ describe('RelayPolicy', () => {
     expect(JSON.stringify([g, a])).not.toContain('tok-1')
   })
 
+  test("OpenCode's client identification reaches OpenCode Zen only, bounded, and never another provider", () => {
+    const client = {
+      'user-agent': 'opencode/1.18.21', 'x-opencode-client': 'cli', 'x-opencode-session': 'ses_1',
+      'x-opencode-project': 'x'.repeat(300), 'x-opencode-directory': '/work/a1',
+    }
+    const p = new RelayPolicy([], limits)
+    p.grant('run-z', {
+      token: 'tok-z', allowedModels: ['opencode/muse-spark-free', 'wandb/zai-org/GLM-5.2'], maxRequests: 5,
+      upstreams: [
+        { providerId: 'opencode', baseUrl: 'https://opencode.ai/zen/v1', authStyle: 'bearer', apiKey: 'public' },
+        upstreams[0]!,
+      ],
+    })
+    const zen = p.authorize(chat({
+      path: '/opencode/chat/completions',
+      headers: { authorization: 'Bearer tok-z', 'content-type': 'application/json', ...client },
+      body: json({ model: 'muse-spark-free', messages: [] }),
+    }))
+    expect(zen).toMatchObject({
+      ok: true,
+      headers: {
+        authorization: 'Bearer public', 'content-type': 'application/json',
+        'user-agent': 'opencode/1.18.21', 'x-opencode-client': 'cli', 'x-opencode-session': 'ses_1',
+      },
+    })
+    const zenHeaders = (zen as { headers: Record<string, string> }).headers
+    expect(zenHeaders['x-opencode-project']).toBeUndefined()
+    expect(zenHeaders['x-opencode-directory']).toBeUndefined()
+    const wandb = p.authorize(chat({ headers: { authorization: 'Bearer tok-z', 'content-type': 'application/json', ...client } }))
+    expect((wandb as { headers: Record<string, string> }).headers).toEqual({ authorization: 'Bearer REAL-WANDB-KEY', 'content-type': 'application/json' })
+  })
+
   test('refuses a missing, unknown or revoked token', () => {
     const p = policy()
     expect(p.authorize(chat({ headers: { 'content-type': 'application/json' } }))).toMatchObject({ ok: false, status: 401 })

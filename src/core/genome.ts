@@ -34,24 +34,27 @@ export function serializeGenome(g: Genome, opts: { label: string }): string {
  * answered here, because nobody is watching to answer it: on September 13 a Muse Spark
  * agent asked for `external_directory /tmp/*` and waited until it was cancelled.
  * Denials are ordinary tool errors the agent can work around; nothing is widened beyond
- * the workspace, except a local run's context folder, which becomes readable and not editable.
- * That is the most rules can do locally: `bash` cannot be confined to paths, so a local agent
- * could still change the folder. Docker runs mount it read-only instead, and pass no folder here.
+ * the workspace except `readableDirs`, which become readable and not editable: a local run's
+ * context folder, or a Docker worker's read-only `/context` and `/run/arena` mounts. Without
+ * the Docker paths, OpenCode asked to read the mounted brief and TOOLS.md and the unattended
+ * answer rejected it (September 15 relay acceptance run). Locally this is the most rules can
+ * do: `bash` cannot be confined to paths, so a local agent could still change the folder.
  */
 export function serializeCompetitorProfile(
   g: Genome,
-  opts: { label: string; contextDir?: string | null },
+  opts: { label: string; readableDirs?: readonly string[] },
 ): string {
+  const dirs = opts.readableDirs ?? []
   return [
     '---',
     `description: ${opts.label}`,
     `model: ${g.modelId}`,
     `temperature: ${g.temperature}`,
     'permission:',
-    ...permissionFor('edit', 'allow', 'deny', opts.contextDir),
+    ...permissionFor('edit', 'allow', 'deny', dirs),
     '  bash: allow',
     '  webfetch: deny',
-    ...permissionFor('external_directory', 'deny', 'allow', opts.contextDir),
+    ...permissionFor('external_directory', 'deny', 'allow', dirs),
     '  doom_loop: deny',
     '  question: deny',
     '  read:',
@@ -76,13 +79,14 @@ export function folderPatterns(dir: string): string[] {
 }
 
 /**
- * `key: base`, or — with a folder — a map whose `*` is `base` and whose folder patterns get
+ * `key: base`, or — with folders — a map whose `*` is `base` and whose folder patterns get
  * `folder`. A map in place, never a second `key:` line: YAML keys must be unique.
  * Patterns are JSON-quoted, which is valid YAML and keeps Windows backslashes literal.
  */
-function permissionFor(key: string, base: string, folder: string, dir: string | null | undefined): string[] {
-  if (!dir) return [`  ${key}: ${base}`]
-  return [`  ${key}:`, `    "*": ${base}`, ...folderPatterns(dir).map((p) => `    ${JSON.stringify(p)}: ${folder}`)]
+function permissionFor(key: string, base: string, folder: string, dirs: readonly string[]): string[] {
+  if (dirs.length === 0) return [`  ${key}: ${base}`]
+  const patterns = [...new Set(dirs.flatMap(folderPatterns))]
+  return [`  ${key}:`, `    "*": ${base}`, ...patterns.map((p) => `    ${JSON.stringify(p)}: ${folder}`)]
 }
 
 export function parseGenome(md: string): Genome {

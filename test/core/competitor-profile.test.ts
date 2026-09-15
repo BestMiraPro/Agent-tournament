@@ -76,7 +76,7 @@ describe('competitor profile', () => {
   })
 
   test('a local context folder is readable but not editable; nothing else outside is', () => {
-    const withCtx = serializeCompetitorProfile(genome, { label: 'c', contextDir: 'C:\\Research Notes' })
+    const withCtx = serializeCompetitorProfile(genome, { label: 'c', readableDirs: ['C:\\Research Notes'] })
     // Runtime defaults, then this profile's own rules. A key may appear only once in YAML,
     // so the folder rules replace `edit`/`external_directory` in place rather than repeat them.
     const defaults = contract.competitorAgent.rules.slice(0, -declaredRules(md).length)
@@ -90,10 +90,21 @@ describe('competitor profile', () => {
     expect(new Set(keys).size).toBe(keys.length)
   })
 
+  test('a docker worker can read its read-only /context and /run/arena mounts, and change neither', () => {
+    const docker = serializeCompetitorProfile(genome, { label: 'c', readableDirs: ['/context', '/run/arena'] })
+    const defaults = contract.competitorAgent.rules.slice(0, -declaredRules(md).length)
+    const rules = [...defaults, ...declaredRules(docker)]
+    expect(evaluate(rules, 'external_directory', '/context/BRIEF.md')).toBe('allow')
+    expect(evaluate(rules, 'external_directory', '/run/arena/TOOLS.md')).toBe('allow')
+    expect(evaluate(rules, 'edit', '/run/arena/tools.json')).toBe('deny')
+    expect(evaluate(rules, 'external_directory', '/run/arena-config/opencode.json')).toBe('deny')
+    expect(evaluate(rules, 'external_directory', '/tmp/x')).toBe('deny')
+  })
+
   test('the driver writes this profile, not the strategy-bearing genome file', () => {
     const driver = readFileSync('src/engine/driver.ts', 'utf8')
     expect(driver).toMatch(
-      /'\.opencode\/agents\/competitor\.md',(?:\s*\/\/[^\n]*)*\s*serializeCompetitorProfile\(p\.genome, \{\s*label: p\.agent\.label,\s*contextDir:/,
+      /'\.opencode\/agents\/competitor\.md',(?:\s*\/\/[^\n]*)*\s*serializeCompetitorProfile\(p\.genome, \{\s*label: p\.agent\.label,\s*readableDirs:/,
     )
   })
 })

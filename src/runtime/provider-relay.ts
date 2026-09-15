@@ -55,6 +55,15 @@ export type RelayDecision =
 /** Request headers that carry meaning upstream. Everything else — cookies, forwarding, the worker token — stays behind. */
 const FORWARDED_HEADERS = ['content-type', 'accept', 'anthropic-version', 'anthropic-beta'] as const
 
+/**
+ * OpenCode Zen's free tier answers "can only be used in OpenCode" to a call that lacks the
+ * identification OpenCode sends (September 15 relay acceptance run), so these go to Zen only.
+ * They name the client and its session; none carries a credential. Bounded printable text.
+ */
+const OPENCODE_CLIENT_HEADERS = ['user-agent', 'x-opencode-client', 'x-opencode-project', 'x-opencode-session', 'x-opencode-request'] as const
+const OPENCODE_PROVIDER_ID = 'opencode'
+const MAX_CLIENT_HEADER_LENGTH = 256
+
 const DEFAULT_BASE: Record<string, { base: string | null; authStyle: RelayAuthStyle }> = {
   '@ai-sdk/openai-compatible': { base: null, authStyle: 'bearer' },
   '@ai-sdk/openai': { base: 'https://api.openai.com/v1', authStyle: 'bearer' },
@@ -185,6 +194,13 @@ export class RelayPolicy {
       const value = headerValue(req.headers, name)
       if (value !== undefined) headers[name] = value
     }
+    if (upstream.providerId === OPENCODE_PROVIDER_ID) {
+      for (const name of OPENCODE_CLIENT_HEADERS) {
+        const value = headerValue(req.headers, name)
+        if (value !== undefined && value.length <= MAX_CLIENT_HEADER_LENGTH && /^[\x20-\x7e]*$/.test(value)) headers[name] = value
+      }
+    }
+    // Set last, so no forwarded header can stand in for the key.
     if (upstream.authStyle === 'bearer') headers.authorization = `Bearer ${upstream.apiKey}`
     else headers[upstream.authStyle] = upstream.apiKey
 
