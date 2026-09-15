@@ -1,4 +1,5 @@
-export type CallPurpose = 'judge' | 'reflect' | 'criteria'
+/** `review`: the behavioural review of attempts that produced nothing to grade. */
+export type CallPurpose = 'judge' | 'reflect' | 'criteria' | 'review'
 
 export interface CompleteRequest {
   purpose: CallPurpose
@@ -14,4 +15,6 @@ export interface CompleteRequest {
 
 export interface Provider {
   complete(req: CompleteRequest): Promise<string>
+  /** The runtime that answers calls, recorded with grading audits: `opencode` or `mock`. */
+  describe?(): string
 }

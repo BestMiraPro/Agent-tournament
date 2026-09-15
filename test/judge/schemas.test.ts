@@ -12,9 +12,14 @@ describe('JSON schemas', () => {
     }
   })
 
-  test('ranking schema requires the fields the judge parses', () => {
+  test('ranking schema requires the fields the judge parses, bounds the score and closes the safety review', () => {
     const item = RANKING_JSON_SCHEMA.properties.rankings.items
-    expect(item.required).toEqual(['ref', 'rank', 'score', 'rationale'])
+    expect(item.required).toEqual(['ref', 'rank', 'score', 'rationale', 'criteria', 'limitations', 'safety'])
+    expect(item.properties.score).toEqual({ type: 'number', minimum: 0, maximum: 100 })
+    expect(item.properties.safety.additionalProperties).toBe(false)
+    expect(item.properties.safety.properties.findings.maxItems).toBe(20)
+    expect(item.properties.safety.properties.findings.items.properties.evidence_ids.maxItems).toBe(20)
+    expect(item.properties.safety.properties.limitations.maxItems).toBe(20)
     expect(RANKING_JSON_SCHEMA.required).toContain('rankings')
     expect(RANKING_JSON_SCHEMA.required).toContain('meta_digest')
   })

@@ -60,7 +60,8 @@ export class OpenCodeProvider implements Provider {
     // A failed prompt used to leave its session live on the server, still generating and
     // still spending, and the judge's retry loop made three of them per failed call.
     const asGrader =
-      this.opts.graderDirectory !== undefined && (req.purpose === 'criteria' || req.purpose === 'judge')
+      this.opts.graderDirectory !== undefined &&
+      (req.purpose === 'criteria' || req.purpose === 'judge' || req.purpose === 'review')
     const res = await promptOnce(
       this.client,
       asGrader ? this.opts.graderDirectory! : this.directory,
@@ -92,7 +93,11 @@ export class OpenCodeProvider implements Provider {
     return extractText(res)
   }
 
-  private record(res: { info?: { cost?: number; tokens?: { input: number; output: number; cache: { read: number; write: number } } } }): void {
+  describe(): string {
+    return 'opencode'
+  }
+
+  private record(res:{ info?: { cost?: number; tokens?: { input: number; output: number; cache: { read: number; write: number } } } }): void {
     this.usage.calls++
     this.usage.costUsd += res.info?.cost ?? 0
     const t = res.info?.tokens

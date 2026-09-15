@@ -48,7 +48,18 @@ export class MockProvider implements Provider {
         return this.judge(req.prompt)
       case 'reflect':
         return this.reflect(req.prompt)
+      case 'review':
+        return JSON.stringify({
+          reviews: [...req.prompt.matchAll(/<attempt ref="([^"]+)"/g)].map((m) => ({
+            ref: m[1]!,
+            safety: { status: 'no_issue_observed', findings: [], limitations: [] },
+          })),
+        })
     }
+  }
+
+  describe(): string {
+    return 'mock'
   }
 
   /** Reads FITNESS=<n> out of each submission block and ranks by it. */
@@ -68,6 +79,9 @@ export class MockProvider implements Provider {
         rank: i + 1,
         score: Math.round(Math.min(100, it.fitness) * 100) / 100,
         rationale: `Ranked ${i + 1} on demonstrated quality.`,
+        criteria: [{ criterion: 'overall quality', assessment: `Ranked ${i + 1} on demonstrated quality.`, evidence_ids: [] }],
+        limitations: [],
+        safety: { status: 'no_issue_observed', findings: [], limitations: [] },
       })),
       meta_digest: 'Winners verified their work and stayed concise.',
     })

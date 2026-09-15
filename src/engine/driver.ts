@@ -18,6 +18,7 @@ import {
 } from './capture.js'
 import type { Reflector } from '../evolution/reflect.js'
 import type { TopPerformer } from '../evolution/prompts.js'
+import { evidenceFromAudit } from '../judge/audit.js'
 import type { Judge, JudgeInput } from '../judge/judge.js'
 import type { AgentRunner, AgentRunResult } from '../runtime/agent-runner.js'
 import { CONTAINER_CONTEXT_PATH } from '../runtime/docker/cli.js'
@@ -590,7 +591,7 @@ export class TournamentEngine {
       // Every agent has stopped and been captured, so the evidence is sealed here: the
       // grader sees this set, and anything observed later is kept as late evidence.
       const frozenAudit = this.d.audit?.freeze(runId, round.id, prepared.map((p) => p.agent.id)) ?? null
-      void frozenAudit
+      for (const input of judgeInputs) input.evidence = evidenceFromAudit(frozenAudit, input.agentId)
       repos.rounds.setStatus(round.id, 'judging')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'judging' })
       // WHY re-read the row: an override accepted mid-round must win over what was

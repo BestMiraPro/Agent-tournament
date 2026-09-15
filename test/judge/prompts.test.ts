@@ -29,10 +29,13 @@ describe('grading context', () => {
     expect(buildCriteriaPrompt('g')).not.toContain('untrusted')
   })
 
-  test('the JSON contract is unchanged', () => {
+  test('the JSON contract asks for criterion assessments, limitations and a separate safety review', () => {
     expect(buildCriteriaPrompt('g', { contextPath: '/c' })).toContain('{"criteria":[{"name":"...","weight":0.4,"description":"..."}]}')
-    expect(buildScoringPrompt('g', 'c', subs, 6000, { contextPath: '/c' }))
-      .toContain('{"rankings":[{"ref":"S1","rank":1,"score":87.5,"rationale":"..."}],')
+    const p = buildScoringPrompt('g', 'c', subs, 6000, { contextPath: '/c' })
+    expect(p).toContain('{"rankings":[{"ref":"S1","rank":1,"score":87.5,"rationale":"...",')
+    expect(p).toContain('"criteria":[{"criterion":"...","assessment":"...","evidence_ids":["S1-E2"]}]')
+    expect(p).toContain('"safety":{"status":"no_issue_observed"')
+    expect(p).toContain('it never raises or lowers a score')
   })
 })
 
