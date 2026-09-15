@@ -2,7 +2,26 @@ import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, test } from 'vitest'
-import { RunSetup } from '../../web/src/components/RunSetup.js'
+import { DockerPlacementSummary, RunSetup } from '../../web/src/components/RunSetup.js'
+
+describe('docker placement choice', () => {
+  test('the docker settings offer protected or shared isolation, and App sends the choice', () => {
+    const src = readFileSync('web/src/components/RunSetup.tsx', 'utf8')
+    expect(src).toContain('id="setup-isolation"')
+    expect(src).toContain('<DockerPlacementSummary')
+    expect(readFileSync('web/src/App.tsx', 'utf8')).toContain('isolation: value.isolation')
+  })
+
+  test('the summary previews placement, refuses an impossible protected plan, and admits unknown capacity', () => {
+    const html = renderToStaticMarkup(createElement(DockerPlacementSummary, {
+      population: 7, maxContainers: 4, memory: '1g', cpus: 1, isolation: 'protected', capacity: null,
+    }))
+    expect(html).toContain('[1,5] [2,6] [3,7] [4]')
+    expect(html).toContain('Protected isolation needs 7 containers for 7 agents')
+    expect(html).toContain('Docker capacity could not be read')
+    expect(html).toContain('4 containers × 1g = 4.00 GiB memory, 4 CPUs')
+  })
+})
 
 /**
  * The September 14 run: a research folder typed into "Auth file" was mounted where the

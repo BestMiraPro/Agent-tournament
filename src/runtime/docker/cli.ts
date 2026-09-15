@@ -51,6 +51,8 @@ export interface RunSpec {
   authFile: string | null
   /** Host folder of reference material, mounted read-only at CONTAINER_CONTEXT_PATH. */
   contextDir?: string | null
+  /** Host folder holding this container's TOOLS.md and tools.json, mounted read-only at /run/arena. */
+  toolsDir?: string | null
   /** Host models.dev catalogue to pin inside the container; see buildRunArgs. */
   modelsFile?: string | null
   pidsLimit?: number
@@ -104,6 +106,11 @@ export function buildRunArgs(spec: RunSpec): string[] {
     // Reference material: the mount, not a permission rule, is what keeps it unchanged —
     // agents run shell commands, which no tool rule can confine.
     ...(spec.contextDir ? ['-v', `${spec.contextDir}:${CONTAINER_CONTEXT_PATH}:ro`] : []),
+    // The tool inventory lives outside /work, so a workspace reset cannot erase it and
+    // capture never mistakes it for agent output; read-only, so no agent can rewrite it.
+    ...(spec.toolsDir ? ['-v', `${spec.toolsDir}:/run/arena:ro`] : []),
+    // Numeric thread pools sized to this container's CPU budget, not the host's CPU count.
+    ...threadLimitEnv(spec.cpus),
     ...(spec.authFile
       ? ['-v', `${spec.authFile}:/root/.local/share/opencode/auth.json:ro`]
       : []),
@@ -121,6 +128,15 @@ export function buildRunArgs(spec: RunSpec): string[] {
       : []),
     spec.image,
   ]
+}
+
+/**
+ * BLAS/OpenMP read these at import. Unset, each NumPy process sizes its pool to every host
+ * CPU it can see — sixteen threads each inside a one-CPU quota — and only thrashes.
+ */
+export function threadLimitEnv(cpus: number): string[] {
+  const threads = String(Math.max(1, Math.floor(cpus)))
+  return ['OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS'].flatMap((v) => ['-e', `${v}=${threads}`])
 }
 
 export async function dockerAvailable(): Promise<boolean> {

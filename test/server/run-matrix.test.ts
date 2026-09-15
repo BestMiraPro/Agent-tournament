@@ -36,7 +36,7 @@ describe('run matrix', () => {
 
   test('docker refusal names the shortage', async () => {
     await expect(composeRun(parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/a',
+      name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/a', isolation: 'shared',
       roster: [{ modelId: 'w/m', count: 32, temperature: 0.7 }],
     }), { ...seams, readCapacity: (async () => ({ totalMemoryBytes: 512 * 1024 ** 2, usedMemoryBytes: 0, cpus: 1 })) as never })
     ).rejects.toThrow(/docker sandbox/i)

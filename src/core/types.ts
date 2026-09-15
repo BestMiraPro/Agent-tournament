@@ -79,6 +79,13 @@ export interface RunConfig {
   maxContainers: number
   containerMemory: string
   containerCpus: number
+  /**
+   * Docker placement policy. `protected`: one agent per container, refused when that does not
+   * fit. `shared`: agents may share a container and can then read and change each other's
+   * files. Stored configs from before the choice existed decode as shared, which is what
+   * they ran as.
+   */
+  isolation: 'protected' | 'shared'
   /** Ceiling on what one agent may leave in its workspace, in bytes. */
   maxWorkspaceBytes: number
   /** Ceiling on how many files one agent may leave behind (inode exhaustion). */
@@ -154,6 +161,7 @@ export const DEFAULT_CONFIG: RunConfig = {
   maxContainers: 4,
   containerMemory: '1g',
   containerCpus: 1,
+  isolation: 'shared',
   maxWorkspaceBytes: 52_428_800,
   maxWorkspaceFiles: 2000,
   seedDir: null,

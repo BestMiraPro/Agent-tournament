@@ -31,6 +31,18 @@ describe('buildRunArgs', () => {
     maxFileBytes: 268_435_456,
   }
 
+  test('mounts the tool manifest read-only at /run/arena, and nothing when absent', () => {
+    expect(buildRunArgs({ ...base, toolsDir: 'C:\\ws\\.arena-runtime\\r\\shard-0' }).join(' '))
+      .toContain('-v C:\\ws\\.arena-runtime\\r\\shard-0:/run/arena:ro')
+    expect(buildRunArgs(base).join(' ')).not.toContain('/run/arena')
+  })
+
+  test('sizes numeric thread pools to the CPU budget, never below one', () => {
+    const a = buildRunArgs({ ...base, cpus: 2 }).join(' ')
+    for (const v of ['OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS']) expect(a).toContain(`-e ${v}=2`)
+    expect(buildRunArgs({ ...base, cpus: 0.5 }).join(' ')).toContain('-e OMP_NUM_THREADS=1')
+  })
+
   test('mounts a context folder read-only at /context, and nothing when absent', () => {
     expect(buildRunArgs({ ...base, contextDir: 'C:\\research' }).join(' ')).toContain('-v C:\\research:/context:ro')
     expect(buildRunArgs(base).join(' ')).not.toContain('/context')

@@ -14,8 +14,10 @@ import { MockSandbox } from './runtime/mock-sandbox.js'
 import {
   planCapacity,
   readHostCapacity,
+  type CapacityLedger,
   type HostCapacity,
 } from './runtime/docker/capacity.js'
+import { parseMemoryLimit } from './core/memory.js'
 import { sweepOrphanContainers, type SweepOptions } from './runtime/docker/sweep.js'
 import type { Provider } from './runtime/provider.js'
 import { runPool } from './runtime/pool.js'
@@ -199,9 +201,6 @@ function buildRoster(modelIds: string[], population: number, temperature: number
   })
 }
 
-/** The image every agent container runs. Built on demand from docker/Dockerfile.agent. */
-export const AGENT_IMAGE = 'agent-arena:latest'
-
 /**
  * Decides which sandbox a run actually uses.
  *
@@ -281,19 +280,29 @@ export const REAL_DOCKER_STARTUP: DockerStartupHooks = {
  * recorded as agent failures rather than the infrastructure failure they are. This is the
  * call that makes it bite.
  *
- * A failure to *read* capacity is not a refusal. The daemon may not expose `info`/`stats`
- * on every host, and refusing every run on those hosts would be worse than the
- * overcommitment this is guarding against — so an unreadable host warns and proceeds.
+ * A failure to *read* capacity refuses a protected run: "safe to start" cannot be claimed
+ * about a host nobody measured. A shared run keeps the older policy — the daemon may not
+ * expose `info`/`stats` on every host — and warns and proceeds.
+ *
+ * With a ledger, admission is checked against every other reservation in this process and
+ * recorded under `reservationId`; the caller releases it.
  */
 export async function assertHostCapacity(
   config: RunConfig,
   read: () => Promise<HostCapacity> = readHostCapacity,
   onWarning: (message: string) => void = (m) => console.warn(m),
+  opts: { ledger?: CapacityLedger; reservationId?: string } = {},
 ): Promise<void> {
   let host: HostCapacity
   try {
     host = await read()
   } catch (e) {
+    if (config.isolation === 'protected') {
+      throw new Error(
+        `docker sandbox: host capacity could not be read, so a protected run cannot be admitted (${(e as Error).message}). ` +
+          'Start Docker Desktop and try again, or choose shared isolation to start without this check.',
+      )
+    }
     onWarning(
       `Could not read host capacity, so the overcommit preflight was skipped: ` +
         `${(e as Error).message}`,
@@ -307,14 +316,20 @@ export async function assertHostCapacity(
   // instead refuses runs that would have fit comfortably.
   const containers = Math.max(1, Math.min(config.maxContainers, config.populationSize))
 
-  const verdict = planCapacity(
-    {
-      containers,
-      memory: config.containerMemory,
-      cpus: config.containerCpus,
-    },
-    host,
-  )
+  const verdict = opts.ledger && opts.reservationId
+    ? opts.ledger.admit(
+        opts.reservationId,
+        { containers, memoryBytes: parseMemoryLimit(config.containerMemory), cpus: config.containerCpus },
+        host,
+      )
+    : planCapacity(
+        {
+          containers,
+          memory: config.containerMemory,
+          cpus: config.containerCpus,
+        },
+        host,
+      )
   if (!verdict.ok) {
     throw new Error(`docker sandbox: ${verdict.reason}`)
   }
@@ -426,6 +441,8 @@ async function buildRealDeps(
       maxContainers: config.maxContainers,
       containerMemory: config.containerMemory,
       containerCpus: config.containerCpus,
+      // The CLI keeps the placement it always had unless its config says otherwise.
+      isolation: config.isolation ?? 'shared',
       pricing: { ...config.pricing },
       budget: {
         maxRunTokens: config.budget.maxRunTokens,

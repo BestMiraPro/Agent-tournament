@@ -118,7 +118,7 @@ export function App() {
         concurrency: value.concurrency,
         // Only a docker run has containers to size; the others would ignore these.
         ...(value.sandbox === 'docker'
-          ? { maxContainers: value.maxContainers, containerMemory: value.containerMemory, containerCpus: value.containerCpus }
+          ? { maxContainers: value.maxContainers, containerMemory: value.containerMemory, containerCpus: value.containerCpus, isolation: value.isolation }
           : {}),
         pricing,
       }))
@@ -270,7 +270,7 @@ export function App() {
       </div>
       {!busy && snapshot.lastRoundIdx === 0 && <p className="muted">No rounds yet — set a goal and run round 1.</p>}
       <div className="layout" ref={gridRef} tabIndex={-1}>
-        <AgentGrid agents={snapshot.agents} live={live} onSelect={setSelectedAgentId} />
+        <AgentGrid agents={snapshot.agents} live={live} onSelect={setSelectedAgentId} placement={snapshot.placement ?? null} />
         <aside>
           <RoundControls
             key={snapshot.runId}

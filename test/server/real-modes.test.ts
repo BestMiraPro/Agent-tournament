@@ -14,6 +14,7 @@ import { buildApi } from '../../src/server/api.js'
 import { RunRegistry, disposeRunRecord } from '../../src/server/runs.js'
 import { composeRun, defaultSeams, type ComposedRun } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
+import { toolchainSeams } from './toolchain-stubs.js'
 
 // Spy on disposeRunRecord for the stop-run tests without losing the real
 // teardown (the ordering test below still exercises the real implementation).
@@ -304,7 +305,7 @@ describe('real-mode wiring', () => {
     const create = await app.inject({
       method: 'POST', url: '/api/runs',
       payload: {
-        name: 'planned', goal: 'g', sandbox: 'docker',
+        name: 'planned', goal: 'g', sandbox: 'docker', isolation: 'shared',
         workspaceRoot: 'C:\\tmp\\arena-planned', authFile: 'C:\\tmp\\auth.json',
         roster: [{ modelId: 'mock/model', count: 6, temperature: 0.7 }],
       },
@@ -476,7 +477,7 @@ describe('real-mode wiring', () => {
     const seams = () => ({
       startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn() })),
       attachHostServer: vi.fn(),
-      ensureImageFn: vi.fn(async () => {}),
+      ensureImageFn: vi.fn(async () => {}), ...toolchainSeams(),
       readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
       sweepFn: vi.fn(async () => [] as string[]),
       validateModels: vi.fn(async () => {}),
@@ -593,7 +594,7 @@ describe('real-mode wiring', () => {
     const seams = {
       startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop })),
       attachHostServer: vi.fn(),
-      ensureImageFn: vi.fn(async () => { throw new Error('no docker daemon') }),
+      ensureImageFn: vi.fn(async () => { throw new Error('no docker daemon') }), ...toolchainSeams(),
       readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
       sweepFn: vi.fn(async () => [] as string[]),
       validateModels: vi.fn(async () => {}),
@@ -642,7 +643,7 @@ describe('real-mode wiring', () => {
     const seams = {
       startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop })),
       attachHostServer: vi.fn(),
-      ensureImageFn: vi.fn(async () => {}),
+      ensureImageFn: vi.fn(async () => {}), ...toolchainSeams(),
       readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
       sweepFn: vi.fn(async () => [] as string[]),
       validateModels: vi.fn(async () => {
@@ -661,7 +662,7 @@ describe('real-mode wiring', () => {
     const seams = {
       startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
       attachHostServer: vi.fn(),
-      ensureImageFn: vi.fn(async () => {}),
+      ensureImageFn: vi.fn(async () => {}), ...toolchainSeams(),
       readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
       sweepFn: vi.fn(async () => [] as string[]),
       validateModels: vi.fn(async (_c: unknown, _d: unknown, _cfg: unknown, onWarning: (m: string) => void) => {
@@ -850,7 +851,7 @@ describe('container names carry the live run id', () => {
   const seams = (started: string[]) => ({
     startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn() })),
     attachHostServer: vi.fn(),
-    ensureImageFn: vi.fn(async () => {}),
+    ensureImageFn: vi.fn(async () => {}), ...toolchainSeams(),
     readCapacity: vi.fn(async () => ({
       totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1024 ** 3, cpus: 8,
     })),

@@ -1,0 +1,11 @@
+# Approved research toolchain, installed once into /opt/arena/venv at image build.
+# Resolved with exact versions and hashes into research-requirements.lock by pip-compile
+# (--generate-hashes) on the pinned base image's Python; the image installs only the lock.
+# Adding a package is a reviewed change to both files, never something done in a running agent.
+numpy
+pandas
+scipy
+matplotlib
+pyarrow
+duckdb
+pytest

@@ -1,5 +1,21 @@
 import { describe, expect, test, vi } from 'vitest'
-import { containerName, startShardContainer, waitForHealth } from '../../../src/runtime/docker/container.js'
+import { containerName, inspectContainerState, startShardContainer, waitForHealth } from '../../../src/runtime/docker/container.js'
+
+describe('inspectContainerState', () => {
+  const answer = (stdout: string, code = 0) => vi.fn(async () => ({ stdout, stderr: '', code }))
+
+  test('reads whether the kernel OOM-killed the container', async () => {
+    const run = answer('true|false\n')
+    expect(await inspectContainerState('arena-r-0', run)).toEqual({ oomKilled: true, running: false })
+    expect(run).toHaveBeenCalledWith(['inspect', '-f', '{{.State.OOMKilled}}|{{.State.Running}}', 'arena-r-0'], 20_000)
+    expect(await inspectContainerState('arena-r-0', answer('false|true'))).toEqual({ oomKilled: false, running: true })
+  })
+
+  test('a missing container or unreadable output is unknown, not "not killed"', async () => {
+    expect(await inspectContainerState('gone', answer('', 1))).toBeNull()
+    expect(await inspectContainerState('odd', answer('<no value>|true'))).toBeNull()
+  })
+})
 
 describe('containerName', () => {
   test('is stable and includes run and shard', () => {

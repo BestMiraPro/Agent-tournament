@@ -19,6 +19,7 @@ import { discoverModels } from '../runtime/opencode/discovery.js'
 import { buildCsvRows, buildJsonDump } from './export.js'
 import { submissionView } from './submission-view.js'
 import { ActivityCache, type ActivitySnapshot } from './activity.js'
+import type { HostCapacity } from '../runtime/docker/capacity.js'
 
 export interface SpecDefaults {
   workspaceRoot?: string | null
@@ -46,6 +47,8 @@ export interface ApiDeps {
   startModelsServer?: () => Promise<ServerHandle>
   /** Live activity for runs on the default engine, which have no per-run record. */
   activityFor?: (runId: string) => ActivitySnapshot | null
+  /** Docker's capacity reading and what this process has reserved, for setup estimates. */
+  capacity?: () => Promise<{ host: HostCapacity; reserved: { memoryBytes: number; cpus: number } }>
 }
 
 /** Bridge callbacks that report upstream stream health as its own event, never as agent state. */
@@ -482,6 +485,23 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     }
   })
 
+  // Totals only: per-container names belong to whatever else runs on this Docker host.
+  app.get('/api/capacity', async (_req, reply) => {
+    if (!deps.capacity) return reply.code(503).send({ error: 'Docker capacity is not available from this server.' })
+    try {
+      const { host, reserved } = await deps.capacity()
+      return {
+        totalMemoryBytes: host.totalMemoryBytes,
+        usedMemoryBytes: host.usedMemoryBytes,
+        cpus: host.cpus,
+        reservedMemoryBytes: reserved.memoryBytes,
+        reservedCpus: reserved.cpus,
+      }
+    } catch (e) {
+      return reply.code(503).send({ error: e instanceof Error ? e.message : String(e) })
+    }
+  })
+
   app.get('/api/runs/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
     // Runtime capacity/warnings only exist on the per-run record (composed
@@ -489,7 +509,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const record = deps.registry?.get(id)
     const snapshot = buildRunSnapshot(
       deps.repos, id,
-      record ? { capacity: record.capacity, warnings: record.warnings } : undefined,
+      record
+        ? { capacity: record.capacity, warnings: record.warnings, placement: record.composed?.placement?.() ?? null }
+        : undefined,
     )
     if (!snapshot) return reply.code(404).send({ error: 'no such run' })
     // Composed runs have their own manager/engine; the global one never sees them.
@@ -521,6 +543,17 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     if (run.status === 'stopped') return reply.code(409).send({ error: 'run is stopped' })
     const record = deps.registry?.get(runId)
     if ((record?.manager ?? deps.manager).isBusy(runId)) return reply.code(409).send({ error: 'run is busy' })
+    // Refused here rather than at the next round's planning, where it would fail the round.
+    if (run.config.sandbox === 'docker' && run.config.isolation === 'protected') {
+      const active = deps.repos.agents.listActive(runId).length
+      if (active + 1 > run.config.maxContainers) {
+        return reply.code(409).send({
+          error:
+            `Protected isolation gives each agent its own container: this run has ${active} agents and ` +
+            `${run.config.maxContainers} containers, so another agent would have to share one. Remove an agent first.`,
+        })
+      }
+    }
     const addSchema = z.object({
       modelId: z.string().min(1),
       temperature: z.number().min(0).max(2),

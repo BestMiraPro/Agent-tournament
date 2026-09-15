@@ -11,6 +11,8 @@ export interface ShardContainerSpec {
   authFile: string | null
   /** Host folder of reference material, mounted read-only; null when the run has none. */
   contextDir?: string | null
+  /** Host folder with this container's tool manifest, mounted read-only at /run/arena. */
+  toolsDir?: string | null
   /** Host models.dev catalogue pinned read-only in the container, when the host has one. */
   modelsFile?: string | null
   healthTimeoutMs?: number
@@ -25,6 +27,24 @@ export interface ShardContainer {
 /** Stable name so a restarted orchestrator can find and adopt existing containers. */
 export function containerName(runId: string, shardIndex: number): string {
   return `arena-${runId}-${shardIndex}`
+}
+
+/**
+ * What the daemon says about a container's end: whether the kernel OOM-killed it. Null when
+ * the daemon cannot say (no such container, unreadable output) — unknown stays unknown.
+ */
+export async function inspectContainerState(
+  name: string,
+  run: DockerFn = docker,
+): Promise<{ oomKilled: boolean; running: boolean } | null> {
+  const r = await run(['inspect', '-f', '{{.State.OOMKilled}}|{{.State.Running}}', name], 20_000)
+  if (r.code !== 0) return null
+  const [oom, running] = r.stdout.trim().split('|')
+  const bool = (v: string | undefined) => (v === 'true' ? true : v === 'false' ? false : null)
+  const oomKilled = bool(oom)
+  const isRunning = bool(running)
+  if (oomKilled === null || isRunning === null) return null
+  return { oomKilled, running: isRunning }
 }
 
 export async function waitForHealth(
@@ -63,6 +83,7 @@ export async function startShardContainer(
         cpus: spec.cpus,
         authFile: spec.authFile,
         contextDir: spec.contextDir ?? null,
+        toolsDir: spec.toolsDir ?? null,
         modelsFile: spec.modelsFile ?? null,
       }),
       120_000,

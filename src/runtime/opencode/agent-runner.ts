@@ -1,5 +1,5 @@
 import { resolve as resolvePath } from 'node:path'
-import { describeFailure, describeProviderError, errorTextFor, failureFromText } from '../../core/failure.js'
+import { describeFailure, describeProviderError, errorTextFor, failureFromText, type AgentFailure } from '../../core/failure.js'
 import { serializeGenome } from '../../core/genome.js'
 import type { QuiesceStatus } from '../../engine/capture.js'
 import type { AgentRunContext, AgentRunner, AgentRunResult } from '../agent-runner.js'
@@ -33,16 +33,34 @@ export interface AgentRunnerOptions {
    * Docker shard, the host path for a local run. Null or absent when the run has none.
    */
   contextPath?: string | null
+  /** The container path of TOOLS.md when the runtime provides a tool manifest; null otherwise. */
+  toolsPath?: string | null
+  /**
+   * The runtime's own evidence that an agent failed because of a resource limit — an OOM kill
+   * recorded by the daemon — or null when there is none. Consulted only for runs that ended
+   * without a response, and bounded, so a slow daemon cannot hold a failed run open.
+   */
+  resourceFailure?: (handle: AgentHandle) => Promise<AgentFailure | null>
 }
 
+/** How long a failed run waits for resource evidence before keeping its own failure. */
+export const RESOURCE_DIAGNOSIS_MS = 10_000
+
 /** The contract every agent is held to; the judged artifact is SUBMISSION.md. */
-export function buildAgentPrompt(goalMd: string, contextPath: string | null = null): string {
+export function buildAgentPrompt(
+  goalMd: string,
+  contextPath: string | null = null,
+  toolsPath: string | null = null,
+): string {
   return [
     'GOAL:',
     goalMd,
     '',
     ...(contextPath
       ? [`Reference material (read-only) is in ${contextPath}. Read what is relevant before you start; you cannot change it.`, '']
+      : []),
+    ...(toolsPath
+      ? [`The tools already installed here are listed in ${toolsPath}. Read it before you install or set anything up.`, '']
       : []),
     `When you are finished, write your final answer to ${SUBMISSION_FILE} in your working directory.`,
     'Anything else you create is supporting evidence. Only ' + SUBMISSION_FILE + ' is judged.',
@@ -114,6 +132,30 @@ export class OpenCodeAgentRunner implements AgentRunner {
     await Promise.all([...this.live.values()].map((run) =>
       this.quiesce({ agentId: run.agentId, workspacePath: run.directory, baseUrl: '' }),
     ))
+  }
+
+  /**
+   * A container killed for its memory limit takes its OpenCode server with it, and the agent
+   * sees only a dropped connection. With daemon evidence the failure says what happened; without
+   * it, the runner's own failure stands.
+   */
+  private async withResourceDiagnosis(handle: AgentHandle, result: AgentRunResult): Promise<AgentRunResult> {
+    const diagnose = this.options.resourceFailure
+    if (!diagnose) return result
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let failure: AgentFailure | null = null
+    try {
+      failure = await Promise.race([
+        diagnose(handle),
+        new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), RESOURCE_DIAGNOSIS_MS) }),
+      ])
+    } catch {
+      failure = null
+    } finally {
+      clearTimeout(timer)
+    }
+    if (!failure) return result
+    return { ...result, status: 'error', errorText: failure.message.slice(0, 500), failure }
   }
 
   private requestAbort(run: LiveRun): void {
@@ -190,7 +232,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
         // profile's temperature and unattended permission policy never apply.
         agent: COMPETITOR_AGENT,
         system: ctx.genome.strategyMd,
-        parts: [{ type: 'text' as const, text: buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null) }],
+        parts: [{ type: 'text' as const, text: buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null, this.options.toolsPath ?? null) }],
       }
 
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -252,7 +294,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
     } catch (e) {
       const isTimeout = e instanceof TimeoutError || e instanceof OpenCodeTimeoutError
       if (tracked.promptDispatched) this.requestAbort(tracked)
-      return {
+      return await this.withResourceDiagnosis(handle, {
         status: isTimeout ? 'timeout' : 'error',
         // errorTextFor keeps the transport cause that String(e) dropped, so a reopened run
         // can still tell a headers timeout from a refused connection.
@@ -264,7 +306,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
         usageKnown: false,
         ...zero,
         durationMs: Date.now() - started,
-      }
+      })
     } finally {
       if (!tracked.promptDispatched) this.confirmStopped(tracked)
       tracked.localReturned = true

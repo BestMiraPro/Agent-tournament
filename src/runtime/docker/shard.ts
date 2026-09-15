@@ -24,6 +24,32 @@ export function planShards(agentIds: readonly string[], maxContainers: number): 
   return shards
 }
 
+/** One container's planned members, and whether they share it. */
+export interface Placement {
+  shardIndex: number
+  agentIds: string[]
+  occupancy: 'single' | 'shared'
+}
+
+export function describeShards(shards: readonly Shard[]): Placement[] {
+  return shards.map((s) => ({
+    shardIndex: s.shardIndex,
+    agentIds: [...s.agentIds],
+    occupancy: s.agentIds.length === 1 ? 'single' : 'shared',
+  }))
+}
+
+/**
+ * Which agents (numbered 1..population in roster order) would share which container, by the
+ * same rule `planShards` applies — so setup can show `[1,5] [2,6] [3,7] [4]` before Start.
+ * Placement follows the population's order each round, so a changed population can move an
+ * agent to a different container; this previews one population, not a fixed assignment.
+ */
+export function placementPreview(population: number, maxContainers: number): number[][] {
+  const ordinals = Array.from({ length: population }, (_, i) => String(i + 1))
+  return planShards(ordinals, maxContainers).map((s) => s.agentIds.map(Number))
+}
+
 export function shardIndexOf(shards: readonly Shard[], agentId: string): number | null {
   for (const s of shards) {
     if (s.agentIds.includes(agentId)) return s.shardIndex

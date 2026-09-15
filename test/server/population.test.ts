@@ -36,6 +36,33 @@ function appFor(repos: Repos, manager: never, registry = new RunRegistry()) {
   })
 }
 
+describe('POST /api/runs/:runId/agents under protected isolation', () => {
+  const dockerRun = (isolation: 'protected' | 'shared', maxContainers: number) => {
+    const { repos, run } = seed()
+    repos.runs.updateConfig(run.id, { ...DEFAULT_CONFIG, sandbox: 'docker', isolation, maxContainers })
+    return { repos, run }
+  }
+  const add = (api: ReturnType<typeof appFor>, runId: string) => api.inject({
+    method: 'POST', url: `/api/runs/${runId}/agents`,
+    payload: { modelId: 'mock/model', temperature: 0.7, strategy: { mode: 'blank' } },
+  })
+
+  test('refuses an agent that would need to share a container', async () => {
+    const { repos, run } = dockerRun('protected', 2)
+    const res = await add(appFor(repos, idle()), run.id)
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toMatch(/Protected isolation gives each agent its own container: this run has 2 agents and 2 containers/)
+    expect(repos.agents.listActive(run.id)).toHaveLength(2)
+  })
+
+  test('accepts it while a container is free, and always under shared isolation', async () => {
+    const roomy = dockerRun('protected', 3)
+    expect((await add(appFor(roomy.repos, idle()), roomy.run.id)).statusCode).toBe(201)
+    const shared = dockerRun('shared', 2)
+    expect((await add(appFor(shared.repos, idle()), shared.run.id)).statusCode).toBe(201)
+  })
+})
+
 describe('POST /api/runs/:runId/agents', () => {
   test('blank → 201, empty strategy, origin manual, null parents, bornRound = lastIdx+1', async () => {
     const { repos, run } = seed()

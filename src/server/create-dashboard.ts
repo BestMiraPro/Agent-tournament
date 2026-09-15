@@ -13,6 +13,7 @@ import { MockAgentRunner } from '../runtime/agent-runner.js'
 import { MockProvider } from '../runtime/mock-provider.js'
 import { MockSandbox } from '../runtime/mock-sandbox.js'
 import { sweepOrphanContainers } from '../runtime/docker/sweep.js'
+import { processLedger, readHostCapacity } from '../runtime/docker/capacity.js'
 import { buildApi } from './api.js'
 import { ActivityCache } from './activity.js'
 import { composeRun, defaultSeams, type ComposedRun, type RunIdHolder } from './compose-run.js'
@@ -144,6 +145,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     },
     emit: broadcast,
     activityFor: (runId) => defaultActivity.get(runId)?.snapshot() ?? null,
+    capacity: async () => ({ host: await readHostCapacity(), reserved: processLedger.totals() }),
     sweepWith: (cfg, runId, onWarning) => {
       // Every registered docker run owns live containers; excluding only the new run
       // would let its sweep destroy a concurrent run mid-tournament.

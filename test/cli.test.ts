@@ -140,6 +140,23 @@ describe('CLI host-capacity preflight', () => {
     expect(warnings.join('\n')).toMatch(/preflight was skipped/i)
   })
 
+  test('an unreadable host refuses a protected run instead of assuming it fits', async () => {
+    const warnings: string[] = []
+    const protectedConfig = { ...DEFAULT_CONFIG, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
+    await expect(
+      assertHostCapacity(protectedConfig, async () => { throw new Error('docker info unavailable') }, (m) => warnings.push(m)),
+    ).rejects.toThrow(/docker sandbox: host capacity could not be read, so a protected run cannot be admitted \(docker info unavailable\)/)
+    expect(warnings).toEqual([])
+  })
+
+  test('with a ledger, an admitted run holds its reservation until released', async () => {
+    const { CapacityLedger } = await import('../src/runtime/docker/capacity.js')
+    const ledger = new CapacityLedger()
+    const cfg = { ...DEFAULT_CONFIG, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
+    await assertHostCapacity(cfg, async () => roomy, () => {}, { ledger, reservationId: 'r1' })
+    expect(ledger.active()).toEqual([{ id: 'r1', containers: 2, memoryBytes: 1024 ** 3, cpus: 1 }])
+  })
+
   test('the CLI refuses to start a docker run that would overcommit the host', async () => {
     const hooks: DockerStartupHooks = {
       readCapacity: async () => cramped,

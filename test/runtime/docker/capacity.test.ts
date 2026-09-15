@@ -1,6 +1,69 @@
 import { describe, expect, test } from 'vitest'
-import { parseMemoryLimit, planCapacity, readHostCapacity } from '../../../src/runtime/docker/capacity.js'
+import { CapacityLedger, parseMemoryLimit, planCapacity, readHostCapacity } from '../../../src/runtime/docker/capacity.js'
 import type { DockerFn, ExecResult } from '../../../src/runtime/docker/cli.js'
+
+describe('CapacityLedger', () => {
+  const GiB = 1024 ** 3
+  const host = (usedBytes = 0, containers: { name: string; usedBytes: number }[] = []) => ({
+    totalMemoryBytes: 5 * GiB, usedMemoryBytes: usedBytes, cpus: 16, containers,
+  })
+  const req = (containers: number) => ({ containers, memoryBytes: GiB, cpus: 1 })
+
+  test('two starts that together exceed the budget cannot both be admitted', () => {
+    const ledger = new CapacityLedger()
+    // 5GiB total, 80% committable: 4GiB. 3GiB fits; another 2GiB does not.
+    expect(ledger.admit('run-a', req(3), host()).ok).toBe(true)
+    const second = ledger.admit('run-b', req(2), host())
+    expect(second.ok).toBe(false)
+    expect(second.reason).toMatch(/3\.00GiB is already reserved by other runs in this app/)
+    expect(ledger.active().map((r) => r.id)).toEqual(['run-a'])
+  })
+
+  test('a running reservation is not counted twice: its observed usage is inside its ceiling', () => {
+    const ledger = new CapacityLedger()
+    expect(ledger.admit('run-a', req(2), host()).ok).toBe(true)
+    ledger.attach('run-a', 'arena-a-0')
+    ledger.attach('run-a', 'arena-a-1')
+    // run-a's two containers use 1.5GiB; an unrelated container uses 0.5GiB.
+    const observed = host(2 * GiB, [
+      { name: 'arena-a-0', usedBytes: 0.75 * GiB },
+      { name: 'arena-a-1', usedBytes: 0.75 * GiB },
+      { name: 'other', usedBytes: 0.5 * GiB },
+    ])
+    // Budget 0.8 x (5 - 0.5) = 3.6GiB; 2GiB reserved leaves 1.6GiB: one more 1GiB container fits.
+    expect(ledger.admit('run-b', req(1), observed).ok).toBe(true)
+    expect(ledger.admit('run-c', req(1), observed).ok).toBe(false)
+  })
+
+  test('release is idempotent and leaves other reservations counted', () => {
+    const ledger = new CapacityLedger()
+    ledger.admit('run-a', req(2), host())
+    ledger.admit('run-b', req(1), host())
+    ledger.release('run-b')
+    ledger.release('run-b')
+    expect(ledger.active().map((r) => r.id)).toEqual(['run-a'])
+    expect(ledger.admit('run-c', req(3), host()).ok).toBe(false)
+    expect(ledger.admit('run-c', req(2), host()).ok).toBe(true)
+  })
+
+  test('re-admitting an id resizes its reservation instead of stacking a second one', () => {
+    const ledger = new CapacityLedger()
+    ledger.admit('run-a', req(2), host())
+    expect(ledger.admit('run-a', req(4), host()).ok).toBe(true)
+    expect(ledger.active()).toEqual([{ id: 'run-a', containers: 4, memoryBytes: GiB, cpus: 1 }])
+    expect(ledger.admit('run-a', req(5), host()).ok).toBe(false)
+    expect(ledger.active()[0]!.containers).toBe(4)
+  })
+
+  test('CPU ceilings of other reservations count too', () => {
+    const ledger = new CapacityLedger()
+    const roomy = { totalMemoryBytes: 64 * GiB, usedMemoryBytes: 0, cpus: 4, containers: [] }
+    expect(ledger.admit('run-a', { containers: 3, memoryBytes: GiB, cpus: 1 }, roomy).ok).toBe(true)
+    const r = ledger.admit('run-b', { containers: 2, memoryBytes: GiB, cpus: 1 }, roomy)
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/CPUs per container/)
+  })
+})
 
 describe('parseMemoryLimit', () => {
   test('parses megabytes and gigabytes', () => {
@@ -73,6 +136,21 @@ describe('readHostCapacity', () => {
     )
     expect(host.totalMemoryBytes).toBe(17_179_869_184)
     expect(host.cpus).toBe(16)
+    expect(host.usedMemoryBytes).toBe(512 * 1024 ** 2 + 1.5 * 1024 ** 3)
+  })
+
+  test('attributes usage to containers by name', async () => {
+    const calls: string[][] = []
+    const docker: DockerFn = async (args) => {
+      calls.push(args)
+      return args[0] === 'info' ? ok('17179869184|16') : ok('arena-r-0|512MiB / 1GiB\nother|1.5GiB / 2GiB\n')
+    }
+    const host = await readHostCapacity(docker)
+    expect(calls[1]).toEqual(['stats', '--no-stream', '--format', '{{.Name}}|{{.MemUsage}}'])
+    expect(host.containers).toEqual([
+      { name: 'arena-r-0', usedBytes: 512 * 1024 ** 2 },
+      { name: 'other', usedBytes: 1.5 * 1024 ** 3 },
+    ])
     expect(host.usedMemoryBytes).toBe(512 * 1024 ** 2 + 1.5 * 1024 ** 3)
   })
 

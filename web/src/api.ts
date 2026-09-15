@@ -72,6 +72,16 @@ export interface AppliedCriteria {
   status: string
 }
 
+/** One container in a docker run's current plan. */
+export interface Placement {
+  shardIndex: number
+  agentIds: string[]
+  occupancy: 'single' | 'shared'
+}
+
+export type { CapacityInfo } from './lib/placement.js'
+import type { CapacityInfo } from './lib/placement.js'
+
 export interface RunSnapshot {
   runId: string
   name: string
@@ -89,6 +99,8 @@ export interface RunSnapshot {
   roster: { modelId: string; count: number; temperature: number }[]
   capacity: { committed: number; maxContainers: number } | null
   warnings: string[]
+  /** Docker runs with a live plan: each container and its agents. Null otherwise. */
+  placement?: Placement[] | null
   /** Live activity this server holds for the run; null when it holds none (e.g. after a restart). */
   activity?: ActivitySnapshot | null
 }
@@ -176,8 +188,12 @@ export interface FullRunSpec {
   maxContainers?: number
   containerMemory?: string
   containerCpus?: number
+  isolation?: 'protected' | 'shared'
   pricing: Record<string, { inPerM: number; outPerM: number; cacheReadPerM: number; cacheWritePerM: number }>
 }
+
+/** Docker capacity and this app's reservations; rejects when the server cannot read Docker. */
+export const getCapacity = (): Promise<CapacityInfo> => fetch('/api/capacity').then(json)
 
 export const createRunFull = (spec: FullRunSpec): Promise<{ runId: string; warnings?: string[] }> =>
   fetch('/api/runs', {

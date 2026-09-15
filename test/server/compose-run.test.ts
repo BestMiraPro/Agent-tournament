@@ -3,16 +3,30 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { composeRun, pathKind, runConfigFor, type ComposeSeams } from '../../src/server/compose-run.js'
+import { CapacityLedger } from '../../src/runtime/docker/capacity.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
+
+const TOOLCHAIN = 'abc123def4567890'
+const inventoryFixture = {
+  schemaVersion: 1 as const,
+  toolchainId: TOOLCHAIN,
+  python: { version: '3.11.2', venv: '/opt/arena/venv', executable: '/opt/arena/venv/bin/python' },
+  tools: ['python3', 'node', 'git', 'opencode'].map((name) => ({ name, version: '1.0', executable: `/usr/bin/${name}` })),
+  pythonPackages: [{ name: 'numpy', version: '2.3.3' }],
+}
 
 const mockSeams = () => ({
   startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn() })),
   attachHostServer: vi.fn(),
   ensureImageFn: vi.fn(async () => {}),
+  toolchainId: vi.fn(async () => TOOLCHAIN),
+  readImageInventory: vi.fn(async () => inventoryFixture),
   readCapacity: vi.fn(async () => ({ totalMemoryBytes: 16 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })),
   sweepFn: vi.fn(async () => [] as string[]),
   validateModels: vi.fn(async () => {}),
   inspectPath: vi.fn((): 'file' | 'directory' | 'missing' => 'file'),
+  // Never the process ledger: a test that skips cleanup must not leave capacity reserved for the next.
+  ledger: new CapacityLedger(),
 })
 
 describe('composeRun', () => {
@@ -96,6 +110,151 @@ describe('composeRun', () => {
     }
   })
 
+  describe('capacity reservations and resource failures', () => {
+    const GiB = 1024 ** 3
+    const host = { totalMemoryBytes: 5 * GiB, usedMemoryBytes: 0, cpus: 16, containers: [] }
+    const spec = (root: string, count: number) => parseRunSpec({
+      name: 'd', goal: 'g', sandbox: 'docker',
+      roster: [{ modelId: 'w/m', count, temperature: 0.7 }],
+      workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: count, containerMemory: '1g',
+    })
+    const seamsWith = (ledger: CapacityLedger, over: Record<string, unknown> = {}) => ({
+      ...mockSeams(),
+      startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+      ledger,
+      readCapacity: vi.fn(async () => host),
+      ...over,
+    })
+    const shardClient = (prompt: () => Promise<unknown>) => ({
+      health: vi.fn(async () => true),
+      version: vi.fn(async () => '1.18.21'),
+      providers: vi.fn(async () => ({ providers: [{ id: 'w', models: { m: {} } }], default: {} })),
+      createSession: vi.fn(async () => ({ id: 'ses_ok' })),
+      prompt: vi.fn(prompt),
+      abort: vi.fn(async () => {}),
+    })
+    const containers = () => vi.fn(async (s: { shardIndex: number }) => ({
+      name: `arena-run-${s.shardIndex}`, baseUrl: `http://127.0.0.1:${45000 + s.shardIndex}`, shardIndex: s.shardIndex,
+    }))
+    const genome = { strategyMd: 's', notesMd: '', modelId: 'w/m', temperature: 0.7 }
+
+    test('two starts that together exceed the budget: the second is refused before its server starts', async () => {
+      const ledger = new CapacityLedger()
+      const r1 = mkdtempSync(join(tmpdir(), 'compose-cap-'))
+      const r2 = mkdtempSync(join(tmpdir(), 'compose-cap-'))
+      try {
+        const first = await composeRun(spec(r1, 3), seamsWith(ledger) as never)
+        const refused = seamsWith(ledger)
+        await expect(composeRun(spec(r2, 2), refused as never)).rejects.toThrow(/docker sandbox: .*already reserved by other runs in this app/)
+        expect(refused.startHostServer).not.toHaveBeenCalled()
+        await first.cleanup()
+        expect(ledger.active()).toEqual([])
+        const second = await composeRun(spec(r2, 2), seamsWith(ledger) as never)
+        expect(ledger.active()).toHaveLength(1)
+        await second.cleanup()
+      } finally {
+        rmSync(r1, { recursive: true, force: true })
+        rmSync(r2, { recursive: true, force: true })
+      }
+    })
+
+    test('a failed setup releases its reservation; other runs stay counted; cleanup is idempotent', async () => {
+      const ledger = new CapacityLedger()
+      const r1 = mkdtempSync(join(tmpdir(), 'compose-cap-'))
+      const r2 = mkdtempSync(join(tmpdir(), 'compose-cap-'))
+      try {
+        const first = await composeRun(spec(r1, 2), seamsWith(ledger) as never)
+        const failing = seamsWith(ledger, { validateModels: vi.fn(async () => { throw new Error('judge unusable') }) })
+        await expect(composeRun(spec(r2, 2), failing as never)).rejects.toThrow(/judge unusable/)
+        expect(ledger.active()).toHaveLength(1)
+        await first.cleanup()
+        await first.cleanup()
+        expect(ledger.active()).toEqual([])
+      } finally {
+        rmSync(r1, { recursive: true, force: true })
+        rmSync(r2, { recursive: true, force: true })
+      }
+    })
+
+    test('unknown capacity refuses a protected run and reserves nothing', async () => {
+      const ledger = new CapacityLedger()
+      const root = mkdtempSync(join(tmpdir(), 'compose-cap-'))
+      try {
+        const s = seamsWith(ledger, { readCapacity: vi.fn(async () => { throw new Error('docker stats failed') }) })
+        await expect(composeRun(spec(root, 2), s as never)).rejects.toThrow(/host capacity could not be read, so a protected run cannot be admitted/)
+        expect(s.startHostServer).not.toHaveBeenCalled()
+        expect(ledger.active()).toEqual([])
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('exposes the planned placement for the dashboard', async () => {
+      const ledger = new CapacityLedger()
+      const root = mkdtempSync(join(tmpdir(), 'compose-cap-'))
+      try {
+        const c = await composeRun(spec(root, 2), seamsWith(ledger, { startShardContainerFn: containers() }) as never)
+        expect(c.placement?.()).toEqual([])
+        await c.planFor!(['a1', 'a2'])
+        expect(c.placement?.()).toEqual([
+          { shardIndex: 0, agentIds: ['a1'], occupancy: 'single' },
+          { shardIndex: 1, agentIds: ['a2'], occupancy: 'single' },
+        ])
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('an agent whose container was OOM-killed fails as a resource limit, not a model failure', async () => {
+      const ledger = new CapacityLedger()
+      const root = mkdtempSync(join(tmpdir(), 'compose-oom-'))
+      const inspectContainer = vi.fn(async () => ({ oomKilled: true, running: false }))
+      try {
+        const c = await composeRun(spec(root, 1), seamsWith(ledger, {
+          startShardContainerFn: containers(),
+          removeContainerFn: vi.fn(async () => {}),
+          createShardClient: () => shardClient(async () => { throw new Error('socket hang up') }),
+          inspectContainer,
+        }) as never)
+        await c.planFor!(['a1'])
+        const h = await c.sandbox.provision('a1', {})
+        const result = await c.runner.run(h, { agentId: 'a1', goalMd: 'g', timeoutMs: 1000, genome })
+        expect(inspectContainer).toHaveBeenCalledWith('arena-run-0')
+        expect(result.status).toBe('error')
+        expect(result.failure).toMatchObject({
+          code: 'CONTAINER_OOM',
+          message: expect.stringMatching(/arena-run-0 was stopped for exceeding its 1g memory limit/),
+        })
+        expect(result.errorText).toMatch(/memory limit/)
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('without daemon evidence the original failure is kept, not guessed at', async () => {
+      const ledger = new CapacityLedger()
+      const root = mkdtempSync(join(tmpdir(), 'compose-oom-'))
+      try {
+        const c = await composeRun(spec(root, 1), seamsWith(ledger, {
+          startShardContainerFn: containers(),
+          removeContainerFn: vi.fn(async () => {}),
+          createShardClient: () => shardClient(async () => { throw new Error('socket hang up') }),
+          inspectContainer: vi.fn(async () => null),
+        }) as never)
+        await c.planFor!(['a1'])
+        const h = await c.sandbox.provision('a1', {})
+        const result = await c.runner.run(h, { agentId: 'a1', goalMd: 'g', timeoutMs: 1000, genome })
+        expect(result.status).toBe('error')
+        expect(result.failure?.code).not.toBe('CONTAINER_OOM')
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  })
+
   describe('context folder', () => {
     const localSpec = (root: string, contextDir: string) => parseRunSpec({
       name: 'l', goal: 'g', sandbox: 'local',
@@ -168,11 +327,12 @@ describe('composeRun', () => {
   test('reportWarning receives each warning as it happens, for the CLI to print', async () => {
     const seams = mockSeams()
     seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
-    // Unreadable host → the capacity preflight warns and proceeds.
+    // Unreadable host → a shared run's capacity preflight warns and proceeds. (A protected run
+    // is refused instead; see the capacity reservation tests.)
     seams.readCapacity.mockRejectedValueOnce(new Error('docker info unavailable'))
     const reported: string[] = []
     const c = await composeRun(parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', isolation: 'shared',
       roster: [{ modelId: 'w/m', count: 4, temperature: 0.7 }],
       workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     }), seams as never, { reportWarning: (m) => reported.push(m) })
@@ -330,6 +490,64 @@ describe('composeRun', () => {
       expect(text).toContain('Reference material (read-only) is in /context.')
       expect(text).not.toContain(ctx)
       await c.cleanup()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(ctx, { recursive: true, force: true })
+    }
+  })
+
+  test('docker runs the toolchain image and gives each shard a read-only tool manifest, removed at cleanup', async () => {
+    const seams = mockSeams()
+    seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
+    const root = mkdtempSync(join(tmpdir(), 'compose-tools-'))
+    const ctx = mkdtempSync(join(tmpdir(), 'compose-tools-ctx-'))
+    writeFileSync(join(ctx, 'prices.csv'), 'a,b\n1,2\n')
+    const starts: { toolsDir?: string | null; image: string }[] = []
+    const startShardContainerFn = vi.fn(async (spec: { shardIndex: number; toolsDir?: string | null; image: string }) => {
+      starts.push(spec)
+      return { name: `arena-run-${spec.shardIndex}`, baseUrl: `http://127.0.0.1:${44000 + spec.shardIndex}`, shardIndex: spec.shardIndex }
+    })
+    const shardClient = {
+      health: vi.fn(async () => true),
+      version: vi.fn(async () => '1.18.21'),
+      providers: vi.fn(async () => ({ providers: [{ id: 'w', models: { m: {} } }], default: {} })),
+      createSession: vi.fn(async () => ({ id: 'ses_ok' })),
+      prompt: vi.fn(async (_s: string, _d: string, _body: { parts: { text: string }[] }) => ({ info: { cost: 0 }, parts: [] })),
+      abort: vi.fn(async () => {}),
+    }
+    try {
+      const c = await composeRun(parseRunSpec({
+        name: 'd', goal: 'g', sandbox: 'docker',
+        roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
+        workspaceRoot: root, authFile: join(root, 'auth.json'), contextDir: ctx,
+      }), {
+        ...seams,
+        inspectPath: vi.fn((p: string) => (p === ctx ? 'directory' : 'file')),
+        startShardContainerFn,
+        removeContainerFn: vi.fn(async () => {}),
+        createShardClient: () => shardClient,
+      } as never, { runIdHolder: { value: 'run-7' } })
+      expect(seams.ensureImageFn).toHaveBeenCalledWith(`agent-arena:tc-${TOOLCHAIN}`, expect.stringMatching(/docker$/), 'docker/Dockerfile.agent', TOOLCHAIN)
+      expect(seams.readImageInventory).toHaveBeenCalledWith(`agent-arena:tc-${TOOLCHAIN}`, TOOLCHAIN)
+      await c.planFor!(['a1', 'a2'])
+      const [h1] = await Promise.all([c.sandbox.provision('a1', {}), c.sandbox.provision('a2', {})])
+      expect(starts.map((s) => s.image)).toEqual([`agent-arena:tc-${TOOLCHAIN}`, `agent-arena:tc-${TOOLCHAIN}`])
+      const dirs = starts.map((s) => s.toolsDir!).sort()
+      expect(dirs).toEqual([join(root, '.arena-runtime', 'run-7', 'shard-0'), join(root, '.arena-runtime', 'run-7', 'shard-1')])
+      const manifest = JSON.parse(readFileSync(join(dirs[0]!, 'tools.json'), 'utf8'))
+      expect(manifest).toMatchObject({ runId: 'run-7', containerId: 'arena-run-7-0', toolchainId: TOOLCHAIN, policy: { packageInstall: 'not_enforced' } })
+      expect(manifest.data).toEqual([{ name: 'context', mountPath: '/context', digest: expect.stringMatching(/^sha256:/), note: null }])
+      const md = readFileSync(join(dirs[0]!, 'TOOLS.md'), 'utf8')
+      expect(md).toContain('numpy 2.3.3')
+      expect(JSON.stringify(manifest) + md).not.toContain(root)
+      await c.runner.run(h1, {
+        agentId: 'a1', goalMd: 'g', timeoutMs: 1000,
+        genome: { strategyMd: 's', notesMd: '', modelId: 'w/m', temperature: 0.7 },
+      })
+      expect(shardClient.prompt.mock.calls[0]![2].parts[0]!.text).toContain('/run/arena/TOOLS.md')
+      await c.cleanup()
+      expect(existsSync(join(root, '.arena-runtime', 'run-7'))).toBe(false)
+      expect(existsSync(join(root, 'shard-0'))).toBe(true)
     } finally {
       rmSync(root, { recursive: true, force: true })
       rmSync(ctx, { recursive: true, force: true })

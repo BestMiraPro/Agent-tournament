@@ -1,4 +1,5 @@
 import type { Repos } from '../db/repos.js'
+import type { Placement } from '../runtime/docker/shard.js'
 
 export interface SnapshotAgent {
   agentId: string
@@ -48,6 +49,8 @@ export interface RunSnapshot {
   roster: { modelId: string; count: number; temperature: number }[]
   capacity: { committed: number; maxContainers: number } | null
   warnings: string[]
+  /** A docker run's current plan: each container and its agents. Null without a live plan. */
+  placement: Placement[] | null
 }
 
 export interface RunSnapshotExtra {
@@ -55,6 +58,7 @@ export interface RunSnapshotExtra {
   roster?: { modelId: string; count: number; temperature: number }[]
   capacity?: { committed: number; maxContainers: number } | null
   warnings?: string[]
+  placement?: Placement[] | null
 }
 
 /** The full picture the dashboard renders on connect, before any live event arrives. */
@@ -118,5 +122,6 @@ export function buildRunSnapshot(repos: Repos, runId: string, extra?: RunSnapsho
     roster: extra?.roster ?? run.config.roster,
     capacity: extra?.capacity ?? null,
     warnings: extra?.warnings ?? [],
+    placement: extra?.placement ?? null,
   }
 }

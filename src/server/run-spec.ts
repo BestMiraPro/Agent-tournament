@@ -51,6 +51,7 @@ const schema = z.object({
   maxContainers: z.number().int().min(1).max(64).optional(),
   containerMemory: z.string().optional(),
   containerCpus: z.number().positive().max(64).optional(),
+  isolation: z.enum(['protected', 'shared']).optional(),
   // Four keys, not two: the engine preflight (BudgetTracker assertPrice) fail-closes
   // on cache-less entries (omitting them prices the bulk of a run at zero), so a
   // 2-key shape would pass the API and die at createRun — accept the full shape here.
@@ -79,6 +80,8 @@ export interface RunSpec {
   maxContainers: number
   containerMemory: string
   containerCpus: number
+  /** Docker placement policy; protected unless a docker spec explicitly chooses shared. */
+  isolation: 'protected' | 'shared'
   pricing: Record<string, { inPerM: number; outPerM: number; cacheReadPerM: number; cacheWritePerM: number }>
   seedDir: string | null
   workspaceRoot: string | null
@@ -126,6 +129,17 @@ export function parseRunSpec(input: unknown): RunSpec {
     throw new Error(`containerMemory must be at least ${MIN_CONTAINER_MEMORY}, got "${containerMemory}"`)
   }
   const population = p.roster.reduce((n, r) => n + r.count, 0)
+  const maxContainers = p.maxContainers ?? DEFAULT_CONFIG.maxContainers
+  // Protected is the docker default: co-tenants in one container can read and change each
+  // other's work, so sharing must be chosen, never fallen into because containers ran out.
+  const isolation = p.isolation ?? (p.sandbox === 'docker' ? 'protected' : 'shared')
+  if (p.sandbox === 'docker' && isolation === 'protected' && maxContainers < population) {
+    throw new Error(
+      `Protected isolation needs one container per agent: ${population} agents but ${maxContainers} containers. ` +
+        `Raise Containers to ${population}, lower the agent count to ${maxContainers}, or choose shared isolation, ` +
+        "where agents on one container can read and change each other's files.",
+    )
+  }
   // Same words as the engine guard (selection.ts): computed from merged spec
   // values so PATCH inherits it free through its merge→parseRunSpec path.
   const eliteCount = p.selection?.eliteCount ?? DEFAULT_CONFIG.selection.eliteCount
@@ -161,9 +175,10 @@ export function parseRunSpec(input: unknown): RunSpec {
       diversityFloor: p.selection?.diversityFloor ?? DEFAULT_CONFIG.selection.diversityFloor,
     },
     concurrency: p.concurrency ?? DEFAULT_CONFIG.concurrency,
-    maxContainers: p.maxContainers ?? DEFAULT_CONFIG.maxContainers,
+    maxContainers,
     containerMemory,
     containerCpus: p.containerCpus ?? DEFAULT_CONFIG.containerCpus,
+    isolation,
     pricing: p.pricing ?? {},
     seedDir: p.seedDir,
     workspaceRoot: p.workspaceRoot,

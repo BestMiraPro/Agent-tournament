@@ -27,6 +27,32 @@ describe('contextDir', () => {
   })
 })
 
+describe('isolation', () => {
+  const abs = process.platform === 'win32' ? 'C:\\ws' : '/ws'
+  const docker = (count: number, extra: Record<string, unknown> = {}) => ({
+    ...base, sandbox: 'docker', workspaceRoot: abs, authFile: `${abs}/auth.json`,
+    roster: [{ modelId: 'w/m', count, temperature: 0.7 }], ...extra,
+  })
+
+  test('docker runs default to protected, one agent per container; other sandboxes to shared', () => {
+    expect(parseRunSpec(docker(2, { maxContainers: 2 })).isolation).toBe('protected')
+    expect(parseRunSpec(base).isolation).toBe('shared')
+  })
+
+  test('protected isolation refuses more agents than containers, with things to change', () => {
+    expect(() => parseRunSpec(docker(7, { maxContainers: 4 }))).toThrow(
+      /Protected isolation needs one container per agent: 7 agents but 4 containers\. Raise Containers to 7, lower the agent count to 4, or choose shared isolation/,
+    )
+  })
+
+  test('shared isolation is an explicit choice that accepts co-tenants', () => {
+    const s = parseRunSpec(docker(7, { maxContainers: 4, isolation: 'shared' }))
+    expect(s.isolation).toBe('shared')
+    expect(runConfigFor(s).isolation).toBe('shared')
+    expect(runConfigFor(parseRunSpec(docker(2, { maxContainers: 2 }))).isolation).toBe('protected')
+  })
+})
+
 describe('parseRunSpec', () => {
   test('accepts a minimal mock spec', () => {
     const s = parseRunSpec(base)

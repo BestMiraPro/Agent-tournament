@@ -41,6 +41,38 @@ const make = async (agentIds: string[], maxContainers: number) => {
   return { sb, c, root }
 }
 
+describe('DockerSandbox placement and protected isolation', () => {
+  test('protected isolation refuses a round with more agents than containers, before anything starts', async () => {
+    const root = await tmp()
+    const c = fakeContainers()
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 2, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      isolation: 'protected', startContainer: c.start, stopContainer: c.stop,
+    })
+    await expect(sb.planFor(['a1', 'a2', 'a3'])).rejects.toThrow(
+      /Protected isolation needs one container per agent, but this round has 3 agents and 2 containers/,
+    )
+    expect(c.started).toEqual([])
+    await expect(sb.planFor(['a1', 'a2'])).resolves.toBeUndefined()
+  })
+
+  test('reports each container and whether its agents share it', async () => {
+    const { sb } = await make(['a1', 'a2', 'a3'], 2)
+    expect(sb.placement()).toEqual([
+      { shardIndex: 0, agentIds: ['a1', 'a3'], occupancy: 'shared' },
+      { shardIndex: 1, agentIds: ['a2'], occupancy: 'single' },
+    ])
+  })
+
+  test('names the container an agent runs in once it has started', async () => {
+    const { sb } = await make(['a1', 'a2'], 2)
+    expect(sb.containerNameFor('a1')).toBeNull()
+    await sb.provision('a1', {})
+    expect(sb.containerNameFor('a1')).toBe('arena-t-0')
+    expect(sb.containerNameFor('ghost')).toBeNull()
+  })
+})
+
 describe('DockerSandbox.isolatedWorkspace', () => {
   test('one agent alone on a shard is isolated', async () => {
     const { sb } = await make(['a1', 'a2'], 2)

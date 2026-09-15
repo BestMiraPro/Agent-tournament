@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { resolve, sep } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import type { Provider } from '../runtime/provider.js'
 import type { AgentRunner } from '../runtime/agent-runner.js'
@@ -23,10 +25,21 @@ import {
 } from '../runtime/opencode/discovery.js'
 import { writeGraderProfile } from '../runtime/opencode/grader-profile.js'
 import { attachServer, startServer, type ServerHandle } from '../runtime/opencode/server.js'
-import { AGENT_IMAGE, assertHostCapacity, makeClientResolver, sweepBeforeRun, validateRosterModels } from '../cli.js'
-import { ensureImage } from '../runtime/docker/image.js'
-import { readHostCapacity } from '../runtime/docker/capacity.js'
-import { startShardContainer } from '../runtime/docker/container.js'
+import { assertHostCapacity, makeClientResolver, sweepBeforeRun, validateRosterModels } from '../cli.js'
+import { ensureImage, readImageInventory } from '../runtime/docker/image.js'
+import { processLedger, readHostCapacity, type CapacityLedger } from '../runtime/docker/capacity.js'
+import { containerName, inspectContainerState, startShardContainer } from '../runtime/docker/container.js'
+import type { Placement } from '../runtime/docker/shard.js'
+import {
+  agentImageTag,
+  buildToolManifest,
+  digestFolder,
+  readToolchainId,
+  renderToolsMarkdown,
+  TOOLS_MOUNT,
+  type DataMount,
+  type ImageInventory,
+} from '../runtime/tool-manifest.js'
 import { CONTAINER_CONTEXT_PATH, removeContainer } from '../runtime/docker/cli.js'
 import { sweepOrphanContainers, type SweepOptions } from '../runtime/docker/sweep.js'
 import { DockerSandbox } from '../runtime/docker/sandbox.js'
@@ -35,7 +48,11 @@ import type { RunSpec } from './run-spec.js'
 export interface ComposeSeams {
   startHostServer: (opts: { timeoutMs: number; env?: Record<string, string> }) => Promise<ServerHandle>
   attachHostServer: (url: string, timeoutMs: number) => Promise<ServerHandle>
-  ensureImageFn: (image: string, contextDir: string, dockerfile: string) => Promise<void>
+  ensureImageFn: (image: string, contextDir: string, dockerfile: string, toolchainId?: string) => Promise<void>
+  /** Identity of the agent toolchain files, which names the image. */
+  toolchainId: () => Promise<string>
+  /** The inventory an image recorded at build, validated against the toolchain. */
+  readImageInventory: (image: string, toolchainId: string) => Promise<ImageInventory>
   readCapacity: Parameters<typeof assertHostCapacity>[1]
   sweepFn: (opts: SweepOptions) => Promise<string[]>
   validateModels: (
@@ -52,6 +69,10 @@ export interface ComposeSeams {
   hostModelsFile: () => string | null
   /** What a host path is, so a docker auth file can be checked before anything starts. */
   inspectPath: (path: string) => PathKind
+  /** Capacity promised to runs starting or running in this process. */
+  ledger: CapacityLedger
+  /** The daemon's account of a container's end, to tell an OOM kill from a model failure. */
+  inspectContainer: (name: string) => Promise<{ oomKilled: boolean; running: boolean } | null>
 }
 
 export type PathKind = 'file' | 'directory' | 'missing'
@@ -74,7 +95,10 @@ export function pathKind(path: string): PathKind {
 export const defaultSeams: ComposeSeams = {
   startHostServer: (opts) => startServer({ timeoutMs: opts.timeoutMs, env: opts.env }),
   attachHostServer: (url, timeoutMs) => attachServer(url, timeoutMs),
-  ensureImageFn: (image, contextDir, dockerfile) => ensureImage(image, contextDir, dockerfile),
+  ensureImageFn: (image, contextDir, dockerfile, toolchainId) =>
+    ensureImage(image, contextDir, dockerfile, undefined, { toolchainId }),
+  toolchainId: () => readToolchainId(process.cwd()),
+  readImageInventory: (image, toolchainId) => readImageInventory(image, toolchainId),
   readCapacity: readHostCapacity,
   sweepFn: sweepOrphanContainers,
   validateModels: (client, directory, config, onWarning) =>
@@ -84,6 +108,8 @@ export const defaultSeams: ComposeSeams = {
   createShardClient: (baseUrl, timeoutMs) => new OpenCodeClient({ baseUrl, timeoutMs }),
   hostModelsFile: () => hostModelsCatalog(process.env, homedir(), existsSync),
   inspectPath: pathKind,
+  ledger: processLedger,
+  inspectContainer: (name) => inspectContainerState(name),
 }
 
 /**
@@ -96,6 +122,12 @@ export const defaultSeams: ComposeSeams = {
  * shards run their own servers and are unchanged.
  */
 export const HOST_SERVER_ENV: Record<string, string> = { OPENCODE_ENABLE_EXA: '1' }
+
+/**
+ * Per-run transient files under the workspace root: `<run id>/shard-N/{TOOLS.md,tools.json}`.
+ * Shards mount only their own `shard-N` workspace and this read-only folder, never the rest.
+ */
+export const RUNTIME_DIR = '.arena-runtime'
 
 export interface ShardServer {
   shardIndex: number
@@ -112,6 +144,8 @@ export interface ComposedRun {
   shardServers: { baseUrl: string }[]
   /** Subscribes to live Docker shard endpoints and replays endpoints already started. */
   onShardServer?: (listener: (server: ShardServer) => void) => () => void
+  /** Docker only: each container in the current plan, its agents, and whether they share it. */
+  placement?: () => Placement[]
   sessionMap: Map<string, string>
   sessionHook: (agentId: string, sessionId: string) => void
   warnings: string[]
@@ -143,6 +177,7 @@ export function runConfigFor(spec: RunSpec): RunConfig {
     maxContainers: spec.maxContainers ?? DEFAULT_CONFIG.maxContainers,
     containerMemory: spec.containerMemory ?? DEFAULT_CONFIG.containerMemory,
     containerCpus: spec.containerCpus ?? DEFAULT_CONFIG.containerCpus,
+    isolation: spec.isolation ?? DEFAULT_CONFIG.isolation,
     pricing: { ...DEFAULT_CONFIG.pricing, ...spec.pricing },
     seedDir: spec.seedDir,
     contextDir: spec.contextDir ?? null,
@@ -248,23 +283,33 @@ export async function composeRun(
     }
   }
   if (spec.contextDir) assertContextFolder(spec.contextDir, workspaceRoot, s.inspectPath)
+  // Per composition: the live run id does not exist until after this returns.
+  const reservationId = randomUUID()
   if (spec.sandbox === 'docker') {
-    await assertHostCapacity(config, s.readCapacity as never, onWarning)
+    await assertHostCapacity(config, s.readCapacity as never, onWarning, { ledger: s.ledger, reservationId })
   }
+  let reservedContainers = Math.max(1, Math.min(config.maxContainers, config.populationSize))
   let graderDirectory: string
+  let server: ServerHandle
   try {
-    graderDirectory = writeGraderProfile(workspaceRoot, spec.contextDir ?? null)
+    try {
+      graderDirectory = writeGraderProfile(workspaceRoot, spec.contextDir ?? null)
+    } catch (e) {
+      throw new Error(`grader profile under ${workspaceRoot}: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    if (spec.serverUrl) {
+      onWarning(
+        'Attached to an existing OpenCode server: whether the grader can search the web depends on how that server was started (OPENCODE_ENABLE_EXA=1).',
+      )
+    }
+    server = spec.serverUrl
+      ? await s.attachHostServer(spec.serverUrl, config.agentTimeoutMs)
+      : await s.startHostServer({ timeoutMs: config.agentTimeoutMs, env: HOST_SERVER_ENV })
   } catch (e) {
-    throw new Error(`grader profile under ${workspaceRoot}: ${e instanceof Error ? e.message : String(e)}`)
+    // Nothing is running, so nothing may keep holding the capacity reserved above.
+    s.ledger.release(reservationId)
+    throw e
   }
-  if (spec.serverUrl) {
-    onWarning(
-      'Attached to an existing OpenCode server: whether the grader can search the web depends on how that server was started (OPENCODE_ENABLE_EXA=1).',
-    )
-  }
-  const server = spec.serverUrl
-    ? await s.attachHostServer(spec.serverUrl, config.agentTimeoutMs)
-    : await s.startHostServer({ timeoutMs: config.agentTimeoutMs, env: HOST_SERVER_ENV })
   try {
     const provider = new OpenCodeProvider(server.client, workspaceRoot, {
       timeoutMs: config.agentTimeoutMs,
@@ -287,7 +332,53 @@ export async function composeRun(
           sweep: s.sweepFn as never,
         }, onWarning).catch(() => [])
       }
-      await s.ensureImageFn(AGENT_IMAGE, process.cwd(), 'docker/Dockerfile.agent')
+      const toolchainId = await s.toolchainId()
+      const image = agentImageTag(toolchainId)
+      // docker/ alone is the build context: the repository root would send run data and any
+      // user folders beside it to the daemon on every build.
+      await s.ensureImageFn(image, join(process.cwd(), 'docker'), 'docker/Dockerfile.agent', toolchainId)
+      // Checked before any agent is placed: an image without the research toolchain, or
+      // built from different toolchain files, is refused here rather than discovered mid-round.
+      const inventory = await s.readImageInventory(image, toolchainId)
+      const data: DataMount[] = []
+      if (spec.contextDir) {
+        const identity = await digestFolder(spec.contextDir).catch((e: Error) => ({
+          digest: null,
+          note: `not hashed: ${e.message.slice(0, 120)}`,
+        }))
+        data.push({ name: 'context', mountPath: CONTAINER_CONTEXT_PATH, ...identity })
+      }
+      const runtimeRoot = join(workspaceRoot, RUNTIME_DIR)
+      // Only directories this composition created are ever removed.
+      const manifestDirs = new Set<string>()
+      const writeToolManifest = async (runId: string, shardIndex: number): Promise<string> => {
+        if (!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error(`unsafe run id for a runtime directory: ${runId}`)
+        const runDir = join(runtimeRoot, runId)
+        const dir = join(runDir, `shard-${shardIndex}`)
+        await mkdir(dir, { recursive: true })
+        manifestDirs.add(runDir)
+        const manifest = buildToolManifest({
+          runId,
+          containerId: containerName(runId, shardIndex),
+          inventory,
+          data,
+          // Nothing below the agent blocks installation yet; the manifest must not claim it does.
+          packageInstall: 'not_enforced',
+        })
+        await writeFile(join(dir, 'tools.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+        await writeFile(join(dir, 'TOOLS.md'), renderToolsMarkdown(manifest), 'utf8')
+        return dir
+      }
+      const removeToolManifests = async (): Promise<void> => {
+        for (const dir of [...manifestDirs]) {
+          try {
+            await rm(dir, { recursive: true, force: true })
+            manifestDirs.delete(dir)
+          } catch (e) {
+            onWarning(`Could not remove the tool manifest directory ${dir}: ${(e as Error).message}`)
+          }
+        }
+      }
       const modelsFile = s.hostModelsFile()
       // Each shard's catalogue, read once per actual container start and keyed by its
       // endpoint, so a replacement container is checked afresh rather than trusted.
@@ -355,21 +446,24 @@ export async function composeRun(
         runId: `pending-${Date.now()}`,
         root: workspaceRoot,
         maxContainers: config.maxContainers,
-        image: AGENT_IMAGE,
+        image,
         memory: config.containerMemory,
         cpus: config.containerCpus,
         authFile: spec.authFile,
+        isolation: config.isolation,
         startContainer: async (shardIndex, hostDir) => {
           // Read live: containers start during the first round, long after the
           // caller has set the holder to the live run id, so a pending-timestamp
           // id never reaches a container name for a live run.
           const runId = opts.runIdHolder ? opts.runIdHolder.value : `pending-${Date.now()}`
+          const toolsDir = await writeToolManifest(runId, shardIndex)
           const started = await s.startShardContainerFn(
             {
               runId,
               shardIndex,
-              image: AGENT_IMAGE,
+              image,
               hostDir,
+              toolsDir,
               memory: config.containerMemory,
               cpus: config.containerCpus,
               authFile: spec.authFile,
@@ -380,6 +474,8 @@ export async function composeRun(
             async (baseUrl) => s.createShardClient(baseUrl, 10_000).health(),
             onWarning,
           )
+          // Its usage now sits inside this run's reservation, not on top of it.
+          s.ledger.attach(reservationId, started.name)
           await checkShardCatalog(started.shardIndex, started.baseUrl)
           publishShardServer({ shardIndex: started.shardIndex, baseUrl: started.baseUrl })
           return started
@@ -396,6 +492,22 @@ export async function composeRun(
         {
           onSessionCreated: sessionHook,
           contextPath: spec.contextDir ? CONTAINER_CONTEXT_PATH : null,
+          toolsPath: `${TOOLS_MOUNT}/TOOLS.md`,
+          // Only the daemon's own record counts as evidence of an OOM kill. Without it the
+          // failure stays what the runner saw; CPU throttling has no such record here and is
+          // never inferred.
+          resourceFailure: async (handle) => {
+            const name = sandbox.containerNameFor(handle.agentId)
+            if (!name) return null
+            const state = await s.inspectContainer(name)
+            if (!state?.oomKilled) return null
+            return {
+              code: 'CONTAINER_OOM',
+              message:
+                `Container ${name} was stopped for exceeding its ${config.containerMemory} memory limit; ` +
+                'this is a resource limit, not a model failure. Raise Memory per container, or give each agent less to hold in memory.',
+            }
+          },
           // Per agent rather than per roster entry: agents added or bred mid-run carry
           // models the roster check at shard start never saw.
           modelUnavailable: (handle, modelId) => {
@@ -410,14 +522,32 @@ export async function composeRun(
       )
       return {
         config, sandbox, provider, runner,
-        planFor: (agentIds) => sandbox.planFor(agentIds),
+        planFor: async (agentIds) => {
+          // A population that outgrew what was admitted is admitted again, against a fresh
+          // reading, before any container for it starts.
+          const needed = Math.max(1, Math.min(config.maxContainers, agentIds.length))
+          if (needed > reservedContainers) {
+            await assertHostCapacity(
+              { ...config, populationSize: agentIds.length },
+              s.readCapacity as never,
+              onWarning,
+              { ledger: s.ledger, reservationId },
+            )
+            reservedContainers = needed
+          }
+          await sandbox.planFor(agentIds)
+        },
+        placement: () => sandbox.placement(),
         serverHandle: server, shardServers,
         onShardServer,
         sessionMap, sessionHook, warnings,
         capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
         cleanup: async () => {
           await (sandbox as DockerSandbox).disposeAll?.().catch(() => {}) as never
+          // After the containers that mounted them are gone.
+          await removeToolManifests()
           await server.stop().catch(() => {})
+          s.ledger.release(reservationId)
         },
       }
     }
@@ -442,6 +572,7 @@ export async function composeRun(
     // Anything that fails after the host server starts must not leak the
     // process: stop it, then propagate so the caller can refuse the run.
     await server.stop().catch(() => {})
+    s.ledger.release(reservationId)
     throw e
   }
 }

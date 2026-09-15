@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { planShards, shardIndexOf } from '../../../src/runtime/docker/shard.js'
+import { describeShards, placementPreview, planShards, shardIndexOf } from '../../../src/runtime/docker/shard.js'
 
 const ids = (n: number) => Array.from({ length: n }, (_, i) => `a${i + 1}`)
 
@@ -45,6 +45,30 @@ describe('planShards', () => {
 
   test('is deterministic for the same input', () => {
     expect(planShards(ids(11), 3)).toEqual(planShards(ids(11), 3))
+  })
+})
+
+describe('placementPreview', () => {
+  test('seven agents on four containers: three pairs and one single', () => {
+    expect(placementPreview(7, 4)).toEqual([[1, 5], [2, 6], [3, 7], [4]])
+  })
+
+  test('one agent per container when there are enough containers', () => {
+    expect(placementPreview(3, 8)).toEqual([[1], [2], [3]])
+  })
+
+  test('is the same round-robin rule real runs are planned with', () => {
+    expect(placementPreview(7, 4)).toEqual(planShards(ids(7), 4).map((s) => s.agentIds.map((id) => Number(id.slice(1)))))
+    expect(placementPreview(0, 4)).toEqual([])
+  })
+})
+
+describe('describeShards', () => {
+  test('marks each container as holding one agent or shared', () => {
+    expect(describeShards(planShards(ids(3), 2))).toEqual([
+      { shardIndex: 0, agentIds: ['a1', 'a3'], occupancy: 'shared' },
+      { shardIndex: 1, agentIds: ['a2'], occupancy: 'single' },
+    ])
   })
 })
 

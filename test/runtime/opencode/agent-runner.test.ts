@@ -37,6 +37,12 @@ describe('buildAgentPrompt', () => {
     expect(p).toContain('SUBMISSION.md')
   })
 
+  test('points at the tool manifest only when the runtime provides one', () => {
+    expect(buildAgentPrompt('g')).not.toContain('TOOLS.md')
+    expect(buildAgentPrompt('g', null, '/run/arena/TOOLS.md'))
+      .toContain('The tools already installed here are listed in /run/arena/TOOLS.md. Read it before you install or set anything up.')
+  })
+
   test('names the reference folder only when there is one', () => {
     expect(buildAgentPrompt('g')).not.toContain('Reference material')
     expect(buildAgentPrompt('g', '/context')).toContain('Reference material (read-only) is in /context.')

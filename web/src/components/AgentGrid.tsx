@@ -1,5 +1,5 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
-import type { SnapshotAgent } from '../api.js'
+import type { Placement, SnapshotAgent } from '../api.js'
 import { evidenceAgeLabel } from '../lib/activity.js'
 import type { LiveAgent, LiveState, PendingPermission } from '../useLiveRun.js'
 
@@ -33,10 +33,24 @@ export function permissionLabel(p: PendingPermission, now: number): string {
   return `Waiting for permission: ${p.permission}${target} · ${age}`
 }
 
-export function AgentGrid({ agents, live, onSelect }: {
+/**
+ * Which container an agent is planned into this round, and whether others share it. Plans are
+ * made per round from the active population, so this is the current placement, not a fixed one.
+ */
+export function placementLabel(placement: Placement[] | null | undefined, agentId: string): string | null {
+  const container = placement?.find((p) => p.agentIds.includes(agentId))
+  if (!container) return null
+  const others = container.agentIds.length - 1
+  return others <= 0
+    ? `Container ${container.shardIndex} · own container`
+    : `Container ${container.shardIndex} · shared with ${others} other agent${others === 1 ? '' : 's'}`
+}
+
+export function AgentGrid({ agents, live, onSelect, placement }: {
   agents: SnapshotAgent[]
   live: LiveState
   onSelect?: (agentId: string) => void
+  placement?: Placement[] | null
 }) {
   const rankOf = new Map(live.scores.map((s) => [s.agentId, s.rank]))
   // Rank alone shows the order but not the gap, so the strength of selection
@@ -96,6 +110,9 @@ export function AgentGrid({ agents, live, onSelect }: {
                 )}
               </div>
               <div className="cell__model" title={a.modelId}>{a.modelId}</div>
+              {placementLabel(placement, a.agentId) && (
+                <div className="cell__placement">{placementLabel(placement, a.agentId)}</div>
+              )}
               {score !== undefined && (
                 <div className="cell__score">{score.toFixed(1)}</div>
               )}

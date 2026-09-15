@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from 'react'
 import { DEFAULT_CONFIG } from '../../../src/core/types.js'
-import { listModels } from '../api.js'
+import { getCapacity, listModels } from '../api.js'
+import { setupEstimate, type CapacityInfo, type PlacementPlan } from '../lib/placement.js'
 import type { RosterEntry } from '../lib/roster.js'
 import { RosterBuilder } from './RosterBuilder.js'
 
@@ -21,7 +22,22 @@ export interface RunSetupValue {
   maxContainers: number
   containerMemory: string
   containerCpus: number
+  isolation: 'protected' | 'shared'
   pricingText: string
+}
+
+/** Before Start: which agents share which container, the summed ceilings, and the estimated fit. */
+export function DockerPlacementSummary({ capacity, ...plan }: PlacementPlan & { capacity: CapacityInfo | null }) {
+  const estimate = setupEstimate(plan, capacity)
+  return (
+    <div className="placement-summary" aria-live="polite">
+      <p className="help">Placement: {estimate.placement || 'no agents yet'}. {estimate.sharing}</p>
+      <p className="help">Ceilings: {estimate.ceilings}. These are limits, not memory set aside at launch.</p>
+      <p className={estimate.fit.state === 'does_not_fit' ? 'error' : 'help'}>{estimate.fit.message}</p>
+      {estimate.refusal && <p className="error">{estimate.refusal}</p>}
+      {estimate.memoryNote && <p className="help">{estimate.memoryNote}</p>}
+    </div>
+  )
 }
 
 export function RunSetup({ busy, error, onCreate }: {
@@ -50,6 +66,18 @@ export function RunSetup({ busy, error, onCreate }: {
   const [maxContainers, setMaxContainers] = useState(String(DEFAULT_CONFIG.maxContainers))
   const [containerMemory, setContainerMemory] = useState(DEFAULT_CONFIG.containerMemory)
   const [containerCpus, setContainerCpus] = useState(String(DEFAULT_CONFIG.containerCpus))
+  const [isolation, setIsolation] = useState<RunSetupValue['isolation']>('protected')
+  // Read when docker is chosen; a failed read stays null and the summary says capacity is unknown.
+  const [capacity, setCapacity] = useState<CapacityInfo | null>(null)
+  useEffect(() => {
+    if (sandbox !== 'docker') return
+    let alive = true
+    getCapacity().then(
+      (c) => { if (alive) setCapacity(c) },
+      () => { if (alive) setCapacity(null) },
+    )
+    return () => { alive = false }
+  }, [sandbox])
   const [pricingText, setPricingText] = useState('')
   // Known-models is a copy-paste aid only: failure or an empty list hides the
   // datalist options and free-text inputs keep working.
@@ -152,6 +180,25 @@ export function RunSetup({ busy, error, onCreate }: {
             <label htmlFor="setup-container-cpus">CPUs per container</label>
             <input id="setup-container-cpus" type="number" min={0.25} max={64} step={0.25} value={containerCpus} onChange={(e) => setContainerCpus(e.target.value)} disabled={busy} />
             <p className="help">Containers times CPUs cannot exceed this machine&apos;s CPU count.</p>
+            <label htmlFor="setup-isolation">Isolation</label>
+            <select
+              id="setup-isolation"
+              value={isolation}
+              onChange={(e) => setIsolation(e.target.value as RunSetupValue['isolation'])}
+              disabled={busy}
+            >
+              <option value="protected">protected (one agent per container)</option>
+              <option value="shared">shared (agents can reach each other&apos;s files)</option>
+            </select>
+            <p className="help">Protected refuses a run that would put two agents in one container. Shared allows it, and then no result can be certified as the agent&apos;s own untouched work.</p>
+            <DockerPlacementSummary
+              population={roster.reduce((n, r) => n + r.count, 0)}
+              maxContainers={Number(maxContainers)}
+              memory={containerMemory.trim()}
+              cpus={Number(containerCpus)}
+              isolation={isolation}
+              capacity={capacity}
+            />
           </>
         )}
       </section>
@@ -200,6 +247,7 @@ export function RunSetup({ busy, error, onCreate }: {
           maxContainers: Number(maxContainers),
           containerMemory: containerMemory.trim(),
           containerCpus: Number(containerCpus),
+          isolation,
           pricingText,
         })}
       >

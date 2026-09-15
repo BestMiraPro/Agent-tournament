@@ -3,7 +3,7 @@ import { dirname, join, relative, sep } from 'node:path'
 import type { FileEntry } from '../../core/types.js'
 import type { AgentHandle, ProvisionOpts, Sandbox } from '../sandbox.js'
 import { resolveInWorkspace, seedWorkspace } from '../workspace-path.js'
-import { planShards, shardIndexOf, type Shard } from './shard.js'
+import { describeShards, planShards, shardIndexOf, type Placement, type Shard } from './shard.js'
 
 export interface StartedContainer {
   name: string
@@ -20,6 +20,8 @@ export interface DockerSandboxOptions {
   memory: string
   cpus: number
   authFile: string | null
+  /** `protected` refuses any round that would put two agents in one container. Default shared. */
+  isolation?: 'protected' | 'shared'
   startContainer: (shardIndex: number, hostDir: string) => Promise<StartedContainer>
   stopContainer: (name: string) => Promise<void>
   /** Reports non-fatal problems — notably a container that could not be stopped. */
@@ -57,7 +59,27 @@ export class DockerSandbox implements Sandbox {
   /** Must be called once with the full population before provisioning. */
   async planFor(agentIds: readonly string[]): Promise<void> {
     if (this.disposed) throw new Error('docker sandbox has been disposed')
+    // Checked every round, not only at setup: manual additions and an evolved population can
+    // outgrow the containers a run was admitted with.
+    if (this.opts.isolation === 'protected' && agentIds.length > this.opts.maxContainers) {
+      throw new Error(
+        `Protected isolation needs one container per agent, but this round has ${agentIds.length} agents ` +
+          `and ${this.opts.maxContainers} containers. Remove agents before the next round, or start a run with more containers.`,
+      )
+    }
     this.shards = planShards(agentIds, this.opts.maxContainers)
+  }
+
+  /** The current plan: each container, its agents, and whether they share it. */
+  placement(): Placement[] {
+    return describeShards(this.shards)
+  }
+
+  /** The container an agent's shard is running in, or null before it starts or when unplanned. */
+  containerNameFor(agentId: string): string | null {
+    const shardIndex = shardIndexOf(this.shards, agentId)
+    if (shardIndex === null) return null
+    return this.containers.get(shardIndex)?.name ?? null
   }
 
   private shardFor(agentId: string): number {

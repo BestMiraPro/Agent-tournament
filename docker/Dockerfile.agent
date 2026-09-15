@@ -1,16 +1,49 @@
 # Agent arena container: runs an opencode server for one shard of tournament agents.
 #
-# Verified 2026-08-25: 960MB image, ~250MiB idle, ~413MiB under real work.
-FROM node:24-slim
+# Built with docker/ as the context, tagged agent-arena:tc-<toolchain id>, where the id is a
+# hash of this file, the research requirements and lock, and toolchain-manifest.py
+# (src/runtime/tool-manifest.ts). Changing any of them names a new image.
+#
+# Verified 2026-08-25 before the research toolchain: 960MB image, ~250MiB idle, ~413MiB
+# under real work. The toolchain adds disk shared by every container, not per-agent copies.
+FROM node:24-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
 
 # git is required: opencode initialises a repo in the working directory for its
-# snapshot/diff features and fails noisily without it.
+# snapshot/diff features and fails noisily without it. python3-venv carries the research
+# toolchain below; agents that try Python used to find none and try to install it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g opencode-ai@1.18.21 \
     && npm cache clean --force
+
+# Installed once, from exact versions with verified hashes, binary wheels only: no build
+# scripts run, and nothing is resolved at build time that the lock did not name.
+COPY research-requirements.in research-requirements.lock toolchain-manifest.py /opt/arena/build/
+RUN python3 -m venv /opt/arena/venv \
+    && /opt/arena/venv/bin/pip install --no-cache-dir --no-deps --require-hashes --only-binary=:all: -r /opt/arena/build/research-requirements.lock
+
+# The venv first on PATH; matplotlib's cache in writable scratch; numeric thread pools at one
+# per process unless the launcher raises them to the container's CPU budget, so several
+# NumPy processes do not each spawn a thread per host CPU. PIP_NO_INDEX states the policy
+# to pip; it is a default, not an enforcement boundary. Set before the inventory, so what it
+# records is resolved on exactly the PATH agents get.
+ENV VIRTUAL_ENV=/opt/arena/venv \
+    PATH="/opt/arena/venv/bin:$PATH" \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    PIP_NO_INDEX=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# The inventory is generated from real version and import checks, and the build fails if
+# the installed packages differ from the lock.
+ARG TOOLCHAIN_ID
+LABEL arena.toolchain=$TOOLCHAIN_ID
+RUN test -n "$TOOLCHAIN_ID" \
+    && python /opt/arena/build/toolchain-manifest.py "$TOOLCHAIN_ID" /opt/arena/build/research-requirements.in /opt/arena/build/research-requirements.lock /opt/arena/toolchain.json
 
 WORKDIR /work
 
