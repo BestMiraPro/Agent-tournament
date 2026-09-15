@@ -244,6 +244,21 @@ describe('Judge resilience', () => {
     expect(attempts).toBeGreaterThanOrEqual(2)
   })
 
+  test('a grading context reaches both the criteria and the scoring prompts', async () => {
+    const prompts: { purpose: string; prompt: string }[] = []
+    const provider: Provider = {
+      complete: async (req) => {
+        prompts.push({ purpose: req.purpose, prompt: req.prompt })
+        return new MockProvider(1).complete(req)
+      },
+    }
+    const j = new Judge(provider, cfg, 42, undefined, { contextPath: '/ctx' })
+    const { criteriaMd } = await j.resolveCriteria('goal', null)
+    await j.score('goal', criteriaMd, subs(3), 1)
+    expect(prompts.map((p) => p.purpose)).toEqual(expect.arrayContaining(['criteria', 'judge']))
+    for (const p of prompts) expect(p.prompt).toContain('Reference material (read-only) is in /ctx')
+  })
+
   test('different rounds produce different anonymization orders', async () => {
     const prompts: string[] = []
     const provider = {

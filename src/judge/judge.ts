@@ -3,7 +3,7 @@ import { makeRng } from '../core/rng.js'
 import type { CriteriaSource, FileEntry, JudgeMode, RunConfig } from '../core/types.js'
 import type { Provider } from '../runtime/provider.js'
 import { parseWithRepair } from './parse.js'
-import { buildCriteriaPrompt, buildScoringPrompt } from './prompts.js'
+import { buildCriteriaPrompt, buildScoringPrompt, type GradingContext } from './prompts.js'
 import { CRITERIA_JSON_SCHEMA, RANKING_JSON_SCHEMA } from './schemas.js'
 
 const RankingSchema = z.object({
@@ -70,6 +70,8 @@ export class Judge {
     private cfg: RunConfig['judge'],
     private seed: number,
     private onWarning?: (message: string) => void,
+    /** The run's context folder, named in criteria and scoring prompts. */
+    private grading: GradingContext = { contextPath: null },
   ) {}
 
   async resolveCriteria(
@@ -103,14 +105,14 @@ export class Judge {
   private async generateCriteria(goalMd: string): Promise<z.output<typeof CriteriaSchema>> {
     const raw = await this.provider.complete({
       purpose: 'criteria',
-      prompt: buildCriteriaPrompt(goalMd),
+      prompt: buildCriteriaPrompt(goalMd, this.grading),
       modelId: this.cfg.modelId,
       schema: CRITERIA_JSON_SCHEMA,
     })
     return parseWithRepair(raw, CriteriaSchema, (err) =>
       this.provider.complete({
         purpose: 'criteria',
-        prompt: `${buildCriteriaPrompt(goalMd)}\n\nYour previous reply failed to parse: ${err}. Reply with JSON only.`,
+        prompt: `${buildCriteriaPrompt(goalMd, this.grading)}\n\nYour previous reply failed to parse: ${err}. Reply with JSON only.`,
         modelId: this.cfg.modelId,
         schema: CRITERIA_JSON_SCHEMA,
       }),
@@ -207,7 +209,7 @@ export class Judge {
   ) {
     const { anon, byRef } = this.anonymize(inputs, roundIdx)
     const parsed = await this.callJudge(
-      buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
+      buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap, this.grading),
     )
     return {
       scores: this.deanonymize(parsed.rankings, byRef),
@@ -236,7 +238,7 @@ export class Judge {
     for (const batch of batches) {
       const { anon, byRef } = this.anonymize(batch, roundIdx)
       const parsed = await this.callJudge(
-        buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
+        buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap, this.grading),
       )
       batchDigest ||= parsed.meta_digest
       const placed = this.resolveRankings(parsed.rankings, byRef)
@@ -257,7 +259,7 @@ export class Judge {
     if (winners.length > 1) {
       const { anon, byRef } = this.anonymize(winners, roundIdx)
       const parsed = await this.callJudge(
-        buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap),
+        buildScoringPrompt(goalMd, criteriaMd, anon, this.cfg.submissionCharCap, this.grading),
       )
       finalsDigest = parsed.meta_digest
       for (const [agentId, entry] of this.resolveRankings(parsed.rankings, byRef)) {

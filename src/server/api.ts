@@ -361,7 +361,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         config: composed.config,
         sandbox: composed.sandbox,
         runner: composed.runner,
-        judge: new Judge(composed.provider, composed.config.judge, 42),
+        judge: new Judge(composed.provider, composed.config.judge, 42, undefined, {
+          contextPath: composed.config.contextDir ?? null,
+        }),
         reflector: new Reflector(
           composed.provider,
           composed.config.reflect,
@@ -711,7 +713,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     // cannot be reconstructed — 409 is honest rather than a half-built provider.
     const provider = record?.composed.provider
     if (!provider) return reply.code(409).send({ error: 'no live provider for this run' })
-    const judge = new Judge(provider, { ...run.config.judge, modelId: body.judgeModelId }, 42)
+    const judge = new Judge(provider, { ...run.config.judge, modelId: body.judgeModelId }, 42, undefined, {
+      contextPath: run.config.contextDir ?? null,
+    })
     const agents = deps.repos.agents.listAll(runId)
     const byId = new Map(agents.map((a) => [a.id, a]))
     const inputs: JudgeInput[] = deps.repos.submissions.forRound(round.id).map((sub) => ({
@@ -857,7 +861,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         // No engine code: concurrency/selection/pricing are all re-read per
         // round through the 4b reconfigure swap below.
         // Mirrors the per-run engine construction above (same provider, same seed).
-        const judge = new Judge(record.composed.provider, newConfig.judge, 42)
+        const judge = new Judge(record.composed.provider, newConfig.judge, 42, undefined, {
+          contextPath: newConfig.contextDir ?? null,
+        })
         const reflector = new Reflector(
           record.composed.provider,
           newConfig.reflect,
