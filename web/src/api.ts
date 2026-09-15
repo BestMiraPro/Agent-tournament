@@ -168,6 +168,7 @@ export interface FullRunSpec {
   reflect: { modelId?: string }
   workspaceRoot: string | null
   authFile: string | null
+  contextDir: string | null
   criteria: string | null
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number

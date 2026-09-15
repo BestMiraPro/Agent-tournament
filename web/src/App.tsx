@@ -112,6 +112,7 @@ export function App() {
         reflect: { modelId: reflectModel === '' ? undefined : reflectModel },
         workspaceRoot: value.workspaceRoot.trim() || null,
         authFile: value.authFile.trim() || null,
+        contextDir: value.contextDir.trim() || null,
         criteria: value.criteria,
         selection: value.selection,
         concurrency: value.concurrency,

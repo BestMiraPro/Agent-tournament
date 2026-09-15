@@ -14,6 +14,7 @@ export interface RunSetupValue {
   reflectModel: string
   workspaceRoot: string
   authFile: string
+  contextDir: string
   criteria: string | null
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number
@@ -37,6 +38,7 @@ export function RunSetup({ busy, error, onCreate }: {
   const [reflectModel, setReflectModel] = useState(DEFAULT_CONFIG.reflect.modelId)
   const [workspaceRoot, setWorkspaceRoot] = useState('')
   const [authFile, setAuthFile] = useState('')
+  const [contextDir, setContextDir] = useState('')
   const [criteria, setCriteria] = useState('')
   // Numeric inputs stay text in state (number inputs still surface strings and
   // can be emptied); App re-checks ranges on submit since the server is truth.
@@ -79,6 +81,9 @@ export function RunSetup({ busy, error, onCreate }: {
         <label htmlFor="setup-criteria">Judging criteria (optional)</label>
         <textarea id="setup-criteria" value={criteria} rows={3} placeholder="auto-generate from goal" onChange={(e) => setCriteria(e.target.value)} disabled={busy} />
         <p className="help">How success is judged — leave blank and the judge writes its own.</p>
+        <label htmlFor="setup-context">Context folder (read-only, optional)</label>
+        <input id="setup-context" value={contextDir} placeholder="C:\path\to\reference-material" onChange={(e) => setContextDir(e.target.value)} disabled={busy} />
+        <p className="help">A folder of reference material that agents and the judge can read. Docker mounts it read-only; local agents can still run commands against it, so use Docker if it must stay untouched. The judge can browse the web, so do not put secrets here. Mock runs ignore it.</p>
       </section>
       <section aria-labelledby="setup-h-population">
         <h2 id="setup-h-population">Population</h2>
@@ -135,9 +140,9 @@ export function RunSetup({ busy, error, onCreate }: {
         )}
         {sandbox === 'docker' && (
           <>
-            <label htmlFor="setup-auth">Auth file (bind-mounted read-only)</label>
+            <label htmlFor="setup-auth">Credentials file (auth.json)</label>
             <input id="setup-auth" value={authFile} onChange={(e) => setAuthFile(e.target.value)} disabled={busy} />
-            <p className="help">Credentials the containers may read, never write. Leave blank to use your OpenCode login.</p>
+            <p className="help">Your provider credentials file, mounted read-only into containers. Not for context — use Context folder above for that. Leave blank to use your OpenCode login.</p>
             <label htmlFor="setup-containers">Containers</label>
             <input id="setup-containers" type="number" min={1} max={64} step={1} value={maxContainers} onChange={(e) => setMaxContainers(e.target.value)} disabled={busy} />
             <p className="help">How many containers the agents are spread across. With fewer containers than agents, agents share one and can reach each other&apos;s files, so their results cannot be certified untouched. Match the agent count for full isolation.</p>
@@ -183,7 +188,7 @@ export function RunSetup({ busy, error, onCreate }: {
         disabled={busy || name.trim().length === 0 || goal.trim().length === 0}
         onClick={() => onCreate({
           name, goal, sandbox, roster, judgeModel, judgeMode, reflectModel,
-          workspaceRoot, authFile,
+          workspaceRoot, authFile, contextDir,
           criteria: criteria.trim() === '' ? null : criteria,
           selection: {
             eliteCount: Number(eliteCount),

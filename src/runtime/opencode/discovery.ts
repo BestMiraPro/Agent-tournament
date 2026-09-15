@@ -89,7 +89,7 @@ export function modelUnavailableMessage(modelId: string, version: string | null,
   const runtime = version ? `OpenCode ${version}` : 'OpenCode version unknown'
   if (providerMissing) {
     return `Provider unavailable in Docker runtime (${runtime}, shard ${shardIndex}): no credentials for "${providerOf(modelId)}" reached the container, ` +
-      `so ${modelId} cannot run. Check the Auth file setting (leave it blank to use your OpenCode login)`
+      `so ${modelId} cannot run. Check the Credentials file setting (leave it blank to use your OpenCode login)`
   }
   return `Model unavailable in Docker runtime (${runtime}, shard ${shardIndex}): ${modelId} is not in its model catalogue`
 }

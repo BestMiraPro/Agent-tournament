@@ -241,8 +241,9 @@ export async function composeRun(
     const kind = s.inspectPath(spec.authFile)
     if (kind !== 'file') {
       throw new Error(
-        `Auth file ${spec.authFile} ${kind === 'directory' ? 'is a folder, not a credentials file' : 'does not exist'}. ` +
-          'Leave "Auth file" blank to use your OpenCode login, or point it at an auth.json file.',
+        `Credentials file ${spec.authFile} ${kind === 'directory' ? 'is a folder, not a credentials file' : 'does not exist'}. ` +
+          'Leave "Credentials file" blank to use your OpenCode login, or point it at an auth.json file. ' +
+          'For reference material, use "Context folder" instead.',
       )
     }
   }
@@ -312,7 +313,7 @@ export async function composeRun(
             const providers = [...new Set(noCredentials.map(providerOf))].map((p) => `"${p}"`).join(', ')
             reportOnce(
               `No credentials for ${providers} reached the Docker runtime (${runtime}); agents on these models will fail before any prompt. ` +
-                'Check the Auth file setting (leave it blank to use your OpenCode login):\n' +
+                'Check the Credentials file setting (leave it blank to use your OpenCode login):\n' +
                 noCredentials.map((m) => `  - ${m}`).join('\n'),
             )
           }

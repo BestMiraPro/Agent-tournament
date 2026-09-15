@@ -42,7 +42,7 @@ describe('composeRun', () => {
       const seams = { ...mockSeams(), inspectPath: vi.fn((): 'directory' => 'directory') }
       try {
         await expect(composeRun(dockerSpec(root, 'C:\\Users\\me\\Crypto-research'), seams as never))
-          .rejects.toThrow(/C:\\Users\\me\\Crypto-research is a folder, not a credentials file.*Leave "Auth file" blank/)
+          .rejects.toThrow(/C:\\Users\\me\\Crypto-research is a folder, not a credentials file.*Leave "Credentials file" blank.*use "Context folder" instead/)
         expect(seams.startHostServer).not.toHaveBeenCalled()
         expect(seams.readCapacity).not.toHaveBeenCalled()
       } finally {
@@ -431,9 +431,9 @@ describe('composeRun', () => {
         const { c, h1 } = await compose(root, shardClient)
         const refused = await c.runner.run(h1, { agentId: 'a1', genome: genome(missing), goalMd: 'g', timeoutMs: 5000 })
         expect(refused.failure!.message).toMatch(/no credentials for "wandb"/)
-        expect(refused.failure!.message).toContain('Auth file')
+        expect(refused.failure!.message).toContain('Credentials file')
         expect(shardClient.createSession).not.toHaveBeenCalled()
-        expect(c.warnings.some((w) => /no credentials/i.test(w) && w.includes('wandb') && w.includes('Auth file'))).toBe(true)
+        expect(c.warnings.some((w) => /no credentials/i.test(w) && w.includes('wandb') && w.includes('Credentials file'))).toBe(true)
         await c.cleanup()
       } finally {
         rmSync(root, { recursive: true, force: true })

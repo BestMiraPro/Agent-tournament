@@ -94,7 +94,7 @@ describe('runtime catalogue', () => {
     expect(hasProvider(catalog, 'wand')).toBe(false)
     expect(modelUnavailableMessage('google/gemini-3.8-flash', '1.18.21', 0, true)).toBe(
       'Provider unavailable in Docker runtime (OpenCode 1.18.21, shard 0): no credentials for "google" reached the container, ' +
-        'so google/gemini-3.8-flash cannot run. Check the Auth file setting (leave it blank to use your OpenCode login)',
+        'so google/gemini-3.8-flash cannot run. Check the Credentials file setting (leave it blank to use your OpenCode login)',
     )
   })
 })
