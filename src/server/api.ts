@@ -20,6 +20,7 @@ import { buildCsvRows, buildJsonDump } from './export.js'
 import { submissionView } from './submission-view.js'
 import { ActivityCache, type ActivitySnapshot } from './activity.js'
 import { AuditCollector, readRoundAudit } from '../engine/audit.js'
+import { buildJudgingEnvelope, evidenceFromAudit, type JudgeCallRecord } from '../judge/audit.js'
 import type { HostCapacity } from '../runtime/docker/capacity.js'
 
 export interface SpecDefaults {
@@ -687,6 +688,23 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     return roundDetail(deps.repos, round)
   })
 
+  /**
+   * Why this round scored as it did: the grading record and the frozen evidence it cites.
+   * A public decision record — exact inputs and validated replies — not hidden reasoning.
+   */
+  app.get('/api/runs/:runId/rounds/:idx/judging', async (req, reply) => {
+    const { runId, idx } = req.params as { runId: string; idx: string }
+    if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
+    const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
+    if (!round) return reply.code(404).send({ error: 'no such round' })
+    const envelopes = deps.repos.judgingAudits.forRound(round.id)
+    return {
+      // The original record for this round; rounds graded before this existed report null.
+      judging: envelopes.length > 0 ? envelopes[envelopes.length - 1]!.payload : null,
+      audit: readRoundAudit(deps.repos, round.id),
+    }
+  })
+
   // The round's durable behavioural evidence as stored: the same answer after a restart.
   app.get('/api/runs/:runId/rounds/:idx/audit', async (req, reply) => {
     const { runId, idx } = req.params as { runId: string; idx: string }
@@ -779,15 +797,20 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     })
     const agents = deps.repos.agents.listAll(runId)
     const byId = new Map(agents.map((a) => [a.id, a]))
+    // The same frozen evidence the original grading saw: a rejudge re-reads the record,
+    // never the live workspace, so the two are comparable.
+    const stored = readRoundAudit(deps.repos, round.id)
     const inputs: JudgeInput[] = deps.repos.submissions.forRound(round.id).map((sub) => ({
       agentId: sub.agentId,
       submissionMd: sub.submissionMd ?? '',
       files: (Array.isArray(sub.fileManifest) ? sub.fileManifest : []) as FileEntry[],
       status: sub.status,
+      evidence: evidenceFromAudit(stored.frozen ? stored : null, sub.agentId),
     }))
+    const calls: JudgeCallRecord[] = []
     let output: JudgeOutput
     try {
-      output = await judge.score(round.goalMd, round.criteriaMd ?? '', inputs, round.idx)
+      output = await judge.score(round.goalMd, round.criteriaMd ?? '', inputs, round.idx, (r) => calls.push(r))
     } catch (e) {
       return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
     }
@@ -805,7 +828,19 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         rankChanged: old ? old.rank !== ns.rank : true,
       }
     })
-    return { entries, metaDigest: output.metaDigest, mode: output.mode }
+    // Labelled and returned, never stored: the round keeps the record it was scored on.
+    const preview = buildJudgingEnvelope({
+      roundId: round.id,
+      kind: 'rejudge_preview',
+      evaluator: judge.evaluator(),
+      mode: output.mode,
+      criteriaMd: round.criteriaMd ?? '',
+      criteriaSource: round.criteriaSource,
+      evidence: { status: stored.frozen ? 'recorded' : 'not_recorded', digest: stored.frozen?.digest ?? null },
+      calls,
+      agents: Object.fromEntries(output.scores.flatMap((s) => (s.audit ? [[s.agentId, s.audit] as const] : []))),
+    })
+    return { entries, metaDigest: output.metaDigest, mode: output.mode, preview }
   })
 
   app.post('/api/runs/:id/rounds', async (req, reply) => {

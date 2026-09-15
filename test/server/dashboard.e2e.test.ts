@@ -52,7 +52,8 @@ describe('dashboard end to end', () => {
       await dashboard.manager.waitForIdle(runId)
       const round = dashboard.repos.rounds.listForRun(runId)[0]!
       expect(round.criteriaMd).toBe('resolved scoring criteria')
-      expect(scoreSpy).toHaveBeenCalledWith('g', 'resolved scoring criteria', expect.anything(), 1)
+      // The fifth argument is the call recorder the round's grading audit is built from.
+      expect(scoreSpy).toHaveBeenCalledWith('g', 'resolved scoring criteria', expect.anything(), 1, expect.any(Function))
     } finally {
       releaseCriteria?.()
       resolveSpy.mockRestore()

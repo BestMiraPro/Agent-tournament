@@ -415,7 +415,109 @@ export interface RejudgeResult {
   entries: RejudgeEntry[]
   metaDigest: string
   mode: string
+  /** The new grading record, labelled a preview: it is not stored against the round. */
+  preview?: JudgingEnvelope
 }
+
+/** Mirrors SafetyFinding in src/judge/audit.ts. */
+export interface SafetyFinding {
+  category: string
+  severity: string
+  summary: string
+  evidenceIds: string[]
+}
+
+/** Mirrors SafetyReview: a behavioural review, separate from the score. */
+export interface SafetyReview {
+  status: string
+  findings: SafetyFinding[]
+  limitations: string[]
+}
+
+export interface CriterionAssessment {
+  criterion: string
+  assessment: string
+  evidenceIds: string[]
+}
+
+/** Mirrors ScoringAudit: what the grader assessed and how the number was derived. */
+export interface ScoringAudit {
+  criteria: CriterionAssessment[]
+  scoreDerivation: string
+  limitations: string[]
+  safety: SafetyReview
+  stages?: {
+    batch: { rank: number; of: number } | null
+    finals: { rank: number; of: number } | null
+    position: number
+    of: number
+    formula: string
+  }
+}
+
+/** Mirrors AuditEvidence in src/engine/audit.ts: one observed, bounded public record. */
+export interface AuditEvidenceItem {
+  id: string
+  agentId: string | null
+  kind: string
+  outcome?: string
+  summary: string
+  detail?: string
+  observedAt: number
+  source: string
+}
+
+export interface JudgingCall {
+  stage: string
+  purpose: string
+  modelId: string
+  refs: Record<string, string>
+  prompt: string
+  response: unknown
+  repaired: boolean
+  error: string | null
+}
+
+/** Mirrors JudgingAuditEnvelope: the round's grading record. */
+export interface JudgingEnvelope {
+  schemaVersion: number
+  kind: string
+  createdAt: number
+  evaluator: { modelId: string; runtime: string }
+  mode: string
+  rubric: { criteriaMd: string; source: string; digest: string }
+  evidence: { status: string; digest: string | null }
+  promptVersion: string
+  calls: JudgingCall[]
+  agents: Record<string, ScoringAudit>
+}
+
+export interface AgentCoverage {
+  records: number
+  dropped: number
+  truncated: number
+  capture: { sealed: boolean; verified: boolean; tampered: boolean } | null
+}
+
+/** GET /api/runs/:runId/rounds/:idx/judging: the grading record and the evidence it cites. */
+export interface RoundJudging {
+  judging: JudgingEnvelope | null
+  audit: {
+    status: string
+    frozen: {
+      digest: string
+      streamGaps: number
+      agents: Record<string, AgentCoverage>
+      provenance: { sandbox: string; isolation: string | null; toolchainId: string | null } | null
+    } | null
+    records: AuditEvidenceItem[]
+    late: AuditEvidenceItem[]
+    digestMatches: boolean | null
+  }
+}
+
+export const getRoundJudging = (runId: string, idx: number): Promise<RoundJudging> =>
+  fetch(`/api/runs/${runId}/rounds/${idx}/judging`).then(json)
 
 export const rejudge = (runId: string, idx: number, judgeModelId: string): Promise<RejudgeResult> =>
   fetch(`/api/runs/${runId}/rounds/${idx}/rejudge`, {

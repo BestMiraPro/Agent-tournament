@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { AgentCoverage, AuditEvidence, FrozenAudit } from '../engine/audit.js'
+import type { CallPurpose } from '../runtime/provider.js'
 
 /**
  * The public decision record of grading: what the grader assessed per criterion, what it
@@ -60,6 +62,79 @@ export interface ScoringAudit {
   limitations: string[]
   safety: SafetyReview
   stages?: StageArithmetic
+}
+
+export type JudgeStage = 'criteria' | 'single' | 'batch' | 'finals' | 'safety'
+
+/** One grading call exactly as made: the public input, the validated reply, and what went wrong. */
+export interface JudgeCallRecord {
+  stage: JudgeStage
+  purpose: CallPurpose
+  modelId: string
+  promptVersion: string
+  /** Anonymous reference → agent id, so the record reads back against the agents. */
+  refs: Record<string, string>
+  prompt: string
+  /** The validated reply; null when the call failed. */
+  response: unknown
+  repaired: boolean
+  error: string | null
+  startedAt: number
+  endedAt: number
+}
+
+export type JudgeRecorder = (record: JudgeCallRecord) => void
+
+/**
+ * The immutable record of one round's grading: which evaluator ran, the rubric it was given,
+ * which frozen evidence set it saw, every call it made, and each agent's public assessment.
+ * A rejudge produces the same shape labelled `rejudge_preview` and never replaces the original.
+ */
+export interface JudgingAuditEnvelope {
+  schemaVersion: typeof AUDIT_SCHEMA_VERSION
+  roundId: string
+  kind: 'original' | 'rejudge_preview'
+  createdAt: number
+  evaluator: { modelId: string; runtime: string }
+  mode: string
+  rubric: { criteriaMd: string; source: string; digest: string }
+  evidence: { status: 'recorded' | 'not_recorded'; digest: string | null }
+  promptVersion: string
+  calls: JudgeCallRecord[]
+  agents: Record<string, ScoringAudit>
+}
+
+export const AUDIT_SCHEMA_VERSION = 1
+
+export function digestText(text: string): string {
+  return `sha256:${createHash('sha256').update(text).digest('hex')}`
+}
+
+export function buildJudgingEnvelope(input: {
+  roundId: string
+  kind: JudgingAuditEnvelope['kind']
+  evaluator: { modelId: string; runtime: string }
+  mode: string
+  criteriaMd: string
+  criteriaSource: string
+  evidence: { status: 'recorded' | 'not_recorded'; digest: string | null }
+  calls: readonly JudgeCallRecord[]
+  agents: Record<string, ScoringAudit>
+  now?: number
+}): JudgingAuditEnvelope {
+  return {
+    schemaVersion: AUDIT_SCHEMA_VERSION,
+    roundId: input.roundId,
+    kind: input.kind,
+    createdAt: input.now ?? Date.now(),
+    evaluator: input.evaluator,
+    mode: input.mode,
+    rubric: { criteriaMd: input.criteriaMd, source: input.criteriaSource, digest: digestText(input.criteriaMd) },
+    evidence: input.evidence,
+    promptVersion: JUDGING_PROMPT_VERSION,
+    calls: [...input.calls],
+    agents: input.agents,
+  }
 }
 
 /** The frozen evidence one submission is judged with. */

@@ -29,8 +29,8 @@ export interface ExportEntry {
 export interface JsonDump {
   run: RunRow
   config: RunConfig
-  /** Each round carries its audit exactly as the round-audit endpoint returns it. */
-  rounds: (RoundRow & { entries: ExportEntry[]; audit: RoundAuditView })[]
+  /** Each round carries its audit and grading record exactly as the endpoints return them. */
+  rounds: (RoundRow & { entries: ExportEntry[]; audit: RoundAuditView; judging: unknown[] })[]
   agents: AgentRow[]
   genomes: GenomeRow[]
 }
@@ -86,7 +86,12 @@ export function buildJsonDump(runId: string, repos: Repos): JsonDump | null {
         submission: sub ? submissionView(sub) : null,
       }
     })
-    return { ...round, entries, audit: readRoundAudit(repos, round.id) }
+    return {
+      ...round,
+      entries,
+      audit: readRoundAudit(repos, round.id),
+      judging: repos.judgingAudits.forRound(round.id).map((row) => row.payload),
+    }
   })
   const agents = repos.agents.listAll(runId)
   const genomes = agents.flatMap((a) => repos.genomes.forAgent(a.id))

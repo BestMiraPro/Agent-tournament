@@ -341,6 +341,21 @@ export function makeRepos(db: Db) {
       },
     },
 
+    /** Immutable grading records: one envelope per judged round, never rewritten. */
+    judgingAudits: {
+      insert(input: { roundId: string; payload: unknown }): void {
+        db.prepare('INSERT INTO judging_audits (round_id, created_at, payload_json) VALUES (?,?,?)')
+          .run(input.roundId, now(), JSON.stringify(input.payload))
+      },
+      forRound(roundId: string) {
+        const rows = db.prepare('SELECT * FROM judging_audits WHERE round_id = ? ORDER BY id').all(roundId) as any[]
+        return rows.map((r) => ({
+          id: r.id as number, roundId: r.round_id as string, createdAt: r.created_at as number,
+          payload: JSON.parse(r.payload_json),
+        }))
+      },
+    },
+
     events: {
       append(input: {
         runId: string; roundId: string | null; agentId: string | null

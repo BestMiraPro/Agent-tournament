@@ -18,7 +18,7 @@ import {
 } from './capture.js'
 import type { Reflector } from '../evolution/reflect.js'
 import type { TopPerformer } from '../evolution/prompts.js'
-import { evidenceFromAudit } from '../judge/audit.js'
+import { buildJudgingEnvelope, evidenceFromAudit, type JudgeCallRecord, type JudgeRecorder } from '../judge/audit.js'
 import type { Judge, JudgeInput } from '../judge/judge.js'
 import type { AgentRunner, AgentRunResult } from '../runtime/agent-runner.js'
 import { CONTAINER_CONTEXT_PATH } from '../runtime/docker/cli.js'
@@ -600,13 +600,42 @@ export class TournamentEngine {
       // 'generated' means nothing was submitted and nothing was overridden.
       const rowNow = repos.rounds.get(round.id)
       const effective = rowNow?.criteriaSource === 'user' ? rowNow.criteriaMd : submittedCriteria
+      // Every grading call is recorded as it happens, so the round's own record survives a
+      // later reconfigure: an envelope never describes today's judge for yesterday's round.
+      const judgeCalls: JudgeCallRecord[] = []
+      const recorder: JudgeRecorder = (r) => { judgeCalls.push(r) }
       const { criteriaMd, source } = await judge.resolveCriteria(
         input.goalMd,
         effective,
+        recorder,
       )
       repos.rounds.setCriteria(round.id, criteriaMd, source)
-      const judged = await judge.score(input.goalMd, criteriaMd, judgeInputs, roundIdx)
+      const judged = await judge.score(input.goalMd, criteriaMd, judgeInputs, roundIdx, recorder)
       repos.rounds.setDigest(round.id, judged.metaDigest)
+      try {
+        repos.judgingAudits.insert({
+          roundId: round.id,
+          payload: buildJudgingEnvelope({
+            roundId: round.id,
+            kind: 'original',
+            evaluator: judge.evaluator(),
+            mode: judged.mode,
+            criteriaMd,
+            criteriaSource: source,
+            evidence: {
+              status: frozenAudit ? 'recorded' : 'not_recorded',
+              digest: frozenAudit?.frozen.digest ?? null,
+            },
+            calls: judgeCalls,
+            agents: Object.fromEntries(
+              judged.scores.flatMap((s) => (s.audit ? [[s.agentId, s.audit] as const] : [])),
+            ),
+          }),
+        })
+      } catch {
+        // A round that was graded must not fail because its record could not be written;
+        // the round detail then reports the grading audit as not recorded.
+      }
       // The judge may fall back from single_call to batched_finals, so record what
       // actually ran rather than what was configured.
       repos.rounds.setJudgeMode(round.id, judged.mode)

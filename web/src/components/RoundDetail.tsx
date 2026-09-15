@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { getRoundDetail, listModels, rejudge, serverError, type RoundDetail as RoundDetailData, type RejudgeResult } from '../api.js'
+import { getRoundDetail, getRoundJudging, listModels, rejudge, serverError, type RoundDetail as RoundDetailData, type RejudgeResult, type RoundJudging } from '../api.js'
+import { WhyThisScore } from './WhyThisScore.js'
 import { effectiveRound, roundOptions } from '../lib/rounds.js'
 import { createSelectionGuard } from '../lib/lifecycle.js'
 import { Markdown } from './Markdown.js'
@@ -68,6 +69,8 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
   const [rejudging, setRejudging] = useState(false)
   const [rejudgeResult, setRejudgeResult] = useState<RejudgeResult | null>(null)
   const [rejudgeError, setRejudgeError] = useState<string | null>(null)
+  const [judging, setJudging] = useState<RoundJudging | null>(null)
+  const [judgingError, setJudgingError] = useState<string | null>(null)
   const rejudgeGuard = useRef(createSelectionGuard())
   const rejudgeIdentity = `${runId}:${effective ?? ''}`
 
@@ -85,6 +88,9 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
     let alive = true
     setRejudgeResult(null)
     setRejudgeError(null)
+    // The grading record belongs to the selected round, so it is dropped with the detail.
+    setJudging(null)
+    setJudgingError(null)
     getRoundDetail(runId, effective)
       .then((d) => { if (alive) { setDetail(d); setLoading(false); setError(null) } })
       .catch((e) => { if (alive) { setError(serverError(e)); setLoading(false) } })
@@ -102,6 +108,18 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
     )
     return () => { alive = false }
   }, [])
+
+  // One fetch per round, on the first expansion: the record carries whole prompts.
+  const ensureJudging = async () => {
+    if (effective === null || judging !== null) return
+    try {
+      const loaded = await getRoundJudging(runId, effective)
+      setJudging(loaded)
+      setJudgingError(null)
+    } catch (e) {
+      setJudgingError(serverError(e))
+    }
+  }
 
   if (options.length === 0) return null
 
@@ -229,6 +247,23 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
                       {e.submission ? `${e.submission.status} · ${submissionCostLabel(e.submission)}` : 'no submission'}
                     </summary>
                     {e.submission ? <Submission sub={e.submission} /> : <p className="muted">No submission file.</p>}
+                  </details>
+                  {/* Loaded on demand: the record holds the exact prompts and replies. */}
+                  <details onToggle={(ev) => { if (ev.currentTarget.open) void ensureJudging() }}>
+                    <summary>Why this score</summary>
+                    {judgingError && <p className="error">{judgingError}</p>}
+                    {!judging && !judgingError && <p className="muted">Loading the grading record…</p>}
+                    {judging && (
+                      <WhyThisScore
+                        agentId={e.agentId}
+                        audit={judging.judging?.agents[e.agentId] ?? null}
+                        records={judging.audit.records}
+                        coverage={judging.audit.frozen?.agents[e.agentId] ?? null}
+                        calls={judging.judging?.calls ?? []}
+                        digestMatches={judging.audit.digestMatches}
+                        evidenceStatus={judging.audit.status}
+                      />
+                    )}
                   </details>
                 </article>
               ))}

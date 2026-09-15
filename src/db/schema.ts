@@ -83,6 +83,13 @@ CREATE TABLE IF NOT EXISTS scores (
   UNIQUE(round_id, agent_id)
 );
 
+CREATE TABLE IF NOT EXISTS judging_audits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  round_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  payload_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL,
@@ -97,4 +104,5 @@ CREATE INDEX IF NOT EXISTS idx_genomes_agent ON genomes(agent_id, round_idx);
 CREATE INDEX IF NOT EXISTS idx_scores_round ON scores(round_id, rank);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_round ON events(round_id, id);
+CREATE INDEX IF NOT EXISTS idx_judging_audits_round ON judging_audits(round_id, id);
 `

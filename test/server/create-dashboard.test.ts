@@ -49,6 +49,27 @@ describe('createDashboard round audit', () => {
       const dump = JSON.parse((await dashboard.app.inject({ method: 'GET', url: `/api/runs/${runId}/export?format=json` })).body)
       expect(dump.rounds[0].audit).toEqual(audit)
       expect((await dashboard.app.inject({ method: 'GET', url: `/api/runs/${runId}/rounds/9/audit` })).statusCode).toBe(404)
+
+      // The grading record: which evaluator ran, on which rubric and evidence, with every call.
+      const judging = JSON.parse((await dashboard.app.inject({ method: 'GET', url: `/api/runs/${runId}/rounds/1/judging` })).body)
+      expect(judging.judging).toMatchObject({
+        kind: 'original',
+        evaluator: { modelId: expect.any(String), runtime: 'mock' },
+        evidence: { status: 'recorded', digest: audit.frozen.digest },
+        rubric: { source: 'generated', digest: expect.stringMatching(/^sha256:/) },
+      })
+      expect(judging.judging.calls.map((c: { stage: string }) => c.stage)).toEqual(['criteria', 'single'])
+      expect(Object.keys(judging.judging.agents)).toHaveLength(2)
+      expect(judging.audit.frozen.digest).toBe(audit.frozen.digest)
+      expect(dump.rounds[0].judging).toEqual([judging.judging])
+
+      // A rejudge is a labelled preview: it never replaces the stored record.
+      const preview = JSON.parse((await dashboard.app.inject({
+        method: 'POST', url: `/api/runs/${runId}/rounds/1/rejudge`, payload: { judgeModelId: 'mock/model' },
+      })).body)
+      expect(preview.preview).toMatchObject({ kind: 'rejudge_preview', evidence: { status: 'recorded', digest: audit.frozen.digest } })
+      const after = JSON.parse((await dashboard.app.inject({ method: 'GET', url: `/api/runs/${runId}/rounds/1/judging` })).body)
+      expect(after.judging).toEqual(judging.judging)
     } finally {
       await dashboard.shutdown()
     }

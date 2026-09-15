@@ -13,6 +13,8 @@ import {
   normalizeSafety,
   unreviewedSafety,
   type JudgeEvidence,
+  type JudgeRecorder,
+  type JudgeStage,
   type SafetyReview,
   type ScoringAudit,
 } from './audit.js'
@@ -77,26 +79,7 @@ export interface JudgeOutput {
   mode: JudgeMode
 }
 
-export type JudgeStage = 'criteria' | 'single' | 'batch' | 'finals' | 'safety'
-
-/** One grading call exactly as made: the public input, the validated reply, and what went wrong. */
-export interface JudgeCallRecord {
-  stage: JudgeStage
-  purpose: CallPurpose
-  modelId: string
-  promptVersion: string
-  /** Anonymous reference → agent id, so the record reads back against the agents. */
-  refs: Record<string, string>
-  prompt: string
-  /** The validated reply; null when the call failed. */
-  response: unknown
-  repaired: boolean
-  error: string | null
-  startedAt: number
-  endedAt: number
-}
-
-export type JudgeRecorder = (record: JudgeCallRecord) => void
+export type { JudgeCallRecord, JudgeRecorder, JudgeStage } from './audit.js'
 
 /**
  * Goal-agnostic default criteria used only when live criteria generation fails
@@ -132,6 +115,11 @@ export class Judge {
     /** The run's context folder, named in criteria and scoring prompts. */
     private grading: GradingContext = { contextPath: null },
   ) {}
+
+  /** What actually graded: the configured model and the runtime that answered, for the record. */
+  evaluator(): { modelId: string; runtime: string } {
+    return { modelId: this.cfg.modelId, runtime: this.provider.describe?.() ?? 'unknown' }
+  }
 
   async resolveCriteria(
     goalMd: string,

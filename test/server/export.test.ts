@@ -151,5 +151,6 @@ describe('buildJsonDump', () => {
       { status: 'not_recorded', frozen: null, records: [], late: [], digestMatches: null },
       { status: 'not_recorded', frozen: null, records: [], late: [], digestMatches: null },
     ])
+    expect(dump.rounds.map((r) => r.judging)).toEqual([[], []])
   })
 })
