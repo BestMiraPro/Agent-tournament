@@ -254,6 +254,20 @@ describe('startServer banner parsing', () => {
     expect((await handle).baseUrl).toBe('http://127.0.0.1:4599')
   })
 
+  test('passes extra environment variables to the spawned server', async () => {
+    const { child, stdout } = fakeChild()
+    let env: NodeJS.ProcessEnv | undefined
+    const handle = startServer({
+      env: { OPENCODE_ENABLE_EXA: '1' },
+      spawnFn: (_c, _a, options) => { env = options.env; return child },
+      startupTimeoutMs: 2000,
+    })
+    stdout.write('opencode server listening on http://127.0.0.1:4599\n')
+    await handle
+    expect(env?.OPENCODE_ENABLE_EXA).toBe('1')
+    expect(env?.PATH ?? env?.Path).toBeDefined()
+  })
+
   test('never joins halves from stdout and stderr', async () => {
     const { child, stdout, stderr } = fakeChild()
     const handle = startServer({ spawnFn: () => child, startupTimeoutMs: 150 })

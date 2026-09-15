@@ -4,10 +4,12 @@ import type { PromptBody, PromptResponse } from '../../../src/runtime/opencode/c
 
 class FakeClient {
   public lastBody: PromptBody | null = null
+  public lastDirectory: string | null = null
   constructor(private response: PromptResponse) {}
   async createSession() { return { id: 'ses_1' } }
-  async prompt(_s: string, _d: string, body: PromptBody) {
+  async prompt(_s: string, directory: string, body: PromptBody) {
     this.lastBody = body
+    this.lastDirectory = directory
     return this.response
   }
   async abort() {}
@@ -42,6 +44,26 @@ describe('OpenCodeProvider', () => {
     const out = await p.complete({ purpose: 'judge', prompt: 'x', modelId: 'a/b' })
     expect(c.lastBody?.format).toBeUndefined()
     expect(out).toBe('plain')
+  })
+
+  test('criteria and judge calls run as the grader in its directory; reflect does not', async () => {
+    const c = new FakeClient(structured({ a: 1 }))
+    const p = new OpenCodeProvider(c as never, '/work', { timeoutMs: 1000, graderDirectory: '/work/.arena-grader' })
+    for (const purpose of ['criteria', 'judge'] as const) {
+      await p.complete({ purpose, prompt: 'x', modelId: 'a/b', schema: {} })
+      expect(c.lastBody?.agent).toBe('grader')
+      expect(c.lastDirectory).toBe('/work/.arena-grader')
+    }
+    await p.complete({ purpose: 'reflect', prompt: 'x', modelId: 'a/b', schema: {} })
+    expect(c.lastBody?.agent).toBeUndefined()
+    expect(c.lastDirectory).toBe('/work')
+  })
+
+  test('without a grader directory every call keeps the implicit agent', async () => {
+    const { c, p } = make(structured({ a: 1 }))
+    await p.complete({ purpose: 'judge', prompt: 'x', modelId: 'a/b', schema: {} })
+    expect(c.lastBody?.agent).toBeUndefined()
+    expect(c.lastDirectory).toBe('/work')
   })
 
   test('splits the model id on the first slash only', async () => {

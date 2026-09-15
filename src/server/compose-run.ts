@@ -21,6 +21,7 @@ import {
   readRuntimeCatalog,
   type RuntimeCatalog,
 } from '../runtime/opencode/discovery.js'
+import { writeGraderProfile } from '../runtime/opencode/grader-profile.js'
 import { attachServer, startServer, type ServerHandle } from '../runtime/opencode/server.js'
 import { AGENT_IMAGE, assertHostCapacity, makeClientResolver, sweepBeforeRun, validateRosterModels } from '../cli.js'
 import { ensureImage } from '../runtime/docker/image.js'
@@ -32,7 +33,7 @@ import { DockerSandbox } from '../runtime/docker/sandbox.js'
 import type { RunSpec } from './run-spec.js'
 
 export interface ComposeSeams {
-  startHostServer: (opts: { timeoutMs: number }) => Promise<ServerHandle>
+  startHostServer: (opts: { timeoutMs: number; env?: Record<string, string> }) => Promise<ServerHandle>
   attachHostServer: (url: string, timeoutMs: number) => Promise<ServerHandle>
   ensureImageFn: (image: string, contextDir: string, dockerfile: string) => Promise<void>
   readCapacity: Parameters<typeof assertHostCapacity>[1]
@@ -71,7 +72,7 @@ export function pathKind(path: string): PathKind {
  * preflight, host-capacity read, and orphan sweep.
  */
 export const defaultSeams: ComposeSeams = {
-  startHostServer: (opts) => startServer({ timeoutMs: opts.timeoutMs }),
+  startHostServer: (opts) => startServer({ timeoutMs: opts.timeoutMs, env: opts.env }),
   attachHostServer: (url, timeoutMs) => attachServer(url, timeoutMs),
   ensureImageFn: (image, contextDir, dockerfile) => ensureImage(image, contextDir, dockerfile),
   readCapacity: readHostCapacity,
@@ -84,6 +85,17 @@ export const defaultSeams: ComposeSeams = {
   hostModelsFile: () => hostModelsCatalog(process.env, homedir(), existsSync),
   inspectPath: pathKind,
 }
+
+/**
+ * Environment for the host OpenCode server this app starts.
+ *
+ * OpenCode 1.18.21 offers `websearch` only to its own `opencode` provider unless Exa search
+ * is enabled; with it, the grader can search whatever provider serves it (verified through
+ * `GET /experimental/tool`, no prompt sent). Side effect, accepted in the design: local-run
+ * workers share this server, so their non-OpenCode models gain `websearch` too. Docker
+ * shards run their own servers and are unchanged.
+ */
+export const HOST_SERVER_ENV: Record<string, string> = { OPENCODE_ENABLE_EXA: '1' }
 
 export interface ShardServer {
   shardIndex: number
@@ -238,12 +250,24 @@ export async function composeRun(
   if (spec.sandbox === 'docker') {
     await assertHostCapacity(config, s.readCapacity as never, onWarning)
   }
+  let graderDirectory: string
+  try {
+    graderDirectory = writeGraderProfile(workspaceRoot, spec.contextDir ?? null)
+  } catch (e) {
+    throw new Error(`grader profile under ${workspaceRoot}: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  if (spec.serverUrl) {
+    onWarning(
+      'Attached to an existing OpenCode server: whether the grader can search the web depends on how that server was started (OPENCODE_ENABLE_EXA=1).',
+    )
+  }
   const server = spec.serverUrl
     ? await s.attachHostServer(spec.serverUrl, config.agentTimeoutMs)
-    : await s.startHostServer({ timeoutMs: config.agentTimeoutMs })
+    : await s.startHostServer({ timeoutMs: config.agentTimeoutMs, env: HOST_SERVER_ENV })
   try {
     const provider = new OpenCodeProvider(server.client, workspaceRoot, {
       timeoutMs: config.agentTimeoutMs,
+      graderDirectory,
     })
     // validateRosterModels only throws on a fatal outcome (judge/reflect unusable,
     // every worker unusable); partial worker failures come back through onWarning,

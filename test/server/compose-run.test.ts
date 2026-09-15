@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
@@ -72,6 +72,28 @@ describe('composeRun', () => {
         rmSync(root, { recursive: true, force: true })
       }
     })
+  })
+
+  test('a real run starts its host server with web search on and writes the grader profile', async () => {
+    const seams = mockSeams()
+    seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
+    const root = mkdtempSync(join(tmpdir(), 'compose-grader-'))
+    const ctx = mkdtempSync(join(tmpdir(), 'compose-grader-ctx-'))
+    try {
+      const c = await composeRun(parseRunSpec({
+        name: 'l', goal: 'g', sandbox: 'local',
+        roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
+        workspaceRoot: root, contextDir: ctx,
+      }), { ...seams, inspectPath: vi.fn(() => 'directory' as const) } as never)
+      expect(seams.startHostServer).toHaveBeenCalledWith(expect.objectContaining({ env: { OPENCODE_ENABLE_EXA: '1' } }))
+      const profile = join(root, '.arena-grader', '.opencode', 'agents', 'grader.md')
+      expect(existsSync(profile)).toBe(true)
+      expect(readFileSync(profile, 'utf8')).toContain(`${JSON.stringify(`${ctx.replace(/\\/g, '/')}/*`)}: allow`)
+      await c.cleanup()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(ctx, { recursive: true, force: true })
+    }
   })
 
   describe('context folder', () => {

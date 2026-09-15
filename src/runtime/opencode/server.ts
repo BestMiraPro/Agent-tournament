@@ -78,6 +78,8 @@ export interface StartServerOptions {
   command?: string
   /** Test seam for a fixture that is not the real server; defaults to the serve args. */
   args?: string[]
+  /** Extra variables for the spawned server, over the inherited environment. Internal constants only. */
+  env?: Record<string, string>
   /** Test seam for driving stdio without a real process. */
   spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
 }
@@ -193,7 +195,7 @@ export async function startServer(opts: StartServerOptions = {}): Promise<Server
   const startupTimeoutMs = opts.startupTimeoutMs ?? 30_000
   const spawnFn = opts.spawnFn ?? spawn
 
-  const env = { ...process.env }
+  const env = { ...process.env, ...opts.env }
   // Our client never sends Basic auth, so an inherited server-auth env can only
   // 401 our own loopback plumbing: a shell leaking both vars makes every spawned
   // server demand credentials our client does not have. Scrub them from the copy.
