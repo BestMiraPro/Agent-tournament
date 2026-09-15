@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG, type RosterEntry, type RunConfig } from './core/types.j
 import { openDb } from './db/open.js'
 import { makeRepos } from './db/repos.js'
 import { recoverIncompleteRounds } from './db/recover.js'
+import { AuditCollector } from './engine/audit.js'
 import { TournamentEngine } from './engine/driver.js'
 import { defaultSeedStrategy } from './engine/seed-strategy.js'
 import { Reflector } from './evolution/reflect.js'
@@ -568,6 +569,13 @@ export async function runTournamentCli(
       // transfer. Uniform seeds leave nothing to imitate and the curve stays flat.
       seedStrategy: defaultSeedStrategy,
       preparePopulation: planFor ?? undefined,
+      audit: new AuditCollector(repos, {
+        provenance: {
+          sandbox: config.sandbox,
+          isolation: config.sandbox === 'docker' ? config.isolation ?? null : null,
+          toolchainId: null,
+        },
+      }),
     })
 
     const run = engine.createRun('cli', opts.goal)

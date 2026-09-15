@@ -5,6 +5,7 @@ import type { Genome, RunConfig, SubmissionStatus } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
 import { BudgetTracker, type BudgetBreach, type BudgetStatus } from './budget.js'
 import { breed } from '../evolution/breed.js'
+import type { AuditCollector } from './audit.js'
 import type { EngineEvent, EventSink } from './events.js'
 import {
   captureSubmission,
@@ -35,6 +36,8 @@ export interface EngineDeps {
   onEvent?: EventSink
   /** Optional per-round preparation for sandboxes that need the full live roster. */
   preparePopulation?: (agentIds: readonly string[]) => Promise<void>
+  /** Durable behavioural evidence: fed every engine event, frozen at the judging boundary. */
+  audit?: AuditCollector
 }
 
 export interface RoundResult {
@@ -63,11 +66,20 @@ export class TournamentEngine {
   constructor(private d: EngineDeps) {}
 
   private emit(event: EngineEvent): void {
+    this.observe(event)
     try {
       this.d.onEvent?.(event)
     } catch {
       /* a dashboard subscriber must never break a tournament */
     }
+  }
+
+  /**
+   * Evidence from outside the engine — the OpenCode event bridges — joins the audit here.
+   * The engine's own events are observed in `emit`, so a caller passes only bridge events.
+   */
+  observe(event: EngineEvent): void {
+    this.d.audit?.record(event)
   }
 
   createRun(name: string, initialGoal: string, initialCriteria: string | null = null) {
@@ -196,6 +208,7 @@ export class TournamentEngine {
     const roundIdx = repos.rounds.lastIdx(runId) + 1
     const round = repos.rounds.create({ runId, idx: roundIdx, goalMd: input.goalMd })
     repos.rounds.markStarted(round.id)
+    this.d.audit?.beginRound(runId, round.id, roundIdx)
     // Blank or null means generate. Anything else is written to the round row now,
     // before PREPARE, rather than at the judging boundary: until then a reload during
     // PREPARE or WORK showed the round as having no criteria at all.
@@ -574,6 +587,10 @@ export class TournamentEngine {
 
       // JUDGE
       if (this.aborted.has(runId)) throw new Error('round aborted by user')
+      // Every agent has stopped and been captured, so the evidence is sealed here: the
+      // grader sees this set, and anything observed later is kept as late evidence.
+      const frozenAudit = this.d.audit?.freeze(runId, round.id, prepared.map((p) => p.agent.id)) ?? null
+      void frozenAudit
       repos.rounds.setStatus(round.id, 'judging')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'judging' })
       // WHY re-read the row: an override accepted mid-round must win over what was

@@ -1,5 +1,6 @@
 import type { AgentRow, GenomeRow, RunConfig } from '../core/types.js'
 import type { Repos, RoundRow, RunRow } from '../db/repos.js'
+import { readRoundAudit, type RoundAuditView } from '../engine/audit.js'
 // One shape, one type. The local copy had already drifted: it declared durationMs as
 // non-nullable while the row it is built from is nullable.
 import { submissionView, type SubmissionView } from './submission-view.js'
@@ -28,7 +29,8 @@ export interface ExportEntry {
 export interface JsonDump {
   run: RunRow
   config: RunConfig
-  rounds: (RoundRow & { entries: ExportEntry[] })[]
+  /** Each round carries its audit exactly as the round-audit endpoint returns it. */
+  rounds: (RoundRow & { entries: ExportEntry[]; audit: RoundAuditView })[]
   agents: AgentRow[]
   genomes: GenomeRow[]
 }
@@ -84,7 +86,7 @@ export function buildJsonDump(runId: string, repos: Repos): JsonDump | null {
         submission: sub ? submissionView(sub) : null,
       }
     })
-    return { ...round, entries }
+    return { ...round, entries, audit: readRoundAudit(repos, round.id) }
   })
   const agents = repos.agents.listAll(runId)
   const genomes = agents.flatMap((a) => repos.genomes.forAgent(a.id))

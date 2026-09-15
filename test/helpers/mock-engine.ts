@@ -1,5 +1,6 @@
-import { openDb } from '../../src/db/open.js'
-import { makeRepos } from '../../src/db/repos.js'
+import { openDb, type Db } from '../../src/db/open.js'
+import { makeRepos, type Repos } from '../../src/db/repos.js'
+import type { AuditCollector } from '../../src/engine/audit.js'
 import { makeRng } from '../../src/core/rng.js'
 import { DEFAULT_CONFIG, type RunConfig } from '../../src/core/types.js'
 import { TournamentEngine } from '../../src/engine/driver.js'
@@ -285,8 +286,12 @@ export function makeMockEngine(opts: {
   preparePopulation?: (agentIds: readonly string[]) => Promise<void>
   /** Wrap the runner this helper would otherwise use, to inject specific results or throws. */
   wrapRunner?: (inner: AgentRunner) => AgentRunner
+  /** Collect durable evidence through this collector, built over the helper's repos. */
+  audit?: (repos: Repos) => AuditCollector
+  /** Use this database instead of a private one, so a test can read it back afresh. */
+  db?: Db
 }) {
-  const db = openDb(':memory:')
+  const db = opts.db ?? openDb(':memory:')
   const repos = makeRepos(db)
 
   const sabotaging = opts.sabotageBy !== undefined
@@ -359,6 +364,7 @@ export function makeMockEngine(opts: {
     },
     onEvent: opts.onEvent,
     preparePopulation: opts.preparePopulation,
+    audit: opts.audit?.(repos),
   })
 
   // Exposed (not just wired into the engine) so a test can spy on `reflect` and

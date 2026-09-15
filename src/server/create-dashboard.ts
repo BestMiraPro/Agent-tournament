@@ -17,6 +17,7 @@ import { processLedger, readHostCapacity } from '../runtime/docker/capacity.js'
 import { sweepOrphanRuntimeDirs } from '../runtime/runtime-dirs.js'
 import { buildApi } from './api.js'
 import { ActivityCache } from './activity.js'
+import { AuditCollector } from '../engine/audit.js'
 import { composeRun, defaultSeams, type ComposedRun, type RunIdHolder } from './compose-run.js'
 import type { RunSpec } from './run-spec.js'
 import { RunManager } from './run-manager.js'
@@ -100,6 +101,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     reflector: new Reflector(provider, config.reflect, config.roster.map((r) => r.modelId)),
     seedStrategy: defaultSeedStrategy,
     onEvent: emit,
+    audit: new AuditCollector(repos, { provenance: { sandbox: 'mock', isolation: null, toolchainId: null } }),
   })
 
   const manager = new RunManager(engine, emit)

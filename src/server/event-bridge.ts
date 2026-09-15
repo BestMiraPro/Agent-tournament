@@ -1,3 +1,4 @@
+import { redactSecrets } from '../core/redact.js'
 import type { ActivityKind, EngineEvent, EventSink } from '../engine/events.js'
 
 /** Ceiling on an unterminated remainder, so a stream without separators cannot grow forever. */
@@ -45,14 +46,7 @@ const TOOL_STATUSES = new Set(['pending', 'running', 'completed', 'error'])
 /** Input fields that name what a tool acted on. Everything else in a tool's input stays private. */
 const TOOL_TARGET_KEYS = ['command', 'filePath', 'path', 'pattern', 'url', 'query']
 
-/** Strips credentials an agent may have typed into a command before it is relayed anywhere. */
-export function redactSecrets(text: string): string {
-  return text
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1[redacted]@')
-    .replace(/(authorization\s*[:=]\s*)[^"'\n]*/gi, '$1[redacted]')
-    .replace(/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
-    .replace(/\b(api[_-]?key|token|secret|password)(\s*[:=]\s*)[^\s"']+/gi, '$1$2[redacted]')
-}
+export { redactSecrets }
 
 function capChars(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`

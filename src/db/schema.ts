@@ -96,4 +96,5 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_genomes_agent ON genomes(agent_id, round_idx);
 CREATE INDEX IF NOT EXISTS idx_scores_round ON scores(round_id, rank);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_round ON events(round_id, id);
 `

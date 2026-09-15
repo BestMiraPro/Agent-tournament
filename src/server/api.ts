@@ -19,6 +19,7 @@ import { discoverModels } from '../runtime/opencode/discovery.js'
 import { buildCsvRows, buildJsonDump } from './export.js'
 import { submissionView } from './submission-view.js'
 import { ActivityCache, type ActivitySnapshot } from './activity.js'
+import { AuditCollector, readRoundAudit } from '../engine/audit.js'
 import type { HostCapacity } from '../runtime/docker/capacity.js'
 
 export interface SpecDefaults {
@@ -381,6 +382,13 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         seedStrategy: defaultSeedStrategy,
         onEvent: emit,
         preparePopulation: composed.planFor ?? undefined,
+        audit: new AuditCollector(deps.repos, {
+          provenance: {
+            sandbox: composed.config.sandbox,
+            isolation: composed.config.sandbox === 'docker' ? composed.config.isolation ?? null : null,
+            toolchainId: composed.toolchainId ?? null,
+          },
+        }),
       })
       let runId: string
       try {
@@ -405,21 +413,26 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       deps.registry?.set(record)
       const lookupAgent = (sessionId: string): string | null =>
         composed.sessionMap.get(sessionId) ?? null
+      // Bridge evidence reaches the durable audit before the evicting live cache.
+      const bridgeEmit: EventSink = (e) => {
+        engine.observe(e)
+        emit(e)
+      }
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
-          runId, lookupAgent, emit,
-          ...streamHealth(runId, 'server', emit),
+          runId, lookupAgent, emit: bridgeEmit,
+          ...streamHealth(runId, 'server', bridgeEmit),
         }))
       } else if (spec.sandbox === 'docker') {
         if (composed.onShardServer) {
-          record.bridges.push(startDockerShardBridges({ composed, runId, lookupAgent, emit }))
+          record.bridges.push(startDockerShardBridges({ composed, runId, lookupAgent, emit: bridgeEmit }))
         } else {
           // Compatibility for injected compositions that expose a fixed list.
           composed.shardServers.forEach((shard, index) => {
             record.bridges.push(startEventBridge({
-              baseUrl: shard.baseUrl, runId, lookupAgent, emit,
-              ...streamHealth(runId, `shard-${index}`, emit),
+              baseUrl: shard.baseUrl, runId, lookupAgent, emit: bridgeEmit,
+              ...streamHealth(runId, `shard-${index}`, bridgeEmit),
             }))
           })
         }
@@ -672,6 +685,15 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     // Unscored rounds (row exists, no scores yet) fall through with entries []
     // — the UI shows them as in-flight rather than missing.
     return roundDetail(deps.repos, round)
+  })
+
+  // The round's durable behavioural evidence as stored: the same answer after a restart.
+  app.get('/api/runs/:runId/rounds/:idx/audit', async (req, reply) => {
+    const { runId, idx } = req.params as { runId: string; idx: string }
+    if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
+    const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
+    if (!round) return reply.code(404).send({ error: 'no such round' })
+    return readRoundAudit(deps.repos, round.id)
   })
 
   app.get('/api/runs/:runId/export', async (req, reply) => {

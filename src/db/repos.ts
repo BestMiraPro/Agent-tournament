@@ -357,6 +357,17 @@ export function makeRepos(db: Db) {
           ts: r.ts, type: r.type, payload: JSON.parse(r.payload_json),
         }))
       },
+      /** One round's events in insertion order, optionally only these types. */
+      forRound(roundId: string, types: readonly string[] = []) {
+        const rows = (types.length > 0
+          ? db.prepare(`SELECT * FROM events WHERE round_id = ? AND type IN (${types.map(() => '?').join(',')}) ORDER BY id`)
+            .all(roundId, ...types)
+          : db.prepare('SELECT * FROM events WHERE round_id = ? ORDER BY id').all(roundId)) as any[]
+        return rows.map((r) => ({
+          id: r.id as number, runId: r.run_id as string, roundId: r.round_id as string, agentId: r.agent_id as string | null,
+          ts: r.ts as number, type: r.type as string, payload: JSON.parse(r.payload_json),
+        }))
+      },
     },
   }
 }

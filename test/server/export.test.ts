@@ -143,4 +143,13 @@ describe('buildJsonDump', () => {
     expect(dump.agents.map((a) => a.id).sort()).toEqual([alpha.id, beta.id].sort())
     expect(dump.genomes.length).toBeGreaterThanOrEqual(2)
   })
+
+  test('a round recorded before auditing exports as not recorded, never as an empty clean audit', () => {
+    const { repos, run } = seed()
+    const dump = buildJsonDump(run.id, repos)!
+    expect(dump.rounds.map((r) => r.audit)).toEqual([
+      { status: 'not_recorded', frozen: null, records: [], late: [], digestMatches: null },
+      { status: 'not_recorded', frozen: null, records: [], late: [], digestMatches: null },
+    ])
+  })
 })

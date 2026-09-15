@@ -207,6 +207,8 @@ export interface ComposedRun {
   config: RunConfig
   sandbox: Sandbox
   provider: Provider
+  /** The agent image's toolchain identity for a docker run; recorded with the round's audit. */
+  toolchainId?: string | null
   runner: AgentRunner
   planFor: ((agentIds: readonly string[]) => Promise<void>) | null
   serverHandle: ServerHandle | null
@@ -662,6 +664,7 @@ export async function composeRun(
         placement: () => sandbox.placement(),
         serverHandle: server, shardServers,
         onShardServer,
+        toolchainId,
         sessionMap, sessionHook, warnings,
         capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
         cleanup: async () => {
