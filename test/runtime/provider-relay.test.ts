@@ -88,6 +88,26 @@ describe('RelayPolicy', () => {
     expect(p.authorize(chat())).toMatchObject({ ok: false, status: 429, error: 'this run used all 3 relay requests it was granted' })
   })
 
+  test('each run can carry its own upstream keys, and reaches only its own providers', () => {
+    const p = new RelayPolicy([], limits)
+    p.grant('run-a', {
+      token: 'tok-a', allowedModels: ['wandb/zai-org/GLM-5.2'], maxRequests: 5,
+      upstreams: [{ providerId: 'wandb', baseUrl: 'https://api.inference.wandb.ai/v1', authStyle: 'bearer', apiKey: 'KEY-A' }],
+    })
+    p.grant('run-b', {
+      token: 'tok-b', allowedModels: ['wandb/zai-org/GLM-5.2'], maxRequests: 5,
+      upstreams: [{ providerId: 'wandb', baseUrl: 'https://api.inference.wandb.ai/v1', authStyle: 'bearer', apiKey: 'KEY-B' }],
+    })
+    const as = (token: string) => p.authorize(chat({ headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } }))
+    expect(as('tok-a')).toMatchObject({ ok: true, runId: 'run-a', headers: { authorization: 'Bearer KEY-A' } })
+    expect(as('tok-b')).toMatchObject({ ok: true, runId: 'run-b', headers: { authorization: 'Bearer KEY-B' } })
+    // run-b holds no google upstream, so a google path is not an endpoint for it at all.
+    expect(p.authorize({
+      method: 'POST', path: '/google/models/gemini-3.1-flash:generateContent',
+      headers: { 'x-goog-api-key': 'tok-b', 'content-type': 'application/json' }, body: json({}),
+    })).toMatchObject({ ok: false })
+  })
+
   test('a token is scoped to its own run', () => {
     const p = policy()
     p.grant('run-2', { token: 'tok-2', allowedModels: ['wandb/other/model'], maxRequests: 5 })

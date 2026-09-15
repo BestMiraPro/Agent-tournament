@@ -19,6 +19,11 @@ export const GATEWAY_RELAY_PORT = 8787
 
 export const GATEWAY_ALIAS = 'gateway'
 
+/** A gateway's ceilings, charged to its run's capacity reservation on top of its worker's. */
+export const GATEWAY_MEMORY = '64m'
+export const GATEWAY_MEMORY_BYTES = 64 * 1024 ** 2
+export const GATEWAY_CPUS = 0.25
+
 const SAFE_RUN_ID = /^[A-Za-z0-9._-]+$/
 
 export function gatewayName(runId: string, shardIndex: number): string {
@@ -43,7 +48,7 @@ export function buildGatewayRunArgs(spec: { runId: string; shardIndex: number; i
     'run', '-d', '--name', gatewayName(spec.runId, spec.shardIndex),
     '--label', NETWORK_OWNER_LABEL, '--label', `arena.run=${spec.runId}`,
     // Two TCP pipes need very little; the ceiling is charged to the run's capacity like any container.
-    '-m', '64m', '--memory-swap', '64m', '--cpus', '0.25', '--pids-limit', '64',
+    '-m', GATEWAY_MEMORY, '--memory-swap', GATEWAY_MEMORY, '--cpus', String(GATEWAY_CPUS), '--pids-limit', '64',
     '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only', '--user', '1000:1000',
     '-p', `127.0.0.1:0:${GATEWAY_API_PORT}`,
     spec.image, 'node', '-e', gatewayScript(spec.relayPort),

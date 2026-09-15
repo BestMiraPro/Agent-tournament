@@ -1,5 +1,6 @@
 import { vi } from 'vitest'
 import { CapacityLedger } from '../../src/runtime/docker/capacity.js'
+import { RelayPolicy } from '../../src/runtime/provider-relay.js'
 import type { ImageInventory } from '../../src/runtime/tool-manifest.js'
 
 /** A toolchain identity and a valid image inventory, so docker compositions never ask a real daemon. */
@@ -18,4 +19,13 @@ export const toolchainSeams = () => ({
   readImageInventory: vi.fn(async () => stubInventory()),
   // A private ledger, so no test leaves capacity reserved in the process-wide one.
   ledger: new CapacityLedger(),
+  // The protected runtime's host side, faked: no real credentials file, catalogue, relay or networks.
+  hostModelsFile: vi.fn(() => '/host/models.json'),
+  readTextFile: vi.fn(async (path: string) =>
+    path.endsWith('models.json')
+      ? JSON.stringify({ w: { api: 'https://api.w.example/v1', npm: '@ai-sdk/openai-compatible', models: {} } })
+      : JSON.stringify({ w: { type: 'api', key: 'FAKE-W-KEY' } })),
+  relay: vi.fn(async () => ({ policy: new RelayPolicy(), port: 45678 })),
+  createShardNetworkFn: vi.fn(async (runId: string, shardIndex: number) => `arena-${runId}-net-${shardIndex}`),
+  removeShardNetworkFn: vi.fn(async (_name: string, _onWarning?: (message: string) => void) => true),
 })

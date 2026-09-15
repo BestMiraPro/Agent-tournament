@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { DockerSandbox } from '../../../src/runtime/docker/sandbox.js'
 import { workspaceIsolated } from '../../../src/engine/capture.js'
 
@@ -199,9 +199,21 @@ describe('DockerSandbox', () => {
     })
     await sb.planFor(['a1', 'a2'])
 
+    // Count callers that join the in-flight start. Each provision seeds its workspace (async I/O)
+    // first, so under load the second one could arrive after the failure and legitimately retry;
+    // failing the start only once it has joined keeps the test about the shared failure.
+    const pending = (sb as unknown as { pendingStarts: Map<number, Promise<unknown>> }).pendingStarts
+    const get = pending.get.bind(pending)
+    let joined = 0
+    pending.get = (key: number) => {
+      const value = get(key)
+      if (value) joined++
+      return value
+    }
     const p1 = sb.provision('a1', {})
     const p2 = sb.provision('a2', {})
     await started
+    await vi.waitFor(() => expect(joined).toBe(1))
     rejectFirst(new Error('start failed'))
     const failed = await Promise.allSettled([p1, p2])
 

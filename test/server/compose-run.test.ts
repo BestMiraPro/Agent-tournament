@@ -1,9 +1,19 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { composeRun, pathKind, runConfigFor, type ComposeSeams } from '../../src/server/compose-run.js'
 import { CapacityLedger } from '../../src/runtime/docker/capacity.js'
+import { RelayPolicy } from '../../src/runtime/provider-relay.js'
+
+// Fake keys and a trimmed catalogue: fixtures, not anyone's credentials.
+const catalogJson = JSON.stringify({
+  w: { api: 'https://api.w.example/v1', npm: '@ai-sdk/openai-compatible', models: {} },
+  wandb: { api: 'https://api.inference.wandb.ai/v1', npm: '@ai-sdk/openai-compatible', models: {} },
+  opencode: { api: 'https://opencode.ai/zen/v1', npm: '@ai-sdk/openai-compatible', models: {} },
+  bedrock: { api: null, npm: '@ai-sdk/amazon-bedrock', models: {} },
+})
+const authJson = JSON.stringify({ w: { type: 'api', key: 'FAKE-W-KEY' }, wandb: { type: 'api', key: 'FAKE-WANDB-KEY' } })
 import { parseRunSpec } from '../../src/server/run-spec.js'
 
 const TOOLCHAIN = 'abc123def4567890'
@@ -27,6 +37,12 @@ const mockSeams = () => ({
   inspectPath: vi.fn((): 'file' | 'directory' | 'missing' => 'file'),
   // Never the process ledger: a test that skips cleanup must not leave capacity reserved for the next.
   ledger: new CapacityLedger(),
+  // The protected runtime's host side: never the real credentials file, catalogue, relay or Docker networks.
+  hostModelsFile: vi.fn(() => '/host/models.json'),
+  readTextFile: vi.fn(async (path: string) => (path.endsWith('models.json') ? catalogJson : authJson)),
+  relay: vi.fn(async () => ({ policy: new RelayPolicy(), port: 45678 })),
+  createShardNetworkFn: vi.fn(async (runId: string, shardIndex: number) => `arena-${runId}-net-${shardIndex}`),
+  removeShardNetworkFn: vi.fn(async (_name: string, _onWarning?: (message: string) => void) => true),
 })
 
 describe('composeRun', () => {
@@ -110,6 +126,152 @@ describe('composeRun', () => {
     }
   })
 
+  describe('protected runtime', () => {
+    const GiB = 1024 ** 3
+    const host = { totalMemoryBytes: 16 * GiB, usedMemoryBytes: 0, cpus: 16, containers: [] }
+    const spec = (root: string, extra: Record<string, unknown> = {}) => parseRunSpec({
+      name: 'p', goal: 'g', sandbox: 'docker',
+      roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 2, temperature: 0.7 }],
+      workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 2, ...extra,
+    })
+    const started = () => vi.fn(async (s: { shardIndex: number; runId: string }) => ({
+      name: `arena-${s.runId}-${s.shardIndex}`, baseUrl: `http://127.0.0.1:${46000 + s.shardIndex}`, shardIndex: s.shardIndex,
+      gatewayName: `arena-${s.runId}-gw-${s.shardIndex}`, network: `arena-${s.runId}-net-${s.shardIndex}`,
+    }))
+
+    test('grants the relay a run token for roster models with this run\'s keys, and gives workers no credential', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-protected-'))
+      const policy = new RelayPolicy()
+      const grant = vi.spyOn(policy, 'grant')
+      const revoke = vi.spyOn(policy, 'revoke')
+      const startShardContainerFn = started()
+      const seams = {
+        ...mockSeams(),
+        startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+        readCapacity: vi.fn(async () => host),
+        relay: vi.fn(async () => ({ policy, port: 45678 })),
+        startShardContainerFn,
+        removeContainerFn: vi.fn(async (_name: string) => {}),
+      }
+      try {
+        const c = await composeRun(spec(root), seams as never, { runIdHolder: { value: 'run-9' } })
+        expect(grant).toHaveBeenCalledTimes(1)
+        const [grantId, g] = grant.mock.calls[0]!
+        expect(g.allowedModels).toEqual(['wandb/zai-org/GLM-5.2'])
+        expect(g.upstreams).toEqual([{ providerId: 'wandb', baseUrl: 'https://api.inference.wandb.ai/v1', authStyle: 'bearer', apiKey: 'FAKE-WANDB-KEY' }])
+
+        await c.planFor!(['a1', 'a2'])
+        await Promise.all([c.sandbox.provision('a1', {}), c.sandbox.provision('a2', {})])
+        for (const [s] of startShardContainerFn.mock.calls as unknown as [{ shardIndex: number; authFile: string | null; modelsFile: string | null; protectedRuntime: { network: string; configDir: string; relayPort: number } }][]) {
+          expect(s.authFile).toBeNull()
+          expect(s.modelsFile).toBeNull()
+          expect(s.protectedRuntime).toEqual({
+            network: `arena-run-9-net-${s.shardIndex}`,
+            configDir: join(root, '.arena-runtime', 'run-9', `shard-${s.shardIndex}-config`),
+            relayPort: 45678,
+          })
+          const opencodeJson = readFileSync(join(s.protectedRuntime.configDir, 'opencode.json'), 'utf8')
+          expect(JSON.parse(opencodeJson).provider).toEqual({ wandb: { options: { baseURL: 'http://gateway:8787/wandb', apiKey: g.token } } })
+          expect(readFileSync(join(s.protectedRuntime.configDir, 'models.json'), 'utf8')).toBe(catalogJson)
+          expect(readdirSync(s.protectedRuntime.configDir).sort()).toEqual(['models.json', 'opencode.json'])
+          expect(opencodeJson).not.toContain('FAKE-')
+        }
+
+        await c.cleanup()
+        expect(revoke).toHaveBeenCalledWith(grantId)
+        expect(revoke.mock.invocationCallOrder[0]).toBeLessThan(seams.removeContainerFn.mock.invocationCallOrder[0]!)
+        expect(seams.removeContainerFn.mock.calls.map((call) => call[0]).sort()).toEqual(['arena-run-9-0', 'arena-run-9-1', 'arena-run-9-gw-0', 'arena-run-9-gw-1'])
+        expect(seams.removeShardNetworkFn.mock.calls.map((call) => call[0]).sort()).toEqual(['arena-run-9-net-0', 'arena-run-9-net-1'])
+        expect(existsSync(join(root, '.arena-runtime', 'run-9'))).toBe(false)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('a roster provider the relay cannot carry refuses the run before anything starts, and says how to proceed', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-protected-'))
+      const seams = { ...mockSeams(), readCapacity: vi.fn(async () => host) }
+      try {
+        await expect(composeRun(spec(root, { roster: [{ modelId: 'bedrock/claude', count: 1, temperature: 0.7 }], maxContainers: 1 }), seams as never))
+          .rejects.toThrow(/relay, which cannot carry: bedrock uses an SDK the relay cannot carry\..*choose shared isolation/)
+        expect(seams.startHostServer).not.toHaveBeenCalled()
+        expect(seams.readCapacity).not.toHaveBeenCalled()
+        expect(seams.relay).not.toHaveBeenCalled()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('without a host model catalogue a protected run is refused rather than started unpinned', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-protected-'))
+      const seams = { ...mockSeams(), hostModelsFile: vi.fn(() => null) }
+      try {
+        await expect(composeRun(spec(root), seams as never)).rejects.toThrow(/Protected isolation needs the host model catalogue/)
+        expect(seams.startHostServer).not.toHaveBeenCalled()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('each shard\'s gateway counts against the run\'s capacity', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-protected-'))
+      const ledger = new CapacityLedger()
+      const seams = {
+        ...mockSeams(), ledger, readCapacity: vi.fn(async () => host),
+        startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+      }
+      try {
+        const c = await composeRun(spec(root), seams as never)
+        expect(ledger.active()).toEqual([{ id: expect.any(String), containers: 2, memoryBytes: GiB + 64 * 1024 ** 2, cpus: 1.25 }])
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('a failure after the grant revokes it', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-protected-'))
+      const policy = new RelayPolicy()
+      const revoke = vi.spyOn(policy, 'revoke')
+      const seams = {
+        ...mockSeams(),
+        readCapacity: vi.fn(async () => host),
+        startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+        relay: vi.fn(async () => ({ policy, port: 45678 })),
+        ensureImageFn: vi.fn(async () => { throw new Error('no docker daemon') }),
+      }
+      try {
+        await expect(composeRun(spec(root), seams as never)).rejects.toThrow(/no docker daemon/)
+        expect(revoke).toHaveBeenCalledTimes(1)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('shared isolation keeps the direct path: no relay, network or gateway', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-protected-'))
+      const startShardContainerFn = vi.fn(async (s: { shardIndex: number }) => ({ name: `arena-x-${s.shardIndex}`, baseUrl: 'http://127.0.0.1:47000', shardIndex: s.shardIndex }))
+      const seams = {
+        ...mockSeams(), readCapacity: vi.fn(async () => host), startShardContainerFn, removeContainerFn: vi.fn(async () => {}),
+        startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+      }
+      try {
+        const c = await composeRun(spec(root, { isolation: 'shared' }), seams as never)
+        await c.planFor!(['a1'])
+        await c.sandbox.provision('a1', {})
+        const [s] = startShardContainerFn.mock.calls[0] as unknown as [{ authFile: string | null; modelsFile: string | null; protectedRuntime?: unknown }]
+        expect(s.authFile).toBe(join(root, 'auth.json'))
+        expect(s.modelsFile).toBe('/host/models.json')
+        expect(s.protectedRuntime).toBeUndefined()
+        expect(seams.relay).not.toHaveBeenCalled()
+        expect(seams.createShardNetworkFn).not.toHaveBeenCalled()
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  })
+
   describe('capacity reservations and resource failures', () => {
     const GiB = 1024 ** 3
     const host = { totalMemoryBytes: 5 * GiB, usedMemoryBytes: 0, cpus: 16, containers: [] }
@@ -165,7 +327,8 @@ describe('composeRun', () => {
       try {
         const first = await composeRun(spec(r1, 2), seamsWith(ledger) as never)
         const failing = seamsWith(ledger, { validateModels: vi.fn(async () => { throw new Error('judge unusable') }) })
-        await expect(composeRun(spec(r2, 2), failing as never)).rejects.toThrow(/judge unusable/)
+        // One agent: it must be admitted, so the failure under test is the later one.
+        await expect(composeRun(spec(r2, 1), failing as never)).rejects.toThrow(/judge unusable/)
         expect(ledger.active()).toHaveLength(1)
         await first.cleanup()
         await first.cleanup()
@@ -599,7 +762,11 @@ describe('composeRun', () => {
       }))
       try {
         const { c, h1, h2, startShardContainerFn } = await compose(root, shardClient)
-        expect(startShardContainerFn.mock.calls[0]![0]).toMatchObject({ modelsFile: '/host/opencode/models.json' })
+        // A protected shard pins the host catalogue by copying it into its own config folder, never by
+        // mounting the host file (the shared-isolation test checks that path still mounts it).
+        const [firstShard] = startShardContainerFn.mock.calls[0]! as unknown as [{ modelsFile: string | null; protectedRuntime: { configDir: string } }]
+        expect(firstShard.modelsFile).toBeNull()
+        expect(readFileSync(join(firstShard.protectedRuntime.configDir, 'models.json'), 'utf8')).toBe(catalogJson)
         // Once per actual shard start, not once per agent.
         expect(shardClient.providers).toHaveBeenCalledTimes(startShardContainerFn.mock.calls.length)
 

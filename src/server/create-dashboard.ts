@@ -12,7 +12,7 @@ import { Reflector } from '../evolution/reflect.js'
 import { MockAgentRunner } from '../runtime/agent-runner.js'
 import { MockProvider } from '../runtime/mock-provider.js'
 import { MockSandbox } from '../runtime/mock-sandbox.js'
-import { sweepOrphanContainers } from '../runtime/docker/sweep.js'
+import { sweepOrphanContainers, sweepOrphanNetworks } from '../runtime/docker/sweep.js'
 import { processLedger, readHostCapacity } from '../runtime/docker/capacity.js'
 import { buildApi } from './api.js'
 import { ActivityCache } from './activity.js'
@@ -154,7 +154,11 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
         runId,
       ]
       void cfg
-      return sweepOrphanContainers({ activeRunIds, onWarning })
+      // Containers first: Docker keeps a network while anything is still attached to it.
+      return sweepOrphanContainers({ activeRunIds, onWarning }).then(async (removed) => {
+        await sweepOrphanNetworks({ activeRunIds, onWarning })
+        return removed
+      })
     },
   })
 

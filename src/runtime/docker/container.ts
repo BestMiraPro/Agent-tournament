@@ -1,5 +1,15 @@
-import { buildRunArgs, docker, parsePortMapping, removeContainer } from './cli.js'
+import { buildProtectedRunArgs, buildRunArgs, docker, parsePortMapping, removeContainer } from './cli.js'
 import type { DockerFn } from './cli.js'
+import { buildGatewayRunArgs, GATEWAY_ALIAS, GATEWAY_API_PORT, gatewayName } from './gateway.js'
+
+/** Where a protected shard's worker gets its network, relay config and relay route. */
+export interface ProtectedRuntimeSpec {
+  network: string
+  /** Host folder with the relay `opencode.json` and a copy of the model catalogue. */
+  configDir: string
+  /** The host relay's loopback port, which the shard gateway forwards to. */
+  relayPort: number
+}
 
 export interface ShardContainerSpec {
   runId: string
@@ -16,12 +26,17 @@ export interface ShardContainerSpec {
   /** Host models.dev catalogue pinned read-only in the container, when the host has one. */
   modelsFile?: string | null
   healthTimeoutMs?: number
+  /** Present for protected isolation: no credentials, no egress, served through a gateway. */
+  protectedRuntime?: ProtectedRuntimeSpec
 }
 
 export interface ShardContainer {
   name: string
   baseUrl: string
   shardIndex: number
+  /** Protected shards: the gateway container that must be removed with the worker. */
+  gatewayName?: string
+  network?: string
 }
 
 /** Stable name so a restarted orchestrator can find and adopt existing containers. */
@@ -66,6 +81,7 @@ export async function startShardContainer(
   healthProbe?: (baseUrl: string) => Promise<boolean>,
   onWarning?: (message: string) => void,
 ): Promise<ShardContainer> {
+  if (spec.protectedRuntime) return startProtectedShard(spec, spec.protectedRuntime, run, healthProbe, onWarning)
   const name = containerName(spec.runId, spec.shardIndex)
 
   const state = await run(['inspect', '-f', '{{.State.Running}}', name], 20_000)
@@ -126,6 +142,73 @@ export async function startShardContainer(
     // but a cleanup that fails is a leaked container, so it is reported rather than
     // swallowed. removeContainer never throws.
     await removeContainer(name, onWarning, run)
+    throw e
+  }
+}
+
+/**
+ * A protected shard: the worker on its internal network, and the gateway that is its only route
+ * in (the app's API calls) and out (model calls to the host relay).
+ *
+ * Never adopts an existing container: one wearing these names was started with another start's
+ * relay token and config. From the first `docker run` on, every container this call created is
+ * removed on any failure, as the unprotected path does.
+ */
+async function startProtectedShard(
+  spec: ShardContainerSpec,
+  runtime: ProtectedRuntimeSpec,
+  run: DockerFn,
+  healthProbe: ((baseUrl: string) => Promise<boolean>) | undefined,
+  onWarning: ((message: string) => void) | undefined,
+): Promise<ShardContainer> {
+  const name = containerName(spec.runId, spec.shardIndex)
+  const gateway = gatewayName(spec.runId, spec.shardIndex)
+  if (!spec.toolsDir) throw new Error(`Protected shard ${name} needs its tool manifest directory`)
+  await run(['rm', '-f', name], 30_000)
+  await run(['rm', '-f', gateway], 30_000)
+
+  const worker = await run(
+    buildProtectedRunArgs({
+      name,
+      image: spec.image,
+      hostDir: spec.hostDir,
+      memory: spec.memory,
+      cpus: spec.cpus,
+      network: runtime.network,
+      configDir: runtime.configDir,
+      toolsDir: spec.toolsDir,
+      contextDir: spec.contextDir ?? null,
+    }),
+    120_000,
+  )
+  if (worker.code !== 0) throw new Error(`Failed to start ${name}: ${(worker.stderr || worker.stdout).slice(-400)}`)
+
+  let gatewayStarted = false
+  try {
+    const started = await run(
+      buildGatewayRunArgs({ runId: spec.runId, shardIndex: spec.shardIndex, image: spec.image, relayPort: runtime.relayPort }),
+      120_000,
+    )
+    if (started.code !== 0) {
+      throw new Error(`Failed to start gateway ${gateway}: ${(started.stderr || started.stdout).trim().slice(-400)}`)
+    }
+    gatewayStarted = true
+    const joined = await run(['network', 'connect', '--alias', GATEWAY_ALIAS, runtime.network, gateway], 30_000)
+    if (joined.code !== 0) {
+      throw new Error(`Could not connect gateway ${gateway} to ${runtime.network}: ${(joined.stderr || joined.stdout).trim().slice(-300)}`)
+    }
+    const portOut = await run(['port', gateway, `${GATEWAY_API_PORT}/tcp`], 20_000)
+    const port = parsePortMapping(portOut.stdout)
+    if (port === null) throw new Error(`Could not discover a published port for ${gateway}`)
+    const baseUrl = `http://127.0.0.1:${port}`
+    if (healthProbe) {
+      const healthy = await waitForHealth(() => healthProbe(baseUrl), spec.healthTimeoutMs ?? 60_000)
+      if (!healthy) throw new Error(`Container ${name} started but never became healthy through its gateway at ${baseUrl}`)
+    }
+    return { name, baseUrl, shardIndex: spec.shardIndex, gatewayName: gateway, network: runtime.network }
+  } catch (e) {
+    await removeContainer(name, onWarning, run)
+    if (gatewayStarted) await removeContainer(gateway, onWarning, run)
     throw e
   }
 }

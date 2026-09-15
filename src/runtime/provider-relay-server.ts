@@ -60,6 +60,8 @@ export async function startProviderRelay(opts: {
   port?: number
   upstream?: UpstreamCall
   onRequest?: (record: RelayRecord) => void
+  /** Do not keep the process alive for the relay alone. */
+  unref?: boolean
 }): Promise<ProviderRelay> {
   const host = opts.host ?? '127.0.0.1'
   const upstream = opts.upstream ?? httpsUpstream
@@ -157,6 +159,7 @@ export async function startProviderRelay(opts: {
     server.once('error', reject)
     server.listen(opts.port ?? 0, host, () => resolve())
   })
+  if (opts.unref) server.unref()
   return {
     host,
     port: (server.address() as AddressInfo).port,

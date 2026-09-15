@@ -1,5 +1,56 @@
 import { describe, expect, test, vi } from 'vitest'
-import { parseArenaName, sweepOrphanContainers } from '../../../src/runtime/docker/sweep.js'
+import { parseArenaName, parseGatewayName, sweepOrphanContainers, sweepOrphanNetworks } from '../../../src/runtime/docker/sweep.js'
+
+describe('parseGatewayName', () => {
+  test('parses gateway names, including dashed run ids, and never a worker name', () => {
+    expect(parseGatewayName('arena-run1-gw-0')).toEqual({ runId: 'run1', shardIndex: 0 })
+    expect(parseGatewayName('arena-2026-08-25-abc-gw-3')).toEqual({ runId: '2026-08-25-abc', shardIndex: 3 })
+    expect(parseGatewayName('arena-run1-0')).toBeNull()
+    expect(parseGatewayName('arena-run1-gw-x')).toBeNull()
+    expect(parseGatewayName('arena--gw-0')).toBeNull()
+  })
+})
+
+describe('sweepOrphanNetworks', () => {
+  const fakeNetworks = (rows: string[], rmCode: (name: string) => number = () => 0) => {
+    const calls: string[][] = []
+    const run = vi.fn(async (args: string[]) => {
+      calls.push(args)
+      if (args[1] === 'ls') return { stdout: rows.join('\n') + '\n', stderr: '', code: 0 }
+      if (args[1] === 'rm') {
+        const code = rmCode(args[args.length - 1]!)
+        return { stdout: '', stderr: code === 0 ? '' : 'error while removing network: network has active endpoints', code }
+      }
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    return { run, calls }
+  }
+
+  test('removes only owned networks of runs that are not active', async () => {
+    const d = fakeNetworks(['arena-live-net-0|live', 'arena-dead-net-0|dead', 'arena-dead-net-1|dead'])
+    expect(await sweepOrphanNetworks({ activeRunIds: ['live'] }, d.run)).toEqual(['arena-dead-net-0', 'arena-dead-net-1'])
+    expect(d.calls[0]).toEqual(['network', 'ls', '--filter', 'label=arena.owner=agent-tournament', '--format', '{{.Name}}|{{.Label "arena.run"}}'])
+  })
+
+  test('never removes a network without a run label, or one whose name does not match its label', async () => {
+    const d = fakeNetworks(['bridge|', 'arena-x-net-0|', 'arena-a-net-0|b', 'someones-net|c', 'arena-c-net-0|c'])
+    expect(await sweepOrphanNetworks({}, d.run)).toEqual(['arena-c-net-0'])
+  })
+
+  test('a network still in use is reported and kept; the rest continue', async () => {
+    const d = fakeNetworks(['arena-a-net-0|a', 'arena-b-net-0|b'], (n) => (n === 'arena-a-net-0' ? 1 : 0))
+    const warnings: string[] = []
+    expect(await sweepOrphanNetworks({ onWarning: (m) => warnings.push(m) }, d.run)).toEqual(['arena-b-net-0'])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/arena-a-net-0/)
+  })
+
+  test('never throws when the daemon cannot be listed', async () => {
+    const warnings: string[] = []
+    await expect(sweepOrphanNetworks({ onWarning: (m) => warnings.push(m) }, vi.fn(async () => { throw new Error('spawn ENOENT') }))).resolves.toEqual([])
+    expect(warnings).toHaveLength(1)
+  })
+})
 
 /** Reuses the argv-recording fake-docker shape used across the docker tests. */
 const fakeDocker = (names: string[], rmCode: (name: string) => number = () => 0) => {
@@ -74,6 +125,15 @@ describe('sweepOrphanContainers', () => {
     const removed = await sweepOrphanContainers({ activeRunIds: ['live'] }, d.run)
     expect(removed).toEqual(['arena-dead-0'])
     expect(d.removeAttempts()).toEqual(['arena-dead-0'])
+  })
+
+  // A gateway name also ends in a number. Read as a worker, `arena-live-gw-0` belongs to a run
+  // called "live-gw", which is not active — so a sweep would have removed a live run's gateway.
+  test('never sweeps a live run\'s gateway, and sweeps a dead run\'s', async () => {
+    const d = fakeDocker(['arena-live-gw-0', 'arena-live-0', 'arena-dead-gw-1'])
+    const removed = await sweepOrphanContainers({ activeRunIds: ['live'] }, d.run)
+    expect(removed).toEqual(['arena-dead-gw-1'])
+    expect(d.removeAttempts()).toEqual(['arena-dead-gw-1'])
   })
 
   test('a run id that merely prefixes the live one is still swept', async () => {

@@ -26,6 +26,11 @@ export interface RelayGrant {
   /** Full model ids (`provider/model`) the run may call. */
   allowedModels: readonly string[]
   maxRequests: number
+  /**
+   * This run's own upstreams and keys. Runs can use different credentials files, so keys travel
+   * with the grant; without them the policy's shared upstreams apply.
+   */
+  upstreams?: readonly RelayUpstream[]
 }
 
 export interface RelayLimits {
@@ -85,6 +90,7 @@ interface GrantState {
   allowedModels: Set<string>
   maxRequests: number
   used: number
+  upstreams: Map<string, RelayUpstream> | null
 }
 
 const headerValue = (headers: RelayRequest['headers'], name: string): string | undefined => {
@@ -92,41 +98,66 @@ const headerValue = (headers: RelayRequest['headers'], name: string): string | u
   return Array.isArray(value) ? value[0] : value
 }
 
+const TOKEN_HEADERS: { style: RelayAuthStyle; read: (headers: RelayRequest['headers']) => string | null }[] = [
+  { style: 'bearer', read: (h) => /^Bearer (\S+)$/.exec(headerValue(h, 'authorization') ?? '')?.[1] ?? null },
+  { style: 'x-api-key', read: (h) => headerValue(h, 'x-api-key') ?? null },
+  { style: 'x-goog-api-key', read: (h) => headerValue(h, 'x-goog-api-key') ?? null },
+]
+
 export class RelayPolicy {
-  private upstreams = new Map<string, RelayUpstream>()
+  private shared = new Map<string, RelayUpstream>()
   private byToken = new Map<string, GrantState>()
 
-  constructor(upstreams: readonly RelayUpstream[], public readonly limits: RelayLimits = DEFAULT_RELAY_LIMITS) {
-    for (const upstream of upstreams) this.upstreams.set(upstream.providerId, upstream)
+  constructor(upstreams: readonly RelayUpstream[] = [], public readonly limits: RelayLimits = DEFAULT_RELAY_LIMITS) {
+    for (const upstream of upstreams) this.shared.set(upstream.providerId, upstream)
   }
 
   /** Issues or replaces a run's grant; its previous token stops working. */
   grant(runId: string, grant: RelayGrant): void {
-    this.revoke(runId)
+    this.dropGrants(runId)
     this.byToken.set(grant.token, {
       runId,
       token: grant.token,
       allowedModels: new Set(grant.allowedModels),
       maxRequests: grant.maxRequests,
       used: 0,
+      upstreams: grant.upstreams ? new Map(grant.upstreams.map((u) => [u.providerId, u])) : null,
     })
   }
 
   /** Revoked first when a run stops: later requests with its token are unauthenticated. */
   revoke(runId: string): void {
+    this.dropGrants(runId)
+  }
+
+  private dropGrants(runId: string): void {
     for (const [token, state] of this.byToken) if (state.runId === runId) this.byToken.delete(token)
   }
 
   authorize(req: RelayRequest): RelayDecision {
     if (req.method !== 'POST') return { ok: false, status: 405, error: 'only POST model calls are relayed' }
 
-    const route = this.route(req.path)
-    if (!route) return { ok: false, status: 404, error: 'not a relayed model endpoint' }
-    const { upstream, rest, query, pathModel } = route
+    const target = parsePath(req.path)
+    if (!target) return { ok: false, status: 404, error: 'not a relayed model endpoint' }
 
-    const token = this.tokenFrom(req.headers, upstream.authStyle)
-    const grant = token ? this.byToken.get(token) : undefined
+    let grant: GrantState | undefined
+    let presentedStyle: RelayAuthStyle | undefined
+    for (const candidate of TOKEN_HEADERS) {
+      const token = candidate.read(req.headers)
+      const found = token ? this.byToken.get(token) : undefined
+      if (found) {
+        grant = found
+        presentedStyle = candidate.style
+        break
+      }
+    }
     if (!grant) return { ok: false, status: 401, error: 'missing or unknown relay token' }
+
+    const upstream = (grant.upstreams ?? this.shared).get(target.providerId)
+    const route = upstream ? routeFor(upstream, target.rest, target.query) : null
+    if (!upstream || !route) return { ok: false, status: 404, runId: grant.runId, error: 'not a relayed model endpoint' }
+    // The token must arrive where that provider's SDK puts its key, as OpenCode sends it.
+    if (presentedStyle !== upstream.authStyle) return { ok: false, status: 401, error: 'missing or unknown relay token' }
 
     if (req.body.length > this.limits.maxRequestBytes) {
       return { ok: false, status: 413, runId: grant.runId, error: `request body exceeds ${this.limits.maxRequestBytes} bytes` }
@@ -138,7 +169,7 @@ export class RelayPolicy {
       return { ok: false, status: 400, runId: grant.runId, error: 'request body is not JSON' }
     }
     const bodyModel = parsed && typeof parsed === 'object' ? (parsed as { model?: unknown }).model : undefined
-    const model = pathModel ?? (typeof bodyModel === 'string' && bodyModel.length > 0 ? bodyModel : null)
+    const model = route.pathModel ?? (typeof bodyModel === 'string' && bodyModel.length > 0 ? bodyModel : null)
     if (!model) return { ok: false, status: 400, runId: grant.runId, error: 'request names no model' }
     const modelId = `${upstream.providerId}/${model}`
     if (!grant.allowedModels.has(modelId)) {
@@ -161,42 +192,32 @@ export class RelayPolicy {
       ok: true,
       runId: grant.runId,
       modelId,
-      url: `${upstream.baseUrl}/${rest}${query ? `?${query}` : ''}`,
+      url: `${upstream.baseUrl}/${target.rest}${target.query ? `?${target.query}` : ''}`,
       headers,
       body: req.body,
     }
   }
+}
 
-  private route(raw: string): { upstream: RelayUpstream; rest: string; query: string; pathModel: string | null } | null {
-    const q = raw.indexOf('?')
-    const path = q === -1 ? raw : raw.slice(0, q)
-    const query = q === -1 ? '' : raw.slice(q + 1)
-    // Encoded or doubled separators and dot segments are how a path escapes its prefix.
-    if (!path.startsWith('/') || /%|\\|\/\/|(^|\/)\.\.?(\/|$)/.test(path)) return null
-    const match = /^\/([a-z0-9][a-z0-9-]*)\/(.+)$/.exec(path)
-    if (!match) return null
-    const upstream = this.upstreams.get(match[1]!)
-    if (!upstream) return null
-    const rest = match[2]!
-    switch (upstream.authStyle) {
-      case 'bearer':
-        return !query && ['chat/completions', 'responses', 'completions'].includes(rest)
-          ? { upstream, rest, query, pathModel: null }
-          : null
-      case 'x-api-key':
-        return !query && rest === 'messages' ? { upstream, rest, query, pathModel: null } : null
-      case 'x-goog-api-key': {
-        const google = /^models\/([A-Za-z0-9._-]+):(generateContent|streamGenerateContent)$/.exec(rest)
-        return google && (query === '' || query === 'alt=sse') ? { upstream, rest, query, pathModel: google[1]! } : null
-      }
-    }
-  }
+function parsePath(raw: string): { providerId: string; rest: string; query: string } | null {
+  const q = raw.indexOf('?')
+  const path = q === -1 ? raw : raw.slice(0, q)
+  const query = q === -1 ? '' : raw.slice(q + 1)
+  // Encoded or doubled separators and dot segments are how a path escapes its prefix.
+  if (!path.startsWith('/') || /%|\\|\/\/|(^|\/)\.\.?(\/|$)/.test(path)) return null
+  const match = /^\/([a-z0-9][a-z0-9-]*)\/(.+)$/.exec(path)
+  return match ? { providerId: match[1]!, rest: match[2]!, query } : null
+}
 
-  private tokenFrom(headers: RelayRequest['headers'], style: RelayAuthStyle): string | null {
-    if (style === 'bearer') {
-      const match = /^Bearer (\S+)$/.exec(headerValue(headers, 'authorization') ?? '')
-      return match ? match[1]! : null
+function routeFor(upstream: RelayUpstream, rest: string, query: string): { pathModel: string | null } | null {
+  switch (upstream.authStyle) {
+    case 'bearer':
+      return !query && ['chat/completions', 'responses', 'completions'].includes(rest) ? { pathModel: null } : null
+    case 'x-api-key':
+      return !query && rest === 'messages' ? { pathModel: null } : null
+    case 'x-goog-api-key': {
+      const google = /^models\/([A-Za-z0-9._-]+):(generateContent|streamGenerateContent)$/.exec(rest)
+      return google && (query === '' || query === 'alt=sse') ? { pathModel: google[1]! } : null
     }
-    return headerValue(headers, style) ?? null
   }
 }

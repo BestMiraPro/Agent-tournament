@@ -291,7 +291,13 @@ export async function assertHostCapacity(
   config: RunConfig,
   read: () => Promise<HostCapacity> = readHostCapacity,
   onWarning: (message: string) => void = (m) => console.warn(m),
-  opts: { ledger?: CapacityLedger; reservationId?: string } = {},
+  opts: {
+    ledger?: CapacityLedger
+    reservationId?: string
+    /** Per-container ceilings of trusted companions (a protected shard's gateway), added to each container's. */
+    extraMemoryBytes?: number
+    extraCpus?: number
+  } = {},
 ): Promise<void> {
   let host: HostCapacity
   try {
@@ -319,7 +325,11 @@ export async function assertHostCapacity(
   const verdict = opts.ledger && opts.reservationId
     ? opts.ledger.admit(
         opts.reservationId,
-        { containers, memoryBytes: parseMemoryLimit(config.containerMemory), cpus: config.containerCpus },
+        {
+          containers,
+          memoryBytes: parseMemoryLimit(config.containerMemory) + (opts.extraMemoryBytes ?? 0),
+          cpus: config.containerCpus + (opts.extraCpus ?? 0),
+        },
         host,
       )
     : planCapacity(

@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, statSync } from 'node:fs'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
@@ -28,7 +28,18 @@ import { attachServer, startServer, type ServerHandle } from '../runtime/opencod
 import { assertHostCapacity, makeClientResolver, sweepBeforeRun, validateRosterModels } from '../cli.js'
 import { ensureImage, readImageInventory } from '../runtime/docker/image.js'
 import { processLedger, readHostCapacity, type CapacityLedger } from '../runtime/docker/capacity.js'
-import { containerName, inspectContainerState, startShardContainer } from '../runtime/docker/container.js'
+import {
+  containerName,
+  inspectContainerState,
+  startShardContainer,
+  type ProtectedRuntimeSpec,
+} from '../runtime/docker/container.js'
+import { GATEWAY_ALIAS, GATEWAY_CPUS, GATEWAY_MEMORY_BYTES, GATEWAY_RELAY_PORT } from '../runtime/docker/gateway.js'
+import { createShardNetwork, removeShardNetwork } from '../runtime/docker/network.js'
+import { relayProviderConfig } from '../runtime/opencode/relay-config.js'
+import type { RelayPolicy, RelayUpstream } from '../runtime/provider-relay.js'
+import { relayUpstreamsFromAuth, type CatalogProvider } from '../runtime/relay-credentials.js'
+import { processRelay } from '../runtime/relay-process.js'
 import type { Placement } from '../runtime/docker/shard.js'
 import {
   agentImageTag,
@@ -73,6 +84,12 @@ export interface ComposeSeams {
   ledger: CapacityLedger
   /** The daemon's account of a container's end, to tell an OOM kill from a model failure. */
   inspectContainer: (name: string) => Promise<{ oomKilled: boolean; running: boolean } | null>
+  /** The process's provider relay: its policy, and the loopback port shard gateways forward to. */
+  relay: () => Promise<{ policy: RelayPolicy; port: number }>
+  /** Reads a host file the protected runtime needs (credentials, catalogue) as text. */
+  readTextFile: (path: string) => Promise<string>
+  createShardNetworkFn: (runId: string, shardIndex: number) => Promise<string>
+  removeShardNetworkFn: (name: string, onWarning: (message: string) => void) => Promise<boolean>
 }
 
 export type PathKind = 'file' | 'directory' | 'missing'
@@ -110,6 +127,10 @@ export const defaultSeams: ComposeSeams = {
   inspectPath: pathKind,
   ledger: processLedger,
   inspectContainer: (name) => inspectContainerState(name),
+  relay: () => processRelay(),
+  readTextFile: (path) => readFile(path, 'utf8'),
+  createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
+  removeShardNetworkFn: (name, onWarning) => removeShardNetwork(name, onWarning),
 }
 
 /**
@@ -128,6 +149,57 @@ export const HOST_SERVER_ENV: Record<string, string> = { OPENCODE_ENABLE_EXA: '1
  * Shards mount only their own `shard-N` workspace and this read-only folder, never the rest.
  */
 export const RUNTIME_DIR = '.arena-runtime'
+
+/** A ceiling on relayed model calls per agent over a run. Token and spend budgets are enforced separately, from usage. */
+export const RELAY_REQUESTS_PER_AGENT = 2000
+
+interface RelayPlan {
+  upstreams: RelayUpstream[]
+  providers: string[]
+  catalogJson: string
+}
+
+/**
+ * What a protected run's relay needs, read on the host before anything starts: the catalogue to
+ * pin in workers, and a key for every roster provider. Every provider the relay cannot carry is
+ * named at once, and the run is refused — never a silent fall back to mounting credentials into
+ * workers. Errors carry file paths and error codes only, never file content.
+ */
+async function planRelay(spec: RunSpec, config: RunConfig, s: ComposeSeams): Promise<RelayPlan> {
+  const modelsFile = s.hostModelsFile()
+  if (!modelsFile) {
+    throw new Error(
+      'Protected isolation needs the host model catalogue (~/.cache/opencode/models.json) to pin in workers, and none was found. ' +
+        'Run OpenCode once on this machine so it caches the catalogue, or choose shared isolation.',
+    )
+  }
+  if (!spec.authFile) {
+    throw new Error('Protected isolation needs a credentials file for the relay. Set "Credentials file", or choose shared isolation.')
+  }
+  const read = async (path: string, what: string): Promise<string> => {
+    try {
+      return await s.readTextFile(path)
+    } catch (e) {
+      throw new Error(`Could not read the ${what} ${path} (${(e as NodeJS.ErrnoException).code ?? 'unreadable'}).`)
+    }
+  }
+  const catalogJson = await read(modelsFile, 'host model catalogue')
+  let catalog: Record<string, CatalogProvider>
+  try {
+    catalog = JSON.parse(catalogJson) as Record<string, CatalogProvider>
+  } catch {
+    throw new Error(`The host model catalogue ${modelsFile} is not valid JSON; let OpenCode refresh it, or choose shared isolation.`)
+  }
+  const providers = [...new Set(config.roster.map((r) => providerOf(r.modelId)))]
+  const { upstreams, unsupported } = relayUpstreamsFromAuth(await read(spec.authFile, 'credentials file'), catalog, providers)
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Protected isolation routes model calls through the relay, which cannot carry: ${unsupported.map((u) => u.reason).join('; ')}. ` +
+        'Fix those, or choose shared isolation, where workers use the credentials file directly.',
+    )
+  }
+  return { upstreams, providers, catalogJson }
+}
 
 export interface ShardServer {
   shardIndex: number
@@ -283,10 +355,14 @@ export async function composeRun(
     }
   }
   if (spec.contextDir) assertContextFolder(spec.contextDir, workspaceRoot, s.inspectPath)
+  // Host reads only, before capacity or any server: a protected run the relay cannot carry is refused now.
+  const relayPlan = spec.sandbox === 'docker' && config.isolation === 'protected' ? await planRelay(spec, config, s) : null
+  // Each protected shard also runs a gateway, and its ceilings are part of what the run reserves.
+  const companion = relayPlan ? { extraMemoryBytes: GATEWAY_MEMORY_BYTES, extraCpus: GATEWAY_CPUS } : {}
   // Per composition: the live run id does not exist until after this returns.
   const reservationId = randomUUID()
   if (spec.sandbox === 'docker') {
-    await assertHostCapacity(config, s.readCapacity as never, onWarning, { ledger: s.ledger, reservationId })
+    await assertHostCapacity(config, s.readCapacity as never, onWarning, { ledger: s.ledger, reservationId, ...companion })
   }
   let reservedContainers = Math.max(1, Math.min(config.maxContainers, config.populationSize))
   let graderDirectory: string
@@ -310,6 +386,8 @@ export async function composeRun(
     s.ledger.release(reservationId)
     throw e
   }
+  // Set once this run holds a relay grant; revoked first on every way out.
+  let revokeRelay = (): void => {}
   try {
     const provider = new OpenCodeProvider(server.client, workspaceRoot, {
       timeoutMs: config.agentTimeoutMs,
@@ -321,6 +399,21 @@ export async function composeRun(
     await s.validateModels(server.client, workspaceRoot, config, onWarning)
 
     if (spec.sandbox === 'docker') {
+      // Granted before any container work, so every failure below revokes it.
+      let relayToken: string | null = null
+      let relayPort = 0
+      if (relayPlan) {
+        const relay = await s.relay()
+        relayToken = randomBytes(24).toString('hex')
+        relayPort = relay.port
+        relay.policy.grant(reservationId, {
+          token: relayToken,
+          allowedModels: config.roster.map((r) => r.modelId),
+          maxRequests: RELAY_REQUESTS_PER_AGENT * Math.max(1, config.populationSize),
+          upstreams: relayPlan.upstreams,
+        })
+        revokeRelay = () => relay.policy.revoke(reservationId)
+      }
       // With a holder the caller is the dashboard: it sets the live run id right
       // after engine.createRun and sweeps with it before the first round (the CLI
       // ordering in cli.ts). Sweeping here with a pending id would exclude
@@ -379,6 +472,22 @@ export async function composeRun(
           }
         }
       }
+      // A protected shard's config: the relay provider settings with this run's token, and the host
+      // catalogue it pins. Beside the tool manifest, so it is removed with the run's runtime files.
+      const writeRelayConfig = async (runId: string, shardIndex: number): Promise<string> => {
+        const dir = join(runtimeRoot, runId, `shard-${shardIndex}-config`)
+        await mkdir(dir, { recursive: true })
+        await writeFile(join(dir, 'opencode.json'), relayProviderConfig({
+          providers: relayPlan!.providers,
+          relayBaseUrl: `http://${GATEWAY_ALIAS}:${GATEWAY_RELAY_PORT}`,
+          token: relayToken!,
+        }), 'utf8')
+        await writeFile(join(dir, 'models.json'), relayPlan!.catalogJson, 'utf8')
+        return dir
+      }
+      const shardNetworks = new Set<string>()
+      /** Worker container name → its gateway, removed together. */
+      const gateways = new Map<string, string>()
       const modelsFile = s.hostModelsFile()
       // Each shard's catalogue, read once per actual container start and keyed by its
       // endpoint, so a replacement container is checked afresh rather than trusted.
@@ -457,6 +566,12 @@ export async function composeRun(
           // id never reaches a container name for a live run.
           const runId = opts.runIdHolder ? opts.runIdHolder.value : `pending-${Date.now()}`
           const toolsDir = await writeToolManifest(runId, shardIndex)
+          let protectedRuntime: ProtectedRuntimeSpec | undefined
+          if (relayPlan) {
+            const network = await s.createShardNetworkFn(runId, shardIndex)
+            shardNetworks.add(network)
+            protectedRuntime = { network, configDir: await writeRelayConfig(runId, shardIndex), relayPort }
+          }
           const started = await s.startShardContainerFn(
             {
               runId,
@@ -466,22 +581,32 @@ export async function composeRun(
               toolsDir,
               memory: config.containerMemory,
               cpus: config.containerCpus,
-              authFile: spec.authFile,
+              // A protected worker mounts no credentials and no host catalogue: the relay holds the
+              // keys, and the shard's own config folder carries the catalogue copy.
+              authFile: relayPlan ? null : spec.authFile,
               contextDir: spec.contextDir,
-              modelsFile,
+              modelsFile: relayPlan ? null : modelsFile,
+              ...(protectedRuntime ? { protectedRuntime } : {}),
             },
             undefined,
             async (baseUrl) => s.createShardClient(baseUrl, 10_000).health(),
             onWarning,
           )
+          if (started.gatewayName) gateways.set(started.name, started.gatewayName)
           // Its usage now sits inside this run's reservation, not on top of it.
           s.ledger.attach(reservationId, started.name)
+          if (started.gatewayName) s.ledger.attach(reservationId, started.gatewayName)
           await checkShardCatalog(started.shardIndex, started.baseUrl)
           publishShardServer({ shardIndex: started.shardIndex, baseUrl: started.baseUrl })
           return started
         },
         stopContainer: async (name) => {
           await s.removeContainerFn(name, onWarning)
+          const gateway = gateways.get(name)
+          if (gateway) {
+            await s.removeContainerFn(gateway, onWarning)
+            gateways.delete(name)
+          }
         },
         onWarning,
       })
@@ -531,7 +656,7 @@ export async function composeRun(
               { ...config, populationSize: agentIds.length },
               s.readCapacity as never,
               onWarning,
-              { ledger: s.ledger, reservationId },
+              { ledger: s.ledger, reservationId, ...companion },
             )
             reservedContainers = needed
           }
@@ -543,8 +668,13 @@ export async function composeRun(
         sessionMap, sessionHook, warnings,
         capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
         cleanup: async () => {
+          // First: from here on this run's workers can make no further model calls.
+          revokeRelay()
           await (sandbox as DockerSandbox).disposeAll?.().catch(() => {}) as never
-          // After the containers that mounted them are gone.
+          // Networks and files only once the containers attached to or mounting them are gone.
+          for (const network of [...shardNetworks]) {
+            if (await s.removeShardNetworkFn(network, onWarning)) shardNetworks.delete(network)
+          }
           await removeToolManifests()
           await server.stop().catch(() => {})
           s.ledger.release(reservationId)
@@ -571,6 +701,7 @@ export async function composeRun(
   } catch (e) {
     // Anything that fails after the host server starts must not leak the
     // process: stop it, then propagate so the caller can refuse the run.
+    revokeRelay()
     await server.stop().catch(() => {})
     s.ledger.release(reservationId)
     throw e

@@ -1,5 +1,60 @@
 import { describe, expect, test, vi } from 'vitest'
+import { buildProtectedRunArgs } from '../../../src/runtime/docker/cli.js'
 import { containerName, inspectContainerState, startShardContainer, waitForHealth } from '../../../src/runtime/docker/container.js'
+import { buildGatewayRunArgs } from '../../../src/runtime/docker/gateway.js'
+
+describe('startShardContainer with the protected runtime', () => {
+  const spec = {
+    runId: 'run1', shardIndex: 0, image: 'agent-arena:tc-x', hostDir: '/host/shard-0', memory: '1g', cpus: 1,
+    authFile: '/host/auth.json', toolsDir: '/host/tools',
+    protectedRuntime: { network: 'arena-run1-net-0', configDir: '/host/config', relayPort: 41234 },
+  }
+  type Exec = { stdout: string; stderr: string; code: number }
+  const fakeDocker = (over: (args: string[]) => Exec | undefined = () => undefined) => {
+    const calls: string[][] = []
+    const fn = vi.fn(async (args: string[]) => {
+      calls.push(args)
+      return over(args) ?? (args[0] === 'port' ? { stdout: '127.0.0.1:52000', stderr: '', code: 0 } : { stdout: '', stderr: '', code: 0 })
+    })
+    return { fn, calls }
+  }
+
+  test('starts the worker on its shard network and the gateway beside it, and serves through the gateway', async () => {
+    const d = fakeDocker()
+    const r = await startShardContainer(spec, d.fn, async () => true)
+    expect(r).toEqual({ name: 'arena-run1-0', baseUrl: 'http://127.0.0.1:52000', shardIndex: 0, gatewayName: 'arena-run1-gw-0', network: 'arena-run1-net-0' })
+    const runs = d.calls.filter((c) => c[0] === 'run')
+    expect(runs[0]).toEqual(buildProtectedRunArgs({
+      name: 'arena-run1-0', image: 'agent-arena:tc-x', hostDir: '/host/shard-0', memory: '1g', cpus: 1,
+      network: 'arena-run1-net-0', configDir: '/host/config', toolsDir: '/host/tools', contextDir: null,
+    }))
+    expect(runs[1]).toEqual(buildGatewayRunArgs({ runId: 'run1', shardIndex: 0, image: 'agent-arena:tc-x', relayPort: 41234 }))
+    expect(d.calls).toContainEqual(['network', 'connect', '--alias', 'gateway', 'arena-run1-net-0', 'arena-run1-gw-0'])
+    expect(d.calls).toContainEqual(['port', 'arena-run1-gw-0', '14096/tcp'])
+    expect(d.calls.some((c) => c[0] === 'port' && c[1] === 'arena-run1-0')).toBe(false)
+    expect(d.calls.flat().join(' ')).not.toContain('auth.json')
+  })
+
+  test('never adopts an existing worker or gateway: a protected shard starts fresh with this run\'s config', async () => {
+    const d = fakeDocker((args) => (args[0] === 'inspect' ? { stdout: 'true', stderr: '', code: 0 } : undefined))
+    await startShardContainer(spec, d.fn, async () => true)
+    expect(d.calls.slice(0, 2)).toEqual([['rm', '-f', 'arena-run1-0'], ['rm', '-f', 'arena-run1-gw-0']])
+    expect(d.calls.filter((c) => c[0] === 'run')).toHaveLength(2)
+  })
+
+  test('removes both containers when the gateway never serves', async () => {
+    const d = fakeDocker()
+    await expect(startShardContainer({ ...spec, healthTimeoutMs: 50 }, d.fn, async () => false)).rejects.toThrow(/health/i)
+    const removals = d.calls.filter((c) => c[0] === 'rm').slice(2).map((c) => c[2])
+    expect(removals).toEqual(['arena-run1-0', 'arena-run1-gw-0'])
+  })
+
+  test('removes the worker when the gateway cannot start, and says which part failed', async () => {
+    const d = fakeDocker((args) => (args[0] === 'run' && args.includes('node') ? { stdout: '', stderr: 'port is already allocated', code: 1 } : undefined))
+    await expect(startShardContainer(spec, d.fn, async () => true)).rejects.toThrow(/Failed to start gateway arena-run1-gw-0: port is already allocated/)
+    expect(d.calls.at(-1)).toEqual(['rm', '-f', 'arena-run1-0'])
+  })
+})
 
 describe('inspectContainerState', () => {
   const answer = (stdout: string, code = 0) => vi.fn(async () => ({ stdout, stderr: '', code }))
