@@ -40,6 +40,7 @@ import { relayProviderConfig } from '../runtime/opencode/relay-config.js'
 import type { RelayPolicy, RelayUpstream } from '../runtime/provider-relay.js'
 import { relayUpstreamsFromAuth, type CatalogProvider } from '../runtime/relay-credentials.js'
 import { processRelay } from '../runtime/relay-process.js'
+import { RUNTIME_DIR } from '../runtime/runtime-dirs.js'
 import type { Placement } from '../runtime/docker/shard.js'
 import {
   agentImageTag,
@@ -144,11 +145,7 @@ export const defaultSeams: ComposeSeams = {
  */
 export const HOST_SERVER_ENV: Record<string, string> = { OPENCODE_ENABLE_EXA: '1' }
 
-/**
- * Per-run transient files under the workspace root: `<run id>/shard-N/{TOOLS.md,tools.json}`.
- * Shards mount only their own `shard-N` workspace and this read-only folder, never the rest.
- */
-export const RUNTIME_DIR = '.arena-runtime'
+export { RUNTIME_DIR }
 
 /** A ceiling on relayed model calls per agent over a run. Token and spend budgets are enforced separately, from usage. */
 export const RELAY_REQUESTS_PER_AGENT = 2000

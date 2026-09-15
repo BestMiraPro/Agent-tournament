@@ -43,7 +43,13 @@ export interface ApiDeps {
   reconfigureRun?: (runId: string, config: RunConfig) => void
   registry?: RunRegistry
   emit?: EventSink
-  sweepWith?: (config: RunConfig, runId: string, onWarning: (message: string) => void) => Promise<string[]>
+  /** `workspaceRoot`: the new run's, whose stale runtime folders are swept too. */
+  sweepWith?: (
+    config: RunConfig,
+    runId: string,
+    onWarning: (message: string) => void,
+    workspaceRoot?: string | null,
+  ) => Promise<string[]>
   startModelsServer?: () => Promise<ServerHandle>
   /** Live activity for runs on the default engine, which have no per-run record. */
   activityFor?: (runId: string) => ActivitySnapshot | null
@@ -388,7 +394,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       // nothing is provisioned yet (containers start in the first round), so
       // this is the same safe window the CLI sweeps in.
       if (composed.config.sandbox === 'docker' && deps.sweepWith) {
-        await deps.sweepWith(composed.config, runId, (m) => composed.warnings.push(m)).catch(() => {})
+        await deps.sweepWith(composed.config, runId, (m) => composed.warnings.push(m), spec.workspaceRoot).catch(() => {})
       }
       const manager = new RunManager(engine, emit)
       const record: RunRecord = {

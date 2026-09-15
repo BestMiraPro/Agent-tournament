@@ -14,6 +14,7 @@ import { MockProvider } from '../runtime/mock-provider.js'
 import { MockSandbox } from '../runtime/mock-sandbox.js'
 import { sweepOrphanContainers, sweepOrphanNetworks } from '../runtime/docker/sweep.js'
 import { processLedger, readHostCapacity } from '../runtime/docker/capacity.js'
+import { sweepOrphanRuntimeDirs } from '../runtime/runtime-dirs.js'
 import { buildApi } from './api.js'
 import { ActivityCache } from './activity.js'
 import { composeRun, defaultSeams, type ComposedRun, type RunIdHolder } from './compose-run.js'
@@ -146,7 +147,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     emit: broadcast,
     activityFor: (runId) => defaultActivity.get(runId)?.snapshot() ?? null,
     capacity: async () => ({ host: await readHostCapacity(), reserved: processLedger.totals() }),
-    sweepWith: (cfg, runId, onWarning) => {
+    sweepWith: (cfg, runId, onWarning, workspaceRoot) => {
       // Every registered docker run owns live containers; excluding only the new run
       // would let its sweep destroy a concurrent run mid-tournament.
       const activeRunIds = [
@@ -157,6 +158,12 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
       // Containers first: Docker keeps a network while anything is still attached to it.
       return sweepOrphanContainers({ activeRunIds, onWarning }).then(async (removed) => {
         await sweepOrphanNetworks({ activeRunIds, onWarning })
+        // Runtime folders last, once nothing that mounted them can still be running.
+        const roots = new Set(
+          [workspaceRoot, opts.workspaceRoot, ...registry.list().map((r) => r.spec.workspaceRoot)]
+            .filter((root): root is string => typeof root === 'string' && root.length > 0),
+        )
+        for (const root of roots) await sweepOrphanRuntimeDirs({ workspaceRoot: root, activeRunIds, onWarning })
         return removed
       })
     },
