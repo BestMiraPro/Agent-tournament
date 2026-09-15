@@ -1,6 +1,6 @@
 # Context folder and a tool-using grader — design
 
-**Date:** 2026-09-15 · **Status:** awaiting user review · **Branch:** `phase5-review-fixes`
+**Date:** 2026-09-15 · **Status:** approved 2026-09-15 · **Branch:** `phase5-review-fixes`
 
 ## Why
 
