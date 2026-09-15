@@ -1,5 +1,61 @@
 import { describe, expect, test, vi } from 'vitest'
-import { parsePortMapping, buildRunArgs, removeContainer } from '../../../src/runtime/docker/cli.js'
+import { parsePortMapping, buildProtectedRunArgs, buildRunArgs, removeContainer } from '../../../src/runtime/docker/cli.js'
+
+describe('buildProtectedRunArgs', () => {
+  const spec = {
+    name: 'arena-run-7-0',
+    image: 'agent-arena:tc-x',
+    hostDir: 'C:\\ws\\shard-0',
+    memory: '1g',
+    cpus: 1,
+    network: 'arena-run-7-net-0',
+    configDir: 'C:\\ws\\.arena-runtime\\run-7\\shard-0\\config',
+    toolsDir: 'C:\\ws\\.arena-runtime\\run-7\\shard-0\\tools',
+    contextDir: null,
+  }
+
+  test('joins only its shard network, publishes nothing and mounts no credentials', () => {
+    const args = buildProtectedRunArgs(spec)
+    const joined = args.join(' ')
+    expect(joined).toContain('--network arena-run-7-net-0 --network-alias worker')
+    expect(args).not.toContain('-p')
+    expect(joined).not.toContain('auth.json')
+    expect(joined).not.toContain('/root/')
+  })
+
+  test('runs as a fixed non-root user on a read-only root with bounded writable scratch', () => {
+    const joined = buildProtectedRunArgs(spec).join(' ')
+    for (const expected of [
+      '--read-only', '--user 1000:1000', '-e HOME=/home/arena',
+      '--tmpfs /home/arena:rw,uid=1000,gid=1000,size=256m', '--tmpfs /tmp:rw,uid=1000,gid=1000,size=256m',
+      '-v C:\\ws\\shard-0:/work',
+    ]) expect(joined).toContain(expected)
+  })
+
+  test('keeps every existing limit', () => {
+    const joined = buildProtectedRunArgs(spec).join(' ')
+    for (const expected of ['-m 1g', '--memory-swap 1g', '--cpus 1', '--pids-limit 256', '--cap-drop ALL', '--security-opt no-new-privileges', '--ulimit fsize=268435456', '-e OMP_NUM_THREADS=1']) {
+      expect(joined).toContain(expected)
+    }
+  })
+
+  test('reads its relay config, catalogue and tool manifest read-only, copying the catalogue into its home at start', () => {
+    const args = buildProtectedRunArgs(spec)
+    const joined = args.join(' ')
+    expect(joined).toContain('-v C:\\ws\\.arena-runtime\\run-7\\shard-0\\config:/run/arena-config:ro')
+    expect(joined).toContain('-v C:\\ws\\.arena-runtime\\run-7\\shard-0\\tools:/run/arena:ro')
+    expect(joined).toContain('-e OPENCODE_CONFIG=/run/arena-config/opencode.json')
+    expect(joined).toContain('-e OPENCODE_DISABLE_MODELS_FETCH=1')
+    expect(args.slice(-4)).toEqual([
+      'agent-arena:tc-x', 'sh', '-c',
+      'mkdir -p "$HOME/.cache/opencode" && cp /run/arena-config/models.json "$HOME/.cache/opencode/models.json" && exec opencode serve --hostname 0.0.0.0 --port 4096',
+    ])
+  })
+
+  test('mounts a context folder read-only when the run has one', () => {
+    expect(buildProtectedRunArgs({ ...spec, contextDir: 'C:\\research' }).join(' ')).toContain('-v C:\\research:/context:ro')
+  })
+})
 
 describe('parsePortMapping', () => {
   test('extracts the host port from docker port output', () => {

@@ -130,6 +130,79 @@ export function buildRunArgs(spec: RunSpec): string[] {
   ]
 }
 
+export interface ProtectedRunSpec {
+  name: string
+  image: string
+  hostDir: string
+  memory: string
+  cpus: number
+  /** The shard's internal network; the worker joins nothing else. */
+  network: string
+  /** Host folder with the relay `opencode.json` and a copy of the model catalogue. */
+  configDir: string
+  /** Host folder with TOOLS.md and tools.json. */
+  toolsDir: string
+  contextDir?: string | null
+  pidsLimit?: number
+  maxFileBytes?: number
+  maxOpenFiles?: number
+}
+
+/** A fixed unprivileged identity; nothing in a protected worker runs as root. */
+export const WORKER_USER = '1000:1000'
+export const WORKER_HOME = '/home/arena'
+
+/**
+ * Docker creates a bind mount's missing parent folders as root, so a catalogue mounted into the
+ * tmpfs home left `.cache/opencode` unwritable and OpenCode failed with EACCES. It is mounted
+ * read-only elsewhere and copied into the home at start instead.
+ */
+export const PROTECTED_WORKER_START =
+  'mkdir -p "$HOME/.cache/opencode" && cp /run/arena-config/models.json "$HOME/.cache/opencode/models.json" && exec opencode serve --hostname 0.0.0.0 --port 4096'
+
+/**
+ * A protected worker: every limit `buildRunArgs` sets, plus the boundary that makes the limits
+ * mean something when agents run arbitrary code.
+ *
+ * - Network: the shard's internal network only. No egress, no other shard, no published port;
+ *   the shard gateway carries the app's API traffic in and the worker's model calls out.
+ * - Credentials: none. The mounted config points providers at the relay with a run token.
+ * - Filesystem: read-only root and toolchain; writable only `/work` and bounded tmpfs for the
+ *   home OpenCode writes and `/tmp`. tmpfs pages count against the memory limit when used.
+ *
+ * Each of these was exercised end to end without a real provider; see
+ * docs/superpowers/specs/2026-09-15-protected-runtime-verified-facts.md.
+ */
+export function buildProtectedRunArgs(spec: ProtectedRunSpec): string[] {
+  const pids = spec.pidsLimit ?? 256
+  const fsize = spec.maxFileBytes ?? 268_435_456
+  const nofile = spec.maxOpenFiles ?? 2048
+  return [
+    'run', '-d',
+    '--name', spec.name,
+    '-m', spec.memory,
+    '--memory-swap', spec.memory,
+    '--cpus', String(spec.cpus),
+    '--pids-limit', String(pids),
+    '--ulimit', `fsize=${fsize}`,
+    '--ulimit', `nofile=${Math.floor(nofile / 2)}:${nofile}`,
+    '--cap-drop', 'ALL',
+    '--security-opt', 'no-new-privileges',
+    '--network', spec.network, '--network-alias', 'worker',
+    '--read-only', '--user', WORKER_USER, '-e', `HOME=${WORKER_HOME}`,
+    '--tmpfs', `${WORKER_HOME}:rw,uid=1000,gid=1000,size=256m`,
+    '--tmpfs', '/tmp:rw,uid=1000,gid=1000,size=256m',
+    '-v', `${spec.hostDir}:/work`,
+    ...(spec.contextDir ? ['-v', `${spec.contextDir}:${CONTAINER_CONTEXT_PATH}:ro`] : []),
+    '-v', `${spec.toolsDir}:/run/arena:ro`,
+    '-v', `${spec.configDir}:/run/arena-config:ro`,
+    '-e', 'OPENCODE_CONFIG=/run/arena-config/opencode.json',
+    '-e', 'OPENCODE_DISABLE_MODELS_FETCH=1',
+    ...threadLimitEnv(spec.cpus),
+    spec.image, 'sh', '-c', PROTECTED_WORKER_START,
+  ]
+}
+
 /**
  * BLAS/OpenMP read these at import. Unset, each NumPy process sizes its pool to every host
  * CPU it can see — sixteen threads each inside a one-CPU quota — and only thrashes.
