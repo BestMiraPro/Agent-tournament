@@ -15,9 +15,11 @@ describe('grader profile', () => {
     expect(md.startsWith('---\n')).toBe(true)
     // A body would replace OpenCode's base prompt, the one that teaches the model its tools.
     expect(md.split('\n---\n')[1] ?? '').toBe('')
-    for (const allowed of ['read', 'glob', 'grep', 'list', 'webfetch', 'websearch']) {
+    for (const allowed of ['glob', 'grep', 'list', 'webfetch', 'websearch']) {
       expect(md).toContain(`\n  ${allowed}: allow\n`)
     }
+    // Reads anything except secrets files, which would otherwise wait on an unanswerable ask.
+    expect(md).toContain('\n  read:\n    "*": allow\n    "*.env": deny\n    "*.env.*": deny\n    "*.env.example": allow\n')
     for (const denied of ['edit', 'bash', 'task', 'todowrite', 'skill', 'question', 'doom_loop']) {
       expect(md).toContain(`\n  ${denied}: deny\n`)
     }

@@ -33,7 +33,15 @@ export function serializeGraderProfile(contextDir: string | null): string {
     '---',
     'description: tournament grader',
     'permission:',
-    ...['read', 'glob', 'grep', 'list', 'webfetch', 'websearch'].map((p) => `  ${p}: allow`),
+    // Same `.env` answers as the competitor: the runtime default is `ask`, which nobody is
+    // there to answer, and a plain `read: allow` would turn it into a readable secret the
+    // grader's web tools could carry out.
+    '  read:',
+    '    "*": allow',
+    '    "*.env": deny',
+    '    "*.env.*": deny',
+    '    "*.env.example": allow',
+    ...['glob', 'grep', 'list', 'webfetch', 'websearch'].map((p) => `  ${p}: allow`),
     ...['edit', 'bash', 'task', 'todowrite', 'skill', 'question', 'doom_loop'].map((p) => `  ${p}: deny`),
     ...(contextDir
       ? [
