@@ -38,11 +38,23 @@ Worker (toolchain image, uid 1000, read-only root, internal network only) → sh
 `RelayPolicy` and relay server on host loopback → upstream: three model calls were relayed with status 200.
 The upstream received only the upstream key; the worker's run token never reached it.
 
+## Real providers through the relay (September 15–16, 2026)
+
+Three small protected runs with real models, after the user confirmed the roster's models are free to use.
+
+| Observation | Consequence |
+| --- | --- |
+| W&B (`zai-org/GLM-5.3-Flash`) streamed tool-using agent turns through the relay; the agent wrote, ran and reported a Python script. | The OpenAI-compatible path works against a real upstream. |
+| Google (`gemini-3.8-flash`) requests reached Google through the relay and came back HTTP 429 "quota exceeded" for the configured key. | The `x-goog-api-key` swap and the Google route work; that key's quota was spent. A full Google turn is still unobserved. |
+| OpenCode Zen refused relayed free-tier calls with HTTP 400 "OpenCode's free tier can only be used in OpenCode" while only `content-type` and `accept` were forwarded. After forwarding OpenCode's bounded client headers (`user-agent`, `x-opencode-client`, `-project`, `-session`, `-request`) to Zen only, `muse-spark-1.3-contributor-free` completed the task twice. | Zen's free tier recognises OpenCode by those headers; none carries a credential. |
+| With no `external_directory` allowance for container paths, OpenCode asked to read `/context` and `/run/arena` and the unattended reply rejected it; one agent then read the files with `python3`. | Competitor profiles allow reading those two mounts. Tool rules are not a boundary; the read-only mounts are. |
+| A context folder given as a Windows 8.3 short path left the grader's allow rule unmatched, because OpenCode checks the real long path. After resolving the real path, the grader built its criteria from the brief and checked a factual claim against python.org. | Folders are canonicalised once at composition. |
+| GLM-5.3-Flash stalled mid-reply twice: once for a worker through the relay, once for a host-side reflect call that does not use the relay. | The stall is upstream; the agent timeout bounds it. |
+| When the app was quit mid-round, the next docker run's sweep removed the stranded run's four containers, two networks and runtime folder. | Crash recovery works on real resources. |
+| `test/e2e/container-policy.test.ts` (gated, 22 s) confirmed from inside workers: uid 1000; toolchain, system and tool manifest unwritable; no readable credential; no DNS, direct IP, host service or sibling shard; no script download or `pip install`; relay allow plus 401/403/404/405/429 refusals; offline numpy/pandas/DuckDB/pytest; clean removal. | The protected boundaries hold on Docker Desktop for Windows. |
+
 ## Not verified yet
 
-- Streaming and structured output through the relay against the real W&B, OpenCode Zen and Google
-  endpoints. That needs real model calls and waits for explicit approval.
-- Google and Anthropic request shapes through the relay (the policy handles them; only the OpenAI-compatible
-  path was exercised end to end).
-- Whether the real OpenCode Zen endpoint accepts `public` for its free models when it arrives through the
-  relay. The header is exactly what OpenCode sends on its own; the endpoint's answer needs a real call.
+- A complete Google or Anthropic model turn through the relay (the Google key was out of quota; no Anthropic model is in the roster).
+- Structured output (`json_schema`) from a worker through the relay; grading runs on the host and does not use the relay.
+- A native Linux Docker engine: every observation here is from Docker Desktop on Windows.

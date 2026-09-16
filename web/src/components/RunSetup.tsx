@@ -176,7 +176,7 @@ export function RunSetup({ busy, error, onCreate }: {
             <p className="help">How many containers the agents are spread across. With fewer containers than agents, agents share one and can reach each other&apos;s files, so their results cannot be certified untouched. Match the agent count for full isolation.</p>
             <label htmlFor="setup-container-memory">Memory per container</label>
             <input id="setup-container-memory" value={containerMemory} onChange={(e) => setContainerMemory(e.target.value)} disabled={busy} />
-            <p className="help">At least 512m, for example 512m or 1g. Containers times memory has to fit in the memory Docker has free.</p>
+            <p className="help">For example 768m or 1g; 512m is accepted but ran out of memory in measured research work. Containers times memory has to fit in the memory Docker has free.</p>
             <label htmlFor="setup-container-cpus">CPUs per container</label>
             <input id="setup-container-cpus" type="number" min={0.25} max={64} step={0.25} value={containerCpus} onChange={(e) => setContainerCpus(e.target.value)} disabled={busy} />
             <p className="help">Containers times CPUs cannot exceed this machine&apos;s CPU count.</p>

@@ -37,6 +37,24 @@ const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(2)} GiB`
 const count = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2))
 
 /**
+ * What was measured for this size (scripts/benchmark-toolchain.ts, September 16 2026: OpenCode plus
+ * a 2-million-row pandas/DuckDB backtest and pytest, singly and seven at once). A long agent
+ * conversation adds memory that workload does not, so 1g stays the default.
+ */
+export function memoryNote(memory: string): string | null {
+  switch (memory.trim().toLowerCase()) {
+    case '1g':
+      return null
+    case '768m':
+      return '768m completed the measured research workload with a peak of 592 MiB, singly and seven at once; long agent conversations were not measured, so 1g stays the default.'
+    case '512m':
+      return '512m ran out of memory in every measured research trial (OpenCode alone uses about 250 MiB). Use 768m or more.'
+    default:
+      return `${memory} has not been measured under research workloads; 768m and 1g are the measured sizes.`
+  }
+}
+
+/**
  * What a docker run's settings mean before Start: which agents share which container, the
  * summed ceilings, and whether they fit what Docker reported. An estimate — the server
  * re-reads Docker and admits the run itself — so it never claims more than "estimated".
@@ -108,9 +126,6 @@ export function setupEstimate(plan: PlacementPlan, capacity: CapacityInfo | null
       ` = ${memoryTotal === null ? 'unknown' : gib(memoryTotal)} memory, ${count(cpuTotal)} CPU${cpuTotal === 1 ? '' : 's'}`,
     fit,
     refusal,
-    memoryNote:
-      plan.memory.trim().toLowerCase() === '1g'
-        ? null
-        : `${plan.memory} has not been measured under research workloads; 1g is the measured default.`,
+    memoryNote: memoryNote(plan.memory),
   }
 }

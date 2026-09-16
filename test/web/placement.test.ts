@@ -65,10 +65,12 @@ describe('setupEstimate', () => {
     })
   })
 
-  test('memory sizes nobody measured are labelled as such', () => {
-    expect(setupEstimate(plan({ memory: '512m' }), capacity).memoryNote).toBe(
-      '512m has not been measured under research workloads; 1g is the measured default.',
-    )
+  test('each size says what was measured for it, and an unmeasured size says so', () => {
     expect(setupEstimate(plan(), capacity).memoryNote).toBeNull()
+    expect(setupEstimate(plan({ memory: '768m' }), capacity).memoryNote).toContain('peak of 592 MiB')
+    expect(setupEstimate(plan({ memory: '512M' }), capacity).memoryNote).toContain('ran out of memory in every measured research trial')
+    expect(setupEstimate(plan({ memory: '2g' }), capacity).memoryNote).toBe(
+      '2g has not been measured under research workloads; 768m and 1g are the measured sizes.',
+    )
   })
 })
