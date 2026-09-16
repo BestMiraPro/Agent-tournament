@@ -1,7 +1,7 @@
 import { describeFailure, errorTextFor, failureFromText } from '../core/failure.js'
 import { serializeCompetitorProfile } from '../core/genome.js'
 import { planSelection } from '../core/selection.js'
-import type { Genome, RunConfig, SubmissionStatus } from '../core/types.js'
+import { DEFAULT_CONFIG, type Genome, type RunConfig, type SubmissionStatus } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
 import { BudgetTracker, type BudgetBreach, type BudgetStatus } from './budget.js'
 import { breed } from '../evolution/breed.js'
@@ -20,7 +20,7 @@ import type { Reflector } from '../evolution/reflect.js'
 import type { TopPerformer } from '../evolution/prompts.js'
 import { buildJudgingEnvelope, evidenceFromAudit, type JudgeCallRecord, type JudgeRecorder } from '../judge/audit.js'
 import type { Judge, JudgeInput } from '../judge/judge.js'
-import type { AgentRunner, AgentRunResult } from '../runtime/agent-runner.js'
+import { deadlineTimer, type AgentRunner, type AgentRunResult } from '../runtime/agent-runner.js'
 import { CONTAINER_CONTEXT_PATH } from '../runtime/docker/cli.js'
 import { runPool } from '../runtime/pool.js'
 import { TOOLS_MOUNT } from '../runtime/tool-manifest.js'
@@ -382,9 +382,11 @@ export class TournamentEngine {
               genome: p.genome,
               goalMd: input.goalMd,
               timeoutMs: config.agentTimeoutMs,
+              steerAfterMs: config.agentSteerAfterMs ?? DEFAULT_CONFIG.agentSteerAfterMs,
             }),
+            // No limit by default: the race is only armed for a finite cap.
             new Promise<never>((_r, reject) => {
-              timer = setTimeout(() => reject(new DriverTimeout()), config.agentTimeoutMs)
+              timer = deadlineTimer(config.agentTimeoutMs, () => reject(new DriverTimeout()))
             }),
           ])
           // Folded in the instant the run returns, so a concurrent sibling still

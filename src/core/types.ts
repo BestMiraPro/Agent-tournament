@@ -74,7 +74,16 @@ export interface RosterEntry {
 export interface RunConfig {
   populationSize: number
   concurrency: number
+  /**
+   * Hard limit on one agent's run. `Infinity` (the default) means none: agents are never cut
+   * off, only steered (below). A finite value is for tests and deliberate caps.
+   */
   agentTimeoutMs: number
+  /**
+   * When a still-working agent is told to write SUBMISSION.md with what it has and finish.
+   * The message queues behind its current step; the agent is not interrupted.
+   */
+  agentSteerAfterMs: number
   sandbox: 'docker' | 'local' | 'mock'
   maxContainers: number
   containerMemory: string
@@ -133,7 +142,8 @@ export interface RunConfig {
 export const DEFAULT_CONFIG: RunConfig = {
   populationSize: 20,
   concurrency: 8,
-  agentTimeoutMs: 600_000,
+  agentTimeoutMs: Infinity,
+  agentSteerAfterMs: 3_600_000,
   sandbox: 'mock',
   // Container sizing, measured rather than guessed (2026-08-25, reference host): an agent
   // container idles at ~250 MiB and peaks at ~413 MiB under real work, against ~5.2 GiB of

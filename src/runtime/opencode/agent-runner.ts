@@ -2,7 +2,7 @@ import { resolve as resolvePath } from 'node:path'
 import { describeFailure, describeProviderError, errorTextFor, failureFromText, type AgentFailure } from '../../core/failure.js'
 import { serializeGenome } from '../../core/genome.js'
 import type { QuiesceStatus } from '../../engine/capture.js'
-import type { AgentRunContext, AgentRunner, AgentRunResult } from '../agent-runner.js'
+import { deadlineTimer, type AgentRunContext, type AgentRunner, type AgentRunResult } from '../agent-runner.js'
 import type { AgentHandle, Sandbox } from '../sandbox.js'
 import { OpenCodeTimeoutError, type OpenCodeClient } from './client.js'
 import { splitModelId } from './model-id.js'
@@ -45,6 +45,17 @@ export interface AgentRunnerOptions {
 
 /** How long a failed run waits for resource evidence before keeping its own failure. */
 export const RESOURCE_DIAGNOSIS_MS = 10_000
+
+/** What a still-working agent is told once its steering time has passed. */
+export function buildSteeringPrompt(elapsedMs: number): string {
+  const minutes = Math.round(elapsedMs / 60_000)
+  const elapsed = minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60} hour${minutes === 60 ? '' : 's'}` : `${minutes} minutes`
+  return [
+    `You have been working for ${elapsed}. Time to submit.`,
+    `Do not start anything new. Write your final answer to ${SUBMISSION_FILE} now with what you have,`,
+    'saying plainly what is finished and what is not, then stop.',
+  ].join('\n')
+}
 
 /** The contract every agent is held to; the judged artifact is SUBMISSION.md. */
 export function buildAgentPrompt(
@@ -268,8 +279,22 @@ export class OpenCodeAgentRunner implements AgentRunner {
       }
 
       let timer: ReturnType<typeof setTimeout> | undefined
+      let steerTimer: ReturnType<typeof setTimeout> | undefined
       try {
         tracked.promptDispatched = true
+        // Past the steering time the agent is told, not cut off: the message queues behind its
+        // current step and it decides how to wrap up. Sent once; a failed send is not retried.
+        steerTimer = deadlineTimer(ctx.steerAfterMs ?? Infinity, () => {
+          if (tracked.remoteStopped || tracked.stopRequested) return
+          void Promise.resolve()
+            .then(() => client.promptAsync(session.id, handle.workspacePath, {
+              model: body.model,
+              agent: body.agent,
+              system: body.system,
+              parts: [{ type: 'text', text: buildSteeringPrompt(ctx.steerAfterMs!) }],
+            }))
+            .catch(() => {})
+        })
         // Keep this handler attached to the original request after a local timeout.
         // Transport rejection cannot confirm stop; a resolved terminal response can.
         const prompt = client.prompt(session.id, handle.workspacePath, body, ctx.timeoutMs).then((res) => {
@@ -283,7 +308,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
         const res = await Promise.race([
           prompt,
           new Promise<never>((_r, reject) => {
-            timer = setTimeout(() => reject(new TimeoutError()), ctx.timeoutMs)
+            timer = deadlineTimer(ctx.timeoutMs, () => reject(new TimeoutError()))
           }),
         ])
 
@@ -322,6 +347,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
         // Without this the loser of the race keeps a timer alive for the full
         // timeoutMs after every run, holding the process open.
         clearTimeout(timer)
+        clearTimeout(steerTimer)
       }
     } catch (e) {
       const isTimeout = e instanceof TimeoutError || e instanceof OpenCodeTimeoutError

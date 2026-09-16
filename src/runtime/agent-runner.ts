@@ -8,7 +8,15 @@ export interface AgentRunContext {
   agentId: string
   genome: Genome
   goalMd: string
+  /** Hard limit; `Infinity` for none. */
   timeoutMs: number
+  /** When to tell a still-working agent to submit what it has; absent or `Infinity` for never. */
+  steerAfterMs?: number
+}
+
+/** A timer that never fires for a non-finite delay: `setTimeout(fn, Infinity)` fires at once. */
+export function deadlineTimer(ms: number, fn: () => void): ReturnType<typeof setTimeout> | undefined {
+  return Number.isFinite(ms) && ms >= 0 ? setTimeout(fn, ms) : undefined
 }
 
 export interface AgentRunResult {

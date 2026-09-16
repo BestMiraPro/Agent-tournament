@@ -203,6 +203,12 @@ export interface ShardServer {
   baseUrl: string
 }
 
+/**
+ * Bound for OpenCode control calls (sessions, providers, aborts). Agent prompts and grading calls
+ * carry the run's own limit instead, which is none by default.
+ */
+export const CONTROL_REQUEST_TIMEOUT_MS = 600_000
+
 export interface ComposedRun {
   config: RunConfig
   sandbox: Sandbox
@@ -407,8 +413,8 @@ export async function composeRun(
       )
     }
     server = spec.serverUrl
-      ? await s.attachHostServer(spec.serverUrl, config.agentTimeoutMs)
-      : await s.startHostServer({ timeoutMs: config.agentTimeoutMs, env: HOST_SERVER_ENV })
+      ? await s.attachHostServer(spec.serverUrl, CONTROL_REQUEST_TIMEOUT_MS)
+      : await s.startHostServer({ timeoutMs: CONTROL_REQUEST_TIMEOUT_MS, env: HOST_SERVER_ENV })
   } catch (e) {
     // Nothing is running, so nothing may keep holding the capacity reserved above.
     s.ledger.release(reservationId)
@@ -640,7 +646,7 @@ export async function composeRun(
       })
       const runner = new OpenCodeAgentRunner(
         makeClientResolver(sandbox, server.client, (baseUrl) =>
-          s.createShardClient(baseUrl, config.agentTimeoutMs)),
+          s.createShardClient(baseUrl, CONTROL_REQUEST_TIMEOUT_MS)),
         sandbox,
         {
           onSessionCreated: sessionHook,

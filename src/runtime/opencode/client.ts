@@ -87,6 +87,9 @@ export function transportAllowanceMs(timeoutMs: number): number {
   return timeoutMs + 30_000
 }
 
+/** For a request with no deadline: no local abort and no socket idle cut. */
+const unbounded = (ms: number) => !Number.isFinite(ms)
+
 /**
  * `node:http(s)` with no deadline of its own beyond the idle backstop above; the caller's
  * AbortSignal ends the exchange and destroys the socket. Adds no dependency.
@@ -117,9 +120,13 @@ export const nodeHttpTransport: HttpTransport = ({ method, url, body, timeoutMs,
         if (!res.complete) fail(Object.assign(new Error('response closed before it completed'), { code: 'ECONNRESET' }))
       })
     })
-    req.setTimeout(transportAllowanceMs(timeoutMs), () => {
-      req.destroy(Object.assign(new Error(`socket idle beyond ${transportAllowanceMs(timeoutMs)}ms`), { code: 'OPENCODE_SOCKET_IDLE' }))
-    })
+    // An agent prompt with no limit may legitimately stay silent for a long step; setTimeout with
+    // Infinity would instead fire at once.
+    if (!unbounded(timeoutMs)) {
+      req.setTimeout(transportAllowanceMs(timeoutMs), () => {
+        req.destroy(Object.assign(new Error(`socket idle beyond ${transportAllowanceMs(timeoutMs)}ms`), { code: 'OPENCODE_SOCKET_IDLE' }))
+      })
+    }
     req.on('error', fail)
     req.end(body)
   })
@@ -177,7 +184,7 @@ export class OpenCodeClient {
 
     const controller = new AbortController()
     const timeoutMs = opts.timeoutMs ?? this.opts.timeoutMs
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const timer = unbounded(timeoutMs) ? undefined : setTimeout(() => controller.abort(), timeoutMs)
     try {
       const res = await (this.opts.transport ?? nodeHttpTransport)({
         method,
@@ -243,6 +250,17 @@ export class OpenCodeClient {
       body,
       timeoutMs,
     })
+  }
+
+  /**
+   * Queues a message for a session and returns at once (204), without waiting for a reply.
+   *
+   * Verified against opencode 1.18.21 on September 16 2026: sent while the session was busy, the
+   * message waited for the running tool call to finish and the agent acted on it at its next
+   * step; the original blocking prompt returned only when the session went idle.
+   */
+  async promptAsync(sessionId: string, directory: string, body: PromptBody): Promise<void> {
+    await this.request('POST', `/session/${sessionId}/prompt_async`, { directory, body, timeoutMs: 30_000 })
   }
 
   async abort(sessionId: string, directory: string): Promise<void> {
