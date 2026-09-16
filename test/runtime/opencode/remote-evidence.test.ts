@@ -197,6 +197,48 @@ describe('remote execution evidence', () => {
     expect(await grace(runner.quiesce(handle))).toBe('unconfirmed')
   })
 
+  describe('after a timeout, the server\'s own session status', () => {
+    const timedOutRunner = async (status: () => unknown) => {
+      const { sandbox, handle } = await fixture()
+      let statusReads = 0
+      const transport: HttpTransport = async ({ url, signal }) => {
+        const path = url.pathname
+        if (path === '/session') return { status: 200, text: JSON.stringify({ id: 'session' }) }
+        if (path.endsWith('/abort')) return { status: 200, text: 'true' }
+        if (path === '/session/status') {
+          statusReads++
+          expect(url.searchParams.get('directory')).toBe(handle.workspacePath)
+          return { status: 200, text: JSON.stringify(status()) }
+        }
+        if (path.endsWith('/message')) return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+        })
+        throw new Error(`unexpected request ${path}`)
+      }
+      const runner = new OpenCodeAgentRunner(new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 50, transport }), sandbox)
+      const run = runner.run(handle, context())
+      await vi.advanceTimersByTimeAsync(50)
+      expect((await run).status).toBe('timeout')
+      return { runner, handle, reads: () => statusReads }
+    }
+
+    test('reporting the session idle confirms the stop, so the next round is not blocked forever', async () => {
+      let busy = 2
+      const { runner, handle, reads } = await timedOutRunner(() => (busy-- > 0 ? { session: { type: 'busy' } } : {}))
+      expect(await grace(runner.quiesce(handle))).toBe('stopped')
+      expect(reads()).toBeGreaterThanOrEqual(3)
+      expect(() => runner.assertReadyForRound()).not.toThrow()
+    })
+
+    test('still busy, or unreadable, confirms nothing', async () => {
+      const busy = await timedOutRunner(() => ({ session: { type: 'busy' } }))
+      expect(await grace(busy.runner.quiesce(busy.handle))).toBe('unconfirmed')
+      expect(() => busy.runner.assertReadyForRound()).toThrow(/unconfirmed/)
+      const garbled = await timedOutRunner(() => ['not', 'a', 'map'])
+      expect(await grace(garbled.runner.quiesce(garbled.handle))).toBe('unconfirmed')
+    })
+  })
+
   test.each([null, {}])('malformed successful HTTP response %j is not terminal evidence', async (response) => {
     const { sandbox, handle } = await fixture()
     const transport: HttpTransport = async ({ url }) => {

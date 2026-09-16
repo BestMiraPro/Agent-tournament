@@ -139,12 +139,15 @@ export class CapacityLedger {
   /** Checks `request` against `host` and every other reservation; records it only when it fits. */
   admit(id: string, request: CapacityRequest, host: HostCapacity): CapacityVerdict {
     const others = [...this.entries].filter(([key]) => key !== id).map(([, entry]) => entry)
-    const theirContainers = new Set(others.flatMap((e) => [...e.containerNames]))
+    // Usage of every attached container is inside a ceiling counted here: other runs' in
+    // `memoryBytes`, this run's own in the request being admitted. A run re-admitted to grow
+    // used to count its running containers twice, as used memory and as its full request.
+    const ceilingContainers = new Set([...this.entries.values()].flatMap((e) => [...e.containerNames]))
     const reserved: ReservedCapacity = {
       memoryBytes: others.reduce((n, e) => n + e.request.containers * e.request.memoryBytes, 0),
       cpus: others.reduce((n, e) => n + e.request.containers * e.request.cpus, 0),
       observedBytes: (host.containers ?? [])
-        .filter((c) => theirContainers.has(c.name))
+        .filter((c) => ceilingContainers.has(c.name))
         .reduce((n, c) => n + c.usedBytes, 0),
     }
     const verdict = planCapacity(

@@ -140,6 +140,10 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     // running the old config while the row reported the new one. Rebuilding the judge and
     // reflector needs the provider, which lives here rather than in the API.
     reconfigureRun: (runId, next) => {
+      // A run this process did not create has no engine state to update — after a restart the
+      // database is kept — and it cannot run a round here either. The stored config is then
+      // the whole change; reconfigure would refuse it for want of a budget tracker.
+      if (engine.budgetStatus(runId) === null) return
       engine.reconfigure(runId, {
         config: next,
         judge: new Judge(provider, next.judge, 42),

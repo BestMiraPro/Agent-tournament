@@ -163,7 +163,39 @@ export class OpenCodeAgentRunner implements AgentRunner {
     run.abortRequested = true
     const sessionId = run.sessionId
     // Neither run's timeout nor quiesce's grace depends on this request settling.
-    void Promise.resolve().then(() => run.client.abort(sessionId, run.directory)).catch(() => {})
+    void Promise.resolve()
+      .then(() => run.client.abort(sessionId, run.directory))
+      .catch(() => {})
+      .then(() => this.watchForStop(run, sessionId))
+  }
+
+  /**
+   * After an abort, asks the server until it reports the session no longer working.
+   *
+   * An abort acknowledgement is not termination evidence, and a timed-out prompt never comes
+   * back to confirm anything: the client cancels its own request at the same deadline. Without
+   * this the run stayed "unconfirmed" forever and every later round was refused until restart.
+   * The server's own status is positive evidence; an unreadable status confirms nothing, and the
+   * watch gives up after STOP_WATCH_MS, leaving the run unconfirmed as before.
+   */
+  private async watchForStop(run: LiveRun, sessionId: string): Promise<void> {
+    // A client that cannot report status (an injected stub) leaves the run unconfirmed, as before.
+    if (typeof run.client.sessionStatus !== 'function') return
+    const deadline = Date.now() + STOP_WATCH_MS
+    while (!run.remoteStopped && Date.now() < deadline) {
+      const status = await Promise.resolve()
+        .then(() => run.client.sessionStatus(sessionId, run.directory))
+        .catch(() => 'unknown' as const)
+      if (run.remoteStopped) return
+      if (status === 'idle') {
+        this.confirmStopped(run)
+        return
+      }
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, STOP_POLL_MS)
+        ;(t as { unref?: () => void }).unref?.()
+      })
+    }
   }
 
   private confirmStopped(run: LiveRun): void {
@@ -337,6 +369,10 @@ function workspaceKey(directory: string): string {
 
 /** Total grace for confirmed termination, including any abort request time. */
 export const QUIESCE_GRACE_MS = 10_000
+
+/** How long after an abort the server's session status is polled for a stop. */
+export const STOP_WATCH_MS = 5 * 60_000
+export const STOP_POLL_MS = 1_000
 
 class TimeoutError extends Error {
   constructor() {

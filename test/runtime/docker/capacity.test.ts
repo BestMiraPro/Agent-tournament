@@ -35,6 +35,22 @@ describe('CapacityLedger', () => {
     expect(ledger.admit('run-c', req(1), observed).ok).toBe(false)
   })
 
+  test('a run re-admitted to grow does not count its own running containers twice', () => {
+    const ledger = new CapacityLedger()
+    expect(ledger.admit('run-a', req(2), host()).ok).toBe(true)
+    ledger.attach('run-a', 'arena-a-0')
+    ledger.attach('run-a', 'arena-a-1')
+    // Its two containers use 1.5GiB of the 5GiB. Growing to 4 containers needs 4GiB, which is
+    // exactly the 0.8 x 5GiB budget once its own usage is recognised as inside its ceilings;
+    // counting that usage as foreign too left 2.8GiB and refused the growth.
+    const running = host(1.5 * GiB, [
+      { name: 'arena-a-0', usedBytes: 0.75 * GiB },
+      { name: 'arena-a-1', usedBytes: 0.75 * GiB },
+    ])
+    expect(ledger.admit('run-a', req(4), running).ok).toBe(true)
+    expect(ledger.admit('run-a', req(5), running).ok).toBe(false)
+  })
+
   test('release is idempotent and leaves other reservations counted', () => {
     const ledger = new CapacityLedger()
     ledger.admit('run-a', req(2), host())

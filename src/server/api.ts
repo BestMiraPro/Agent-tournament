@@ -1033,12 +1033,16 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     // results are recorded. A run that is stopped while still busy IS the stopping state
     // — no new rounds, one finishing — and it needs no new status value to say so.
     deps.repos.runs.setStatus(id, 'stopped')
-    registry?.delete(id)
     // Mirrors disposeRunRecord's never-throw contract: a stop must not 500.
     try {
       await disposeRunRecord(record)
     } catch {
       /* the run is torn down either way */
+    } finally {
+      // Only once its resources are gone. The orphan sweep another docker run starts protects
+      // exactly the runs in the registry, so leaving early exposed this run's containers,
+      // networks and tool files to deletion while its last round was still finishing.
+      registry?.delete(id)
     }
     return { stopped: true }
   })

@@ -332,7 +332,10 @@ export class AuditCollector {
         if (event.roundIdx !== undefined && event.roundIdx !== state.roundIdx) return
         this.persist(state, event.agentId, {
           sessionId: null, observedAt: this.now(), source: 'runtime', kind: 'failure', outcome: 'failed',
-          summary: event.failure ? `${event.failure.code}: ${event.failure.message}` : 'The attempt failed.',
+          // The code is optional: "undefined: …" would be what the grader reads and what is stored.
+          summary: !event.failure
+            ? 'The attempt failed.'
+            : event.failure.code ? `${event.failure.code}: ${event.failure.message}` : event.failure.message,
         })
         return
       }

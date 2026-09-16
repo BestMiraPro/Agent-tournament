@@ -71,12 +71,15 @@ describe('AuditCollector', () => {
     const { audit } = setup()
     audit.record({ type: 'agent.activity', runId: 'run', agentId: 'a', kind: 'text', detail: 'hi', item: { id: 'x', sessionId: 's', kind: 'text', summary: 'thinking aloud', observedAt: 1 } })
     audit.record({ type: 'agent.status', runId: 'run', agentId: 'a', roundIdx: 1, status: 'failed', failure: { code: 'DRIVER_TIMEOUT', message: 'Driver timeout after 600000ms' } as never })
+    audit.record({ type: 'agent.status', runId: 'run', agentId: 'b', roundIdx: 1, status: 'failed', failure: { message: 'The agent finished without writing SUBMISSION.md' } })
     audit.record({ type: 'agent.status', runId: 'run', agentId: 'a', roundIdx: 0, status: 'failed' })
     audit.record({ type: 'bridge.status', runId: 'run', source: 'shard-0', state: 'reconnecting', message: 'socket closed', at: 20 })
     const { records, frozen } = audit.freeze('run', 'round-1', ['a'])
     expect(records.some((r) => r.summary === 'thinking aloud')).toBe(false)
     expect(records.filter((r) => r.kind === 'failure')).toEqual([
       expect.objectContaining({ source: 'runtime', outcome: 'failed', summary: 'DRIVER_TIMEOUT: Driver timeout after 600000ms' }),
+      // No code: the message alone, never "undefined: …".
+      expect.objectContaining({ agentId: 'b', summary: 'The agent finished without writing SUBMISSION.md' }),
     ])
     expect(byAgent(records, null)).toEqual([expect.objectContaining({ id: 'R1', kind: 'gap', summary: expect.stringContaining('shard-0') })])
     expect(frozen.streamGaps).toBe(1)

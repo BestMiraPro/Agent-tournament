@@ -248,6 +248,26 @@ export class OpenCodeClient {
   async abort(sessionId: string, directory: string): Promise<void> {
     await this.request('POST', `/session/${sessionId}/abort`, { directory, timeoutMs: 5000 })
   }
+
+  /**
+   * Whether the server says this session is still working. `busy` and `retry` are working;
+   * a session absent from the status map, or reported `idle`, is not. Any failure to read it
+   * is `unknown`, never idle.
+   *
+   * The directory is required: verified against opencode 1.18.21 on September 15 2026, the
+   * status map without it came back empty while the session was busy.
+   */
+  async sessionStatus(sessionId: string, directory: string): Promise<'busy' | 'idle' | 'unknown'> {
+    try {
+      const map = await this.request<Record<string, { type?: unknown }> | null>('GET', '/session/status', { directory, timeoutMs: 5000 })
+      if (map === null || typeof map !== 'object' || Array.isArray(map)) return 'unknown'
+      const entry = map[sessionId]
+      if (entry === undefined || entry?.type === 'idle') return 'idle'
+      return 'busy'
+    } catch {
+      return 'unknown'
+    }
+  }
 }
 
 /**

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { WebSocket } from 'ws'
 import { describe, expect, test, vi } from 'vitest'
 import { createDashboard } from '../../src/server/create-dashboard.js'
@@ -72,6 +75,30 @@ describe('createDashboard round audit', () => {
       expect(after.judging).toEqual(judging.judging)
     } finally {
       await dashboard.shutdown()
+    }
+  })
+})
+
+describe('createDashboard after a restart', () => {
+  test('a config change to a run created by an earlier process is stored instead of refused', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-restart-'))
+    const dbPath = join(dir, 'dashboard.db')
+    try {
+      const first = createDashboard({ population: 2, dbPath })
+      const created = await first.app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'before restart', goal: 'g' } })
+      const { runId }: { runId: string } = JSON.parse(created.body)
+      await first.shutdown()
+
+      const second = createDashboard({ population: 2, dbPath })
+      try {
+        const res = await second.app.inject({ method: 'PATCH', url: `/api/runs/${runId}/config`, payload: { concurrency: 3 } })
+        expect(res.statusCode).toBe(200)
+        expect(second.repos.runs.get(runId)!.config.concurrency).toBe(3)
+      } finally {
+        await second.shutdown()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
