@@ -13,7 +13,10 @@ export const SUBMISSION_FILE = 'SUBMISSION.md'
 export const COMPETITOR_AGENT = 'competitor'
 
 /** Resolves which OpenCode server (client) serves a given agent's shard. */
-export type ClientResolver = (handle: AgentHandle) => OpenCodeClient
+export type ClientResolver = ((handle: AgentHandle) => OpenCodeClient) & {
+  /** Drops the cached client for a retired endpoint, so its replacement starts fresh. */
+  evict?: (baseUrl: string) => void
+}
 
 export interface AgentRunnerOptions {
   /**

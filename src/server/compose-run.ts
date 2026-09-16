@@ -212,6 +212,16 @@ export interface ShardServer {
 }
 
 /**
+ * A shard runtime appearing or disappearing. Start and stop are distinct events so
+ * a replacement runtime attaches a fresh bridge even when Docker reuses its
+ * previous host port: the stop clears the old attachment first, and the start
+ * always attaches anew rather than deduping against a stale entry.
+ */
+export type ShardServerEvent =
+  | { type: 'started'; shardIndex: number; baseUrl: string }
+  | { type: 'stopped'; shardIndex: number; baseUrl: string }
+
+/**
  * Bound for OpenCode control calls (sessions, providers, aborts). Agent prompts and grading calls
  * carry the run's own limit instead, which is none by default.
  */
@@ -227,14 +237,25 @@ export interface ComposedRun {
   planFor: ((agentIds: readonly string[]) => Promise<void>) | null
   serverHandle: ServerHandle | null
   shardServers: { baseUrl: string }[]
-  /** Subscribes to live Docker shard endpoints and replays endpoints already started. */
-  onShardServer?: (listener: (server: ShardServer) => void) => () => void
+  /**
+   * Subscribes to Docker shard runtimes coming and going, replaying runtimes
+   * already started. The stop half is what lets a replacement runtime attach a
+   * fresh bridge on a reused host port.
+   */
+  onShardServer?: (listener: (event: ShardServerEvent) => void) => () => void
   /** Docker only: each container in the current plan, its agents, and whether they share it. */
   placement?: () => Placement[]
   sessionMap: Map<string, string>
   sessionHook: (agentId: string, sessionId: string) => void
   warnings: string[]
   capacity: { committed: number; maxContainers: number } | null
+  /**
+   * Recycles the round's Docker workers, endpoint/catalogue/client/session state
+   * and capacity after the round's evidence is frozen. The engine calls it once
+   * per round (plus its finally path); repeated or concurrent calls join one
+   * attempt. Absent for mock and local runs, which hold no such state.
+   */
+  releasePopulation?: (() => Promise<void>) | null
   cleanup: () => Promise<void>
 }
 
@@ -406,7 +427,6 @@ export async function composeRun(
   if (spec.sandbox === 'docker') {
     await assertHostCapacity(config, s.readCapacity as never, onWarning, { ledger: s.ledger, reservationId, ...companion })
   }
-  let reservedContainers = Math.max(1, Math.min(config.maxContainers, config.populationSize))
   let graderDirectory: string
   let server: ServerHandle
   try {
@@ -574,23 +594,36 @@ export async function composeRun(
         }
       }
       const shardServers: ShardServer[] = []
-      const shardListeners = new Set<(server: ShardServer) => void>()
-      const publishShardServer = (server: ShardServer) => {
-        const index = shardServers.findIndex((current) => current.shardIndex === server.shardIndex)
-        if (index >= 0 && shardServers[index]!.baseUrl === server.baseUrl) return
-        if (index >= 0) shardServers[index] = server
-        else shardServers.push(server)
+      const shardListeners = new Set<(event: ShardServerEvent) => void>()
+      const publish = (event: ShardServerEvent) => {
         for (const listener of shardListeners) {
           try {
-            listener(server)
+            listener(event)
           } catch {
             /* a dashboard bridge subscriber must never break container startup */
           }
         }
       }
-      const onShardServer = (listener: (server: ShardServer) => void) => {
+      const publishShardServer = (server: ShardServer) => {
+        const index = shardServers.findIndex((current) => current.shardIndex === server.shardIndex)
+        if (index >= 0 && shardServers[index]!.baseUrl === server.baseUrl) return
+        if (index >= 0) shardServers[index] = server
+        else shardServers.push(server)
+        publish({ type: 'started', shardIndex: server.shardIndex, baseUrl: server.baseUrl })
+      }
+      /** Withdraws a retired runtime so its replacement attaches fresh, even on a reused port. */
+      const retireShardServer = (server: ShardServer) => {
+        const index = shardServers.findIndex(
+          (current) => current.shardIndex === server.shardIndex && current.baseUrl === server.baseUrl,
+        )
+        if (index >= 0) shardServers.splice(index, 1)
+        publish({ type: 'stopped', shardIndex: server.shardIndex, baseUrl: server.baseUrl })
+      }
+      const onShardServer = (listener: (event: ShardServerEvent) => void) => {
         shardListeners.add(listener)
-        for (const server of shardServers) listener(server)
+        for (const server of shardServers) {
+          listener({ type: 'started', shardIndex: server.shardIndex, baseUrl: server.baseUrl })
+        }
         return () => { shardListeners.delete(listener) }
       }
       const sandbox = new DockerSandbox({
@@ -650,11 +683,16 @@ export async function composeRun(
             gateways.delete(name)
           }
         },
+        // Strict per-round confirmation reads the original instance back through
+        // the same seam the runner uses for termination evidence. A warning-only
+        // removal that left the instance running is a retained failure, not proof.
+        runtimeStateOf: (id) => s.runtimeStateOf(id),
         onWarning,
       })
+      const resolveClient = makeClientResolver(sandbox, server.client, (baseUrl) =>
+        s.createShardClient(baseUrl, CONTROL_REQUEST_TIMEOUT_MS))
       const runner = new OpenCodeAgentRunner(
-        makeClientResolver(sandbox, server.client, (baseUrl) =>
-          s.createShardClient(baseUrl, CONTROL_REQUEST_TIMEOUT_MS)),
+        resolveClient,
         sandbox,
         {
           onSessionCreated: sessionHook,
@@ -690,21 +728,69 @@ export async function composeRun(
           },
         },
       )
+      // The in-flight per-round recycling, joined by repeated or concurrent calls.
+      let releaseInFlight: Promise<void> | null = null
+      /**
+       * Recycles the round's workers and their runtime state. Runs after the
+       * round's evidence is frozen: workers and gateways are removed and verified
+       * by original container ID, then endpoints, catalogues, clients and session
+       * mappings for the retired runtimes are cleared. Never throws for a partial
+       * removal — the round's result stands on persisted inputs, the failure is
+       * reported on the run's warnings, ownership stays for the next round's
+       * retry, and the capacity reservation is preserved with it. Only a fully
+       * confirmed removal releases the reservation for re-admission next round.
+       */
+      const releasePopulation = async (): Promise<void> => {
+        if (releaseInFlight) return releaseInFlight
+        const attempt = (async (): Promise<void> => {
+          // Withdraw the published runtimes first, so replacements attach fresh
+          // bridges even when Docker reuses a host port.
+          const retired = [...shardServers]
+          for (const server of retired) retireShardServer(server)
+          try {
+            await sandbox.releaseRound()
+          } catch (e) {
+            onWarning(
+              `Could not recycle Docker workers between rounds: ${(e as Error).message}`,
+            )
+            clearRetiredRuntimeState(retired)
+            return
+          }
+          clearRetiredRuntimeState(retired)
+          // Only after every worker and gateway is confirmed gone.
+          s.ledger.release(reservationId)
+        })()
+        releaseInFlight = attempt
+        try {
+          await attempt
+        } finally {
+          if (releaseInFlight === attempt) releaseInFlight = null
+        }
+      }
+      /** Drops host-side state keyed by retired endpoints: catalogue, client, sessions. */
+      const clearRetiredRuntimeState = (retired: ShardServer[]): void => {
+        for (const server of retired) {
+          shardCatalogs.delete(server.baseUrl)
+          resolveClient.evict?.(server.baseUrl)
+        }
+        // Sessions belong to removed runtimes, and their round evidence is frozen;
+        // anything still arriving for them has no live bridge left to carry it.
+        sessionMap.clear()
+      }
       return {
         config, sandbox, provider, runner,
         planFor: async (agentIds) => {
-          // A population that outgrew what was admitted is admitted again, against a fresh
-          // reading, before any container for it starts.
-          const needed = Math.max(1, Math.min(config.maxContainers, agentIds.length))
-          if (needed > reservedContainers) {
-            await assertHostCapacity(
-              { ...config, populationSize: agentIds.length },
-              s.readCapacity as never,
-              onWarning,
-              { ledger: s.ledger, reservationId, ...companion },
-            )
-            reservedContainers = needed
-          }
+          // Re-admitted every round against a fresh reading — even at the same
+          // size, because the previous round's release gave the reservation back.
+          // A manually grown population is admitted here, before any container
+          // for it starts, so an over-limit clone refuses the round before its
+          // row exists rather than sharing a container or being ignored.
+          await assertHostCapacity(
+            { ...config, populationSize: agentIds.length },
+            s.readCapacity as never,
+            onWarning,
+            { ledger: s.ledger, reservationId, ...companion },
+          )
           await sandbox.planFor(agentIds)
         },
         placement: () => sandbox.placement(),
@@ -713,6 +799,7 @@ export async function composeRun(
         toolchainId,
         sessionMap, sessionHook, warnings,
         capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
+        releasePopulation,
         cleanup: async () => {
           // First: from here on this run's workers can make no further model calls.
           revokeRelay()

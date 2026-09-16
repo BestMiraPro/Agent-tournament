@@ -195,7 +195,7 @@ describe('real-mode wiring', () => {
     const db = openDb(':memory:')
     const repos = makeRepos(db)
     const registry = new RunRegistry()
-    let publish!: (server: { shardIndex: number; baseUrl: string }) => void
+    let publish!: (event: { type: 'started' | 'stopped'; shardIndex: number; baseUrl: string }) => void
     let subscribed = true
     const stoppedSignals: AbortSignal[] = []
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -219,7 +219,7 @@ describe('real-mode wiring', () => {
       planFor: async () => {},
       serverHandle: null,
       shardServers: [],
-      onShardServer: (listener: (server: { shardIndex: number; baseUrl: string }) => void) => {
+      onShardServer: (listener: (event: { type: 'started' | 'stopped'; shardIndex: number; baseUrl: string }) => void) => {
         publish = listener
         return () => { subscribed = false }
       },
@@ -247,22 +247,35 @@ describe('real-mode wiring', () => {
       const record = registry.get(runId)!
       expect(fetchMock).not.toHaveBeenCalled()
 
-      publish({ shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' })
+      publish({ type: 'started', shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' })
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
-      publish({ shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' })
+      publish({ type: 'started', shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' })
       await Promise.resolve()
       expect(fetchMock).toHaveBeenCalledTimes(1)
 
-      publish({ shardIndex: 0, baseUrl: 'http://127.0.0.1:42000' })
+      publish({ type: 'started', shardIndex: 0, baseUrl: 'http://127.0.0.1:42000' })
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
       expect(stoppedSignals[0]!.aborted).toBe(true)
 
+      // A replacement runtime on the REUSED port attaches a fresh bridge: the
+      // stop clears the old attachment, so the same URL starts anew.
+      publish({ type: 'stopped', shardIndex: 0, baseUrl: 'http://127.0.0.1:42000' })
+      publish({ type: 'started', shardIndex: 0, baseUrl: 'http://127.0.0.1:42000' })
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+      expect(stoppedSignals[1]!.aborted).toBe(true)
+
+      // A stale stop for an endpoint that is no longer attached kills nothing.
+      publish({ type: 'stopped', shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' })
+      await Promise.resolve()
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(stoppedSignals[2]!.aborted).toBe(false)
+
       await disposeRunRecord(record)
       expect(subscribed).toBe(false)
-      expect(stoppedSignals[1]!.aborted).toBe(true)
-      publish({ shardIndex: 1, baseUrl: 'http://127.0.0.1:43000' })
+      expect(stoppedSignals[2]!.aborted).toBe(true)
+      publish({ type: 'started', shardIndex: 1, baseUrl: 'http://127.0.0.1:43000' })
       await Promise.resolve()
-      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock).toHaveBeenCalledTimes(3)
     } finally {
       vi.unstubAllGlobals()
       await app.close()

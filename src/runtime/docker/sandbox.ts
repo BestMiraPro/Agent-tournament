@@ -11,6 +11,8 @@ export interface StartedContainer {
   shardIndex: number
   /** The daemon's identity for the worker, when starting it reported one. */
   containerId?: string
+  /** A protected shard's gateway, removed and verified together with the worker. */
+  gatewayName?: string
 }
 
 export interface DockerSandboxOptions {
@@ -26,8 +28,27 @@ export interface DockerSandboxOptions {
   isolation?: 'protected' | 'shared'
   startContainer: (shardIndex: number, hostDir: string) => Promise<StartedContainer>
   stopContainer: (name: string) => Promise<void>
+  /**
+   * Confirms an original instance is gone, by container ID (or name when the
+   * daemon never reported an ID). Wired to the same seam the runner uses for
+   * termination evidence. Without it a resolved removal is the only proof, as
+   * before; with it, a warning-only removal that left the instance running is
+   * treated as the failure it is.
+   */
+  runtimeStateOf?: (id: string) => Promise<'running' | 'stopped' | 'unknown'>
   /** Reports non-fatal problems — notably a container that could not be stopped. */
   onWarning?: (message: string) => void
+}
+
+/**
+ * Ownership key for one started instance: the daemon's immutable ID when the
+ * start reported one, the reusable name otherwise. Names are for messages only —
+ * a later round may reuse a name for a different instance, so removal is
+ * confirmed against this key and concurrent removals of different instances
+ * never join each other.
+ */
+function ownershipKey(container: Pick<StartedContainer, 'name' | 'containerId'>): string {
+  return container.containerId ?? container.name
 }
 
 /**
@@ -47,13 +68,14 @@ export class DockerSandbox implements Sandbox {
   private containers = new Map<number, StartedContainer>()
   private pendingStarts = new Map<number, Promise<StartedContainer>>()
   private live = new Set<string>()
-  /** Every container ever started, keyed by name. Never pruned by `teardown`, so
-   *  `disposeAll` can clean up a container even after its per-shard bookkeeping
-   *  in `containers` has been removed. */
-  private everStarted = new Map<string, StartedContainer>()
-  private stoppedNames = new Set<string>()
-  /** In-flight stops, so two callers reaching one container issue a single attempt. */
-  private stopAttempts = new Map<string, Promise<void>>()
+  /** Every started instance still owned, keyed by immutable container ID.
+   *  Successes are pruned on removal, so this holds current resources plus
+   *  unresolved cleanup failures — never total rounds completed. */
+  private owned = new Map<string, StartedContainer>()
+  /** In-flight removals, so two callers reaching one instance issue a single attempt. */
+  private stopAttempts = new Map<string, Promise<boolean>>()
+  /** The in-flight per-round cleanup, joined by repeated or concurrent calls. */
+  private releaseInFlight: Promise<void> | null = null
   private disposed = false
 
   constructor(private opts: DockerSandboxOptions) {}
@@ -161,11 +183,8 @@ export class DockerSandbox implements Sandbox {
         shardIndex,
         this.shardHostDir(shardIndex),
       )
-      // A container name can be reused after teardown. It is a newly owned
-      // resource and therefore must be eligible for one new stop.
-      this.stoppedNames.delete(container.name)
       this.containers.set(shardIndex, container)
-      this.everStarted.set(container.name, container)
+      this.owned.set(ownershipKey(container), container)
       return container
     })()
     this.pendingStarts.set(shardIndex, start)
@@ -284,59 +303,157 @@ export class DockerSandbox implements Sandbox {
   }
 
   /**
-   * Stops a container at most once, and never propagates a failure.
+   * Removes one owned instance, confirmed against its original identity.
    *
    * A throwing `stopContainer` used to abort `disposeAll` mid-loop, so one unstoppable
-   * container stranded every container after it — the exact outcome disposeAll exists to
-   * prevent. The failure is reported instead: a container we could not stop is a leak the
-   * user needs to know about, and the next run's orphan sweep is what will collect it.
+   * container stranded every container after it — the exact outcome disposal exists to
+   * prevent. The failure is reported instead and the instance stays owned for retry.
+   *
+   * A resolved removal alone is not proof either: the warning-only remover resolves
+   * after reporting a failure internally. When `runtimeStateOf` is wired, the original
+   * worker instance (by container ID) and its gateway must both read back as gone;
+   * anything else — still running, or unknown — keeps the instance owned. True on
+   * confirmed removal, false when ownership was retained for retry.
    */
-  private stopOnce(container: StartedContainer): Promise<void> {
-    // Success, not the attempt, is what makes a container done. Recording the name first
-    // meant a failed stop marked it stopped forever, so `disposeAll` — the unconditional
-    // backstop against a leaked container — skipped the one container that actually
-    // leaked. A name still eligible for retry is the whole value of that backstop.
-    if (this.stoppedNames.has(container.name)) return Promise.resolve()
+  private stopOnce(container: StartedContainer): Promise<boolean> {
+    const key = ownershipKey(container)
+    // Already released: each instance is removed at most once, and successes are
+    // pruned from ownership, so a second call is a no-op rather than a new removal.
+    if (!this.owned.has(key)) return Promise.resolve(true)
 
     // Concurrent callers join one attempt rather than each issuing their own stop;
-    // teardown and disposeAll can reach the same container at the same time.
-    const inFlight = this.stopAttempts.get(container.name)
+    // teardown and disposeAll can reach the same instance at the same time.
+    const inFlight = this.stopAttempts.get(key)
     if (inFlight) return inFlight
 
-    const attempt = (async () => {
+    const attemptHolder: { current: Promise<boolean> | null } = { current: null }
+    const attempt = (async (): Promise<boolean> => {
       try {
-        await this.opts.stopContainer(container.name)
-        this.stoppedNames.add(container.name)
-      } catch (e) {
-        this.opts.onWarning?.(
-          `Could not stop container ${container.name}: ${(e as Error).message}. ` +
-            `It may still be running — check with \`docker ps -a --filter name=${container.name}\`.`,
-        )
+        try {
+          await this.opts.stopContainer(container.name)
+        } catch (e) {
+          this.opts.onWarning?.(
+            `Could not stop container ${container.name}: ${(e as Error).message}. ` +
+              `It may still be running — check with \`docker ps -a --filter name=${container.name}\`.`,
+          )
+          return false
+        }
+        if (!(await this.verifyGone(container))) return false
+        this.owned.delete(key)
+        return true
       } finally {
-        this.stopAttempts.delete(container.name)
+        if (this.stopAttempts.get(key) === attemptHolder.current) this.stopAttempts.delete(key)
       }
     })()
-    this.stopAttempts.set(container.name, attempt)
+    attemptHolder.current = attempt
+    this.stopAttempts.set(key, attempt)
     return attempt
   }
 
   /**
-   * Stops every container this sandbox ever started, regardless of `live` state.
+   * Confirms the original worker instance and its gateway are gone. True when both
+   * read back as removed; false (after reporting) when either is still present or
+   * its state cannot be established. Without a verifier there is nothing stricter
+   * than the removal itself, so it passes as before.
+   */
+  private async verifyGone(container: StartedContainer): Promise<boolean> {
+    const verify = this.opts.runtimeStateOf
+    if (!verify) return true
+    const stateOf = async (id: string): Promise<'running' | 'stopped' | 'unknown'> => {
+      try {
+        return await verify(id)
+      } catch {
+        return 'unknown'
+      }
+    }
+    const fail = (detail: string): boolean => {
+      this.opts.onWarning?.(
+        `Could not confirm removal of container ${container.name}: ${detail}. ` +
+          `It stays owned for retry and capacity stays reserved — check with \`docker ps -a --filter name=${container.name}\`.`,
+      )
+      return false
+    }
+    const worker = await stateOf(container.containerId ?? container.name)
+    if (worker !== 'stopped') {
+      return fail(
+        worker === 'running'
+          ? `the original instance${container.containerId ? ` ${container.containerId.slice(0, 12)}` : ''} is still running`
+          : 'Docker could not establish whether the original instance stopped',
+      )
+    }
+    if (container.gatewayName) {
+      const gateway = await stateOf(container.gatewayName)
+      if (gateway !== 'stopped') {
+        return fail(
+          gateway === 'running'
+            ? `its gateway ${container.gatewayName} is still running`
+            : `Docker could not establish whether its gateway ${container.gatewayName} stopped`,
+        )
+      }
+    }
+    return true
+  }
+
+  /**
+   * Recycles every owned worker between rounds: removes each instance and its
+   * gateway with the same strict confirmation as disposal, then drops per-round
+   * state so the next round provisions fresh workers.
+   *
+   * Nonterminal, unlike `disposeAll`: later `planFor` and `provision` calls work
+   * normally. Workspaces on disk and all database records are untouched — only
+   * containers and in-memory handles go. Failed instances stay owned (and keep
+   * their capacity reserved upstream) for the next round's retry; the error names
+   * them. Repeated or concurrent calls join the same in-flight attempt.
+   */
+  async releaseRound(): Promise<void> {
+    if (this.disposed) throw new Error('docker sandbox has been disposed')
+    if (this.releaseInFlight) return this.releaseInFlight
+    const attempt = (async (): Promise<void> => {
+      // Starts already handed to the container boundary are ours even if they have
+      // not returned yet. Wait for them to register so cleanup cannot lose them.
+      await Promise.allSettled([...this.pendingStarts.values()])
+      const targets = [...this.owned.values()]
+      const results = await Promise.all(targets.map((container) => this.stopOnce(container)))
+      // Per-round state only: the next round restarts every shard fresh, which is
+      // the point — no OpenCode conversation memory survives. `owned` keeps only
+      // the failures, each still eligible for one new removal on retry.
+      this.pendingStarts.clear()
+      this.containers.clear()
+      this.live.clear()
+      const failed = targets.filter((_, i) => !results[i])
+      if (failed.length > 0) {
+        throw new Error(
+          `Could not release ${failed.length} worker container(s) between rounds: ` +
+            `${failed.map((c) => c.name).join(', ')}. ` +
+            `They stay owned for retry and capacity stays reserved.`,
+        )
+      }
+    })()
+    this.releaseInFlight = attempt
+    try {
+      await attempt
+    } finally {
+      if (this.releaseInFlight === attempt) this.releaseInFlight = null
+    }
+  }
+
+  /**
+   * Stops every owned instance, regardless of `live` state.
    *
    * `teardown` only stops a shard's container once every agent that ever shared it has
    * been individually torn down — a check that depends on bookkeeping which can go wrong
    * (a sibling whose provisioning failed, a planned agent never provisioned at all, a
    * culled agent that no longer appears in the active population). `disposeAll` sidesteps
-   * that fragility entirely: it is the unconditional backstop that guarantees no shard
-   * container outlives the run. Safe to call more than once — each container is stopped
-   * at most once.
+   * that fragility entirely: it is the unconditional backstop that guarantees no owned
+   * instance outlives the run, retrying anything a per-round release left behind. Safe to
+   * call more than once — each instance is removed at most once.
    */
   async disposeAll(): Promise<void> {
     this.disposed = true
     // Starts already handed to the container boundary are ours even if they have
     // not returned yet. Wait for them to register so disposal cannot lose them.
     await Promise.allSettled([...this.pendingStarts.values()])
-    for (const container of this.everStarted.values()) {
+    for (const container of [...this.owned.values()]) {
       await this.stopOnce(container)
     }
     this.pendingStarts.clear()

@@ -43,6 +43,8 @@ const mockSeams = () => ({
   relay: vi.fn(async () => ({ policy: new RelayPolicy(), port: 45678 })),
   createShardNetworkFn: vi.fn(async (runId: string, shardIndex: number) => `arena-${runId}-net-${shardIndex}`),
   removeShardNetworkFn: vi.fn(async (_name: string, _onWarning?: (message: string) => void) => true),
+  // Strict removal confirmation reads the fake daemon, never a real one.
+  runtimeStateOf: vi.fn(async (_id: string) => 'stopped' as const),
 })
 
 describe('composeRun', () => {
@@ -623,7 +625,9 @@ describe('composeRun', () => {
         workspaceRoot: root, authFile: join(root, 'auth.json'),
       }), { ...seams, ...dockerBoundary } as never)
       const seen: { shardIndex: number; baseUrl: string }[] = []
-      const unsubscribe = c.onShardServer!((server) => seen.push(server))
+      const unsubscribe = c.onShardServer!((event) => {
+        if (event.type === 'started') seen.push(event)
+      })
 
       expect(c.shardServers).toEqual([])
       await c.planFor!(['a1', 'a2'])
@@ -632,8 +636,8 @@ describe('composeRun', () => {
         c.sandbox.provision('a2', {}),
       ])
       expect(seen.sort((a, b) => a.shardIndex - b.shardIndex)).toEqual([
-        { shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' },
-        { shardIndex: 1, baseUrl: 'http://127.0.0.1:41001' },
+        { type: 'started', shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' },
+        { type: 'started', shardIndex: 1, baseUrl: 'http://127.0.0.1:41001' },
       ])
 
       await c.planFor!(['a1', 'a2'])
