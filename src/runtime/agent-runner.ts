@@ -40,7 +40,7 @@ export interface AgentRunResult {
 export interface AgentRunner {
   run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult>
   /** Before PREPARE, reject while any prior invocation (including culled agents) remains live. */
-  assertReadyForRound?(): void
+  assertReadyForRound?(): void | Promise<void>
   /**
    * Attempts to abort every tracked session; retain unconfirmed execution evidence.
    *

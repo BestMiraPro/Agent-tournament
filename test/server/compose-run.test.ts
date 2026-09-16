@@ -424,6 +424,43 @@ describe('composeRun', () => {
         rmSync(root, { recursive: true, force: true })
       }
     })
+
+    test('a Docker-confirmed worker death unblocks the next round and keeps the failure record', async () => {
+      const ledger = new CapacityLedger()
+      const root = mkdtempSync(join(tmpdir(), 'compose-oom-'))
+      const states = new Map<string, 'running' | 'stopped' | 'unknown'>([['cid-9', 'running']])
+      const runtimeStateOf = vi.fn(async (id: string) => states.get(id) ?? 'unknown')
+      try {
+        const c = await composeRun(spec(root, 1), seamsWith(ledger, {
+          startShardContainerFn: vi.fn(async (s: { shardIndex: number }) => ({
+            name: `arena-run-${s.shardIndex}`, baseUrl: `http://127.0.0.1:${45000 + s.shardIndex}`, shardIndex: s.shardIndex,
+            containerId: 'cid-9',
+          })),
+          removeContainerFn: vi.fn(async () => {}),
+          createShardClient: () => shardClient(async () => { throw new Error('socket hang up') }),
+          inspectContainer: vi.fn(async () => ({ oomKilled: true, running: false })),
+          runtimeStateOf,
+        }) as never)
+        await c.planFor!(['a1'])
+        const h = await c.sandbox.provision('a1', {})
+        // The provisioned handle carries the worker's container ID for later termination checks.
+        expect(h.runtimeId).toBe('cid-9')
+        const result = await c.runner.run(h, { agentId: 'a1', goalMd: 'g', timeoutMs: 1000, genome })
+        expect(result.failure).toMatchObject({ code: 'CONTAINER_OOM' })
+        const ready = () => c.runner.assertReadyForRound?.()
+        // The original container is still running: the next round stays refused.
+        await expect(ready()).rejects.toThrow(/still running/)
+        expect(runtimeStateOf).toHaveBeenCalledWith('cid-9')
+        // The daemon confirms the original container stopped: reconciled, while
+        // the recorded failure still says what killed the worker.
+        states.set('cid-9', 'stopped')
+        await expect(ready()).resolves.toBeUndefined()
+        expect(result.failure).toMatchObject({ code: 'CONTAINER_OOM' })
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
   })
 
   describe('context folder', () => {

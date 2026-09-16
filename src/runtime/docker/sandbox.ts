@@ -9,6 +9,8 @@ export interface StartedContainer {
   name: string
   baseUrl: string
   shardIndex: number
+  /** The daemon's identity for the worker, when starting it reported one. */
+  containerId?: string
 }
 
 export interface DockerSandboxOptions {
@@ -196,6 +198,7 @@ export class DockerSandbox implements Sandbox {
       // CONTAINER path — this becomes OpenCode's ?directory= parameter.
       workspacePath: `/work/${agentId}`,
       baseUrl: container.baseUrl,
+      runtimeId: container.containerId,
     }
   }
 

@@ -31,6 +31,7 @@ import { processLedger, readHostCapacity, type CapacityLedger } from '../runtime
 import {
   containerName,
   inspectContainerState,
+  inspectRuntimeState,
   startShardContainer,
   type ProtectedRuntimeSpec,
 } from '../runtime/docker/container.js'
@@ -85,6 +86,12 @@ export interface ComposeSeams {
   ledger: CapacityLedger
   /** The daemon's account of a container's end, to tell an OOM kill from a model failure. */
   inspectContainer: (name: string) => Promise<{ oomKilled: boolean; running: boolean } | null>
+  /**
+   * Authoritative state of an old worker's original container, by container ID —
+   * the evidence that unblocks the next round after a worker death. Never the
+   * reusable container name, which a later round may reuse for another worker.
+   */
+  runtimeStateOf: (id: string) => Promise<'running' | 'stopped' | 'unknown'>
   /** The process's provider relay: its policy, and the loopback port shard gateways forward to. */
   relay: () => Promise<{ policy: RelayPolicy; port: number }>
   /** Reads a host file the protected runtime needs (credentials, catalogue) as text. */
@@ -128,6 +135,7 @@ export const defaultSeams: ComposeSeams = {
   inspectPath: pathKind,
   ledger: processLedger,
   inspectContainer: (name) => inspectContainerState(name),
+  runtimeStateOf: (id) => inspectRuntimeState(id),
   relay: () => processRelay(),
   readTextFile: (path) => readFile(path, 'utf8'),
   createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
@@ -667,6 +675,9 @@ export async function composeRun(
                 'this is a resource limit, not a model failure. Raise Memory per container, or give each agent less to hold in memory.',
             }
           },
+          // Termination of a retained invocation resolves against the invocation's
+          // original container ID — never the current plan's reusable name.
+          runtimeState: (handle) => s.runtimeStateOf(handle.runtimeId ?? ''),
           // Per agent rather than per roster entry: agents added or bred mid-run carry
           // models the roster check at shard start never saw.
           modelUnavailable: (handle, modelId) => {

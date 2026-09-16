@@ -162,7 +162,7 @@ describe('OpenCodeAgentRunner model availability', () => {
     // Nothing was dispatched, so zero usage is a fact rather than a placeholder.
     expect(res.usageKnown).not.toBe(false)
     expect(res.tokensIn + res.tokensOut + res.costUsd).toBe(0)
-    expect(() => runner.assertReadyForRound()).not.toThrow()
+    await expect(runner.assertReadyForRound()).resolves.toBeUndefined()
   })
 
   test('runs normally when the runtime lists the model', async () => {

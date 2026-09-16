@@ -41,6 +41,13 @@ export interface AgentRunnerOptions {
    * without a response, and bounded, so a slow daemon cannot hold a failed run open.
    */
   resourceFailure?: (handle: AgentHandle) => Promise<AgentFailure | null>
+  /**
+   * Authoritative evidence of what an old worker's ORIGINAL container is doing,
+   * resolved against the handle's immutable runtime identity — never the current
+   * plan's reusable container name. Consulted only while remote termination is
+   * otherwise unconfirmed; a `stopped` answer confirms it.
+   */
+  runtimeState?: (handle: AgentHandle) => Promise<'running' | 'stopped' | 'unknown'>
 }
 
 /** How long a failed run waits for resource evidence before keeping its own failure. */
@@ -100,10 +107,55 @@ export class OpenCodeAgentRunner implements AgentRunner {
   }
 
   /** Once per round, before a new roster can reuse any shared shard or workspace. */
-  assertReadyForRound(): void {
-    if (this.live.size > 0) {
-      throw new Error('previous round is still active or remote termination is unconfirmed')
+  async assertReadyForRound(): Promise<void> {
+    for (const run of [...this.live.values()]) {
+      await this.reconcile(run)
+      // Reconciling may have forgotten this invocation; only a retained one blocks.
+      if (this.live.get(run.agentId) !== run) continue
+      throw new Error(this.blockReason(run))
     }
+  }
+
+  /**
+   * Confirms a retained invocation against authoritative runtime evidence.
+   *
+   * Terminal-response and session-status evidence keep working exactly as before —
+   * this only adds the runtime check for invocations they left unconfirmed. The
+   * invocation is forgotten only once BOTH remote termination and local return
+   * hold; anything else keeps refusing.
+   */
+  private async reconcile(run: LiveRun): Promise<void> {
+    if (run.remoteStopped) return
+    const check = this.options.runtimeState
+    if (!check) return
+    let state: 'running' | 'stopped' | 'unknown'
+    try {
+      state = await check({ ...run.handle })
+    } catch {
+      state = 'unknown'
+    }
+    run.runtime = state
+    if (state === 'stopped') this.confirmStopped(run)
+  }
+
+  /**
+   * Why one retained invocation blocks the next round: the blocking agent, with
+   * the concrete distinction between a locally pending invocation, a still
+   * running original container, and runtime evidence that could not be read.
+   */
+  private blockReason(run: LiveRun): string {
+    const who = `agent ${run.agentId}`
+    if (!run.localReturned) {
+      return `${who}: previous invocation has not returned locally — remote termination is unconfirmed`
+    }
+    const id = run.handle.runtimeId ? ` ${shortRuntimeId(run.handle.runtimeId)}` : ''
+    if (run.runtime === 'running') {
+      return `${who}: original container${id} is still running — remote termination is unconfirmed`
+    }
+    if (this.options.runtimeState) {
+      return `${who}: Docker could not establish whether the original container${id} stopped — remote termination is unconfirmed`
+    }
+    return 'previous round is still active or remote termination is unconfirmed'
   }
 
   /** Per-invocation guard permits unrelated workers within the admitted round. */
@@ -123,16 +175,24 @@ export class OpenCodeAgentRunner implements AgentRunner {
     // Cancellation closes prompt admission even if session creation returns later.
     if (!run.promptDispatched) this.confirmStopped(run)
     if (run.remoteStopped) return 'stopped'
+    // An OOM-killed worker takes its server with it: the status watch below would
+    // poll an unreachable endpoint until the grace expires. Runtime evidence
+    // answers now instead of depending on that server eventually answering.
+    await this.reconcile(run)
+    if (run.remoteStopped) return 'stopped'
     this.requestAbort(run)
 
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      return await Promise.race([
+      const status = await Promise.race([
         run.stopped.then((): QuiesceStatus => 'stopped'),
         new Promise<QuiesceStatus>((resolve) => {
           timer = setTimeout(() => resolve('unconfirmed'), QUIESCE_GRACE_MS)
         }),
       ])
+      if (status === 'stopped') return 'stopped'
+      await this.reconcile(run)
+      return run.remoteStopped ? 'stopped' : 'unconfirmed'
     } finally {
       clearTimeout(timer)
     }
@@ -247,6 +307,11 @@ export class OpenCodeAgentRunner implements AgentRunner {
       client,
       sessionId: null,
       directory: handle.workspacePath,
+      // The invocation's own runtime identity, frozen now: later rounds replan
+      // and reprovision, so resolving termination later must use this copy —
+      // never the current shard plan, roster, or a reusable container name.
+      handle: { ...handle },
+      runtime: null,
       promptDispatched: false,
       stopRequested: false,
       abortRequested: false,
@@ -378,6 +443,14 @@ interface LiveRun {
   client: OpenCodeClient
   sessionId: string | null
   directory: string
+  /** Copy of the handle this invocation was dispatched with; see `run`. */
+  handle: AgentHandle
+  /**
+   * Last runtime-state answer for this invocation, for the refusal message.
+   * Null until the callback is consulted — and it stays null when no callback
+   * is configured, which keeps the legacy refusal text for those runners.
+   */
+  runtime: 'running' | 'stopped' | 'unknown' | null
   promptDispatched: boolean
   stopRequested: boolean
   abortRequested: boolean
@@ -391,6 +464,11 @@ interface LiveRun {
 function workspaceKey(directory: string): string {
   const absolute = resolvePath(directory)
   return process.platform === 'win32' ? absolute.toLowerCase() : absolute
+}
+
+/** Docker's short-ID convention for naming a container in a message. */
+function shortRuntimeId(id: string): string {
+  return id.length > 12 ? id.slice(0, 12) : id
 }
 
 /** Total grace for confirmed termination, including any abort request time. */

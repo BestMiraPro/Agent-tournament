@@ -1,5 +1,5 @@
 import { buildProtectedRunArgs, buildRunArgs, docker, parsePortMapping, removeContainer } from './cli.js'
-import type { DockerFn } from './cli.js'
+import type { DockerFn, ExecResult } from './cli.js'
 import { buildGatewayRunArgs, GATEWAY_ALIAS, GATEWAY_API_PORT, gatewayName } from './gateway.js'
 
 /** Where a protected shard's worker gets its network, relay config and relay route. */
@@ -34,6 +34,13 @@ export interface ShardContainer {
   name: string
   baseUrl: string
   shardIndex: number
+  /**
+   * The daemon's own identity for the worker, read after a successful start.
+   * Termination of an old invocation resolves against this, never the reusable
+   * name. Undefined when the daemon would not say (its absence degrades that
+   * evidence to unknown, never to a failed start).
+   */
+  containerId?: string
   /** Protected shards: the gateway container that must be removed with the worker. */
   gatewayName?: string
   network?: string
@@ -42,6 +49,58 @@ export interface ShardContainer {
 /** Stable name so a restarted orchestrator can find and adopt existing containers. */
 export function containerName(runId: string, shardIndex: number): string {
   return `arena-${runId}-${shardIndex}`
+}
+
+/**
+ * Authoritative runtime state of one container, addressed by its ID.
+ *
+ * - `stopped`: the container is confirmed exited, dead, or absent.
+ * - `running`: it still exists in a state capable of retaining execution —
+ *   a paused or restarting worker still holds its execution, so neither counts
+ *   as stopped.
+ * - `unknown`: Docker is unavailable, permission is denied, output is invalid,
+ *   or absence cannot be distinguished from an inspection failure.
+ *
+ * A bounded request. Unlike `containerState` in cli.ts, a failed inspection is
+ * not "absent": only the daemon's own "no such object" is.
+ */
+export type RuntimeState = 'running' | 'stopped' | 'unknown'
+
+export async function inspectRuntimeState(
+  id: string,
+  run: DockerFn = docker,
+): Promise<RuntimeState> {
+  if (!id) return 'unknown'
+  let r: ExecResult
+  try {
+    r = await run(
+      ['inspect', '-f', '{{.State.Running}}|{{.State.Paused}}|{{.State.Restarting}}', id],
+      20_000,
+    )
+  } catch {
+    return 'unknown'
+  }
+  if (r.code !== 0) {
+    return /no such (object|container)/i.test(`${r.stderr}\n${r.stdout}`) ? 'stopped' : 'unknown'
+  }
+  const [running, paused, restarting] = r.stdout.trim().split('|')
+  const states = [running, paused, restarting].map((v) =>
+    v === 'true' ? true : v === 'false' ? false : null,
+  )
+  if (states.some((v) => v === null)) return 'unknown'
+  return states.some((v) => v === true) ? 'running' : 'stopped'
+}
+
+/** The daemon's identity for a live container; undefined when it would not say. */
+async function readContainerId(name: string, run: DockerFn): Promise<string | undefined> {
+  try {
+    const r = await run(['inspect', '-f', '{{.Id}}', name], 20_000)
+    if (r.code !== 0) return undefined
+    const id = r.stdout.trim()
+    return id.length > 0 ? id : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -134,7 +193,7 @@ export async function startShardContainer(
       }
     }
 
-    return { name, baseUrl, shardIndex: spec.shardIndex }
+    return { name, baseUrl, shardIndex: spec.shardIndex, containerId: await readContainerId(name, run) }
   } catch (e) {
     // An adopted container is removed too: one wearing our name that cannot serve is
     // useless to us and would only be adopted again by the next attempt.
@@ -205,7 +264,7 @@ async function startProtectedShard(
       const healthy = await waitForHealth(() => healthProbe(baseUrl), spec.healthTimeoutMs ?? 60_000)
       if (!healthy) throw new Error(`Container ${name} started but never became healthy through its gateway at ${baseUrl}`)
     }
-    return { name, baseUrl, shardIndex: spec.shardIndex, gatewayName: gateway, network: runtime.network }
+    return { name, baseUrl, shardIndex: spec.shardIndex, containerId: await readContainerId(name, run), gatewayName: gateway, network: runtime.network }
   } catch (e) {
     await removeContainer(name, onWarning, run)
     if (gatewayStarted) await removeContainer(gateway, onWarning, run)

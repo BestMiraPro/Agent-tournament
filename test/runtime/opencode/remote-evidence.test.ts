@@ -227,13 +227,13 @@ describe('remote execution evidence', () => {
       const { runner, handle, reads } = await timedOutRunner(() => (busy-- > 0 ? { session: { type: 'busy' } } : {}))
       expect(await grace(runner.quiesce(handle))).toBe('stopped')
       expect(reads()).toBeGreaterThanOrEqual(3)
-      expect(() => runner.assertReadyForRound()).not.toThrow()
+      await expect(runner.assertReadyForRound()).resolves.toBeUndefined()
     })
 
     test('still busy, or unreadable, confirms nothing', async () => {
       const busy = await timedOutRunner(() => ({ session: { type: 'busy' } }))
       expect(await grace(busy.runner.quiesce(busy.handle))).toBe('unconfirmed')
-      expect(() => busy.runner.assertReadyForRound()).toThrow(/unconfirmed/)
+      await expect(busy.runner.assertReadyForRound()).rejects.toThrow(/unconfirmed/)
       const garbled = await timedOutRunner(() => ['not', 'a', 'map'])
       expect(await grace(garbled.runner.quiesce(garbled.handle))).toBe('unconfirmed')
     })
@@ -251,6 +251,136 @@ describe('remote execution evidence', () => {
     const runner = new OpenCodeAgentRunner(new OpenCodeClient({ baseUrl: 'http://fake.invalid', timeoutMs: 50, transport }), sandbox)
     expect((await runner.run(handle, context())).status).toBe('error')
     expect(await grace(runner.quiesce(handle))).toBe('unconfirmed')
+  })
+
+  describe('authoritative runtime termination', () => {
+    const oomFailure = { code: 'CONTAINER_OOM', message: 'Container fake-0 was stopped for exceeding its 1g memory limit.' }
+
+    async function terminatedFixture(states: Map<string, 'running' | 'stopped' | 'unknown'>, diagnose: boolean) {
+      const sandbox = new MockSandbox()
+      const handle = await sandbox.provision('a1', {})
+      const client = new DeferredClient()
+      const consulted: (string | undefined)[] = []
+      const runner = new OpenCodeAgentRunner(client, sandbox, {
+        resourceFailure: async () => (diagnose ? oomFailure : null),
+        runtimeState: async (h) => {
+          consulted.push(h.runtimeId)
+          return states.get(h.runtimeId ?? '') ?? 'unknown'
+        },
+      })
+      return { sandbox, handle, client, runner, consulted }
+    }
+
+    test('a stopped original container unblocks the next round and keeps the original evidence', async () => {
+      const states = new Map([['cid-1', 'stopped' as const]])
+      const { sandbox, handle, client, runner, consulted } = await terminatedFixture(states, true)
+      const run = runner.run({ ...handle, runtimeId: 'cid-1' }, context())
+      await vi.advanceTimersByTimeAsync(0)
+      client.response.reject(new TypeError('connection lost'))
+      const result = await run
+      expect(result.status).toBe('error')
+      // The OOM classification and the unknown usage survive reconciliation,
+      // and no submission is manufactured for the dead worker.
+      expect(result.failure).toMatchObject({ code: 'CONTAINER_OOM' })
+      expect(result.usageKnown).toBe(false)
+      expect(await sandbox.readFile(handle, 'SUBMISSION.md')).toBeNull()
+      await expect(runner.assertReadyForRound()).resolves.toBeUndefined()
+      // Termination resolved against the invocation's original container ID.
+      expect(consulted).toContain('cid-1')
+    })
+
+    test('a confirmed exit without OOM evidence keeps the original failure, not a resource one', async () => {
+      const states = new Map([['cid-1', 'stopped' as const]])
+      const { handle, client, runner } = await terminatedFixture(states, false)
+      const run = runner.run({ ...handle, runtimeId: 'cid-1' }, context())
+      await vi.advanceTimersByTimeAsync(0)
+      client.response.reject(new TypeError('connection lost'))
+      const result = await run
+      expect(result.failure?.code).not.toBe('CONTAINER_OOM')
+      expect(result.usageKnown).toBe(false)
+      await expect(runner.assertReadyForRound()).resolves.toBeUndefined()
+    })
+
+    test('the refusal names the blocking agent and distinguishes the three unresolved cases', async () => {
+      const states = new Map<string, 'running' | 'stopped' | 'unknown'>([['cid-1', 'unknown']])
+      const { handle, client, runner } = await terminatedFixture(states, true)
+      // Locally pending first: the invocation has not returned at all.
+      const run = runner.run({ ...handle, runtimeId: 'cid-1' }, context('a1', 60_000))
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(runner.assertReadyForRound()).rejects.toThrow(/agent a1.*has not returned locally/)
+      // A transport failure ends the local run while remote termination stays
+      // unconfirmed: the refusal must now distinguish the runtime evidence.
+      client.response.reject(new TypeError('connection lost'))
+      await run
+      // Original container still running.
+      states.set('cid-1', 'running')
+      await expect(runner.assertReadyForRound()).rejects.toThrow(/agent a1.*original container.*is still running/)
+      // Runtime evidence unreadable.
+      states.set('cid-1', 'unknown')
+      await expect(runner.assertReadyForRound()).rejects.toThrow(/agent a1.*could not establish whether the original container.*stopped/)
+      // And resolved once the container is confirmed stopped.
+      states.set('cid-1', 'stopped')
+      await expect(runner.assertReadyForRound()).resolves.toBeUndefined()
+    })
+
+    test('without a runtime callback the legacy refusal is kept', async () => {
+      const { handle, client, runner } = await fixture()
+      const run = runner.run(handle, context())
+      await vi.advanceTimersByTimeAsync(0)
+      client.response.reject(new TypeError('connection lost'))
+      await run
+      await expect(runner.assertReadyForRound()).rejects.toThrow(
+        'previous round is still active or remote termination is unconfirmed',
+      )
+    })
+
+    test('quiesce confirms an OOM-killed worker without waiting for its dead server', async () => {
+      const states = new Map([['cid-1', 'stopped' as const]])
+      const { handle, client, runner } = await terminatedFixture(states, true)
+      const run = runner.run({ ...handle, runtimeId: 'cid-1' }, context())
+      await vi.advanceTimersByTimeAsync(0)
+      client.response.reject(new TypeError('connection lost'))
+      await run
+      // No grace advance: the status endpoint stays unreachable, and runtime
+      // evidence answers at once.
+      expect(await runner.quiesce(handle)).toBe('stopped')
+      await expect(runner.assertReadyForRound()).resolves.toBeUndefined()
+    })
+
+    test('a late terminal response from an old invocation never clears a newer one', async () => {
+      class TwoShotClient extends OpenCodeClient {
+        first = deferred<PromptResponse>()
+        second = deferred<PromptResponse>()
+        calls = 0
+        constructor() { super({ baseUrl: 'http://fake.invalid', timeoutMs: 50 }) }
+        override async createSession() { return { id: 's' } }
+        override async prompt() { return ++this.calls === 1 ? this.first.promise : this.second.promise }
+        override async abort() {}
+      }
+      const sandbox = new MockSandbox()
+      const handle = await sandbox.provision('a1', {})
+      const client = new TwoShotClient()
+      const states = new Map([['cid-1', 'stopped' as const]])
+      const runner = new OpenCodeAgentRunner(client, sandbox, {
+        runtimeState: async (h) => states.get(h.runtimeId ?? '') ?? 'unknown',
+      })
+      // The old invocation times out locally while its prompt stays pending.
+      const old = runner.run({ ...handle, runtimeId: 'cid-1' }, context('a1', 50))
+      await vi.advanceTimersByTimeAsync(50)
+      expect((await old).status).toBe('timeout')
+      // Runtime evidence reconciles it away, so the same agent runs again.
+      await expect(runner.assertReadyForRound()).resolves.toBeUndefined()
+      const next = runner.run({ ...handle, runtimeId: 'cid-2' }, context('a1', 60_000))
+      await vi.advanceTimersByTimeAsync(0)
+      // The old prompt finally answers terminally — long after its invocation
+      // was forgotten. The newer invocation must be untouched.
+      client.first.resolve(terminal)
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(runner.assertReadyForRound()).rejects.toThrow(/has not returned locally/)
+      client.second.resolve(terminal)
+      await next
+      await expect(runner.assertReadyForRound()).resolves.toBeUndefined()
+    })
   })
 
   test('engine capture stays unverified and a second round cannot reset an uncertain workspace', async () => {
@@ -281,6 +411,9 @@ describe('remote execution evidence', () => {
       expect(provision).not.toHaveBeenCalled()
       expect(reset).not.toHaveBeenCalled()
       expect(await second).toBeInstanceOf(Error)
+      // The refused preflight happens before any round row is inserted: no round
+      // number consumed, no spurious failed round left behind.
+      expect(base.repos.rounds.listForRun(run.id)).toHaveLength(1)
       expect(await base.sandbox.readFile(handle, 'SUBMISSION.md')).toBe('remote writer still owns this')
       expect(await base.sandbox.readFile(handle, 'GOAL.md')).toBe('original goal')
     } finally { base.db.close() }
@@ -372,6 +505,8 @@ describe('remote execution evidence', () => {
       expect(provision).not.toHaveBeenCalled()
       expect(reset).not.toHaveBeenCalled()
       expect(refused).toBeInstanceOf(Error)
+      // The refused preflight happens before any round row is inserted.
+      expect(base.repos.rounds.listForRun(run.id)).toHaveLength(1)
       expect(await sandbox.readFile(handleFor(survivorId), 'SUBMISSION.md')).toBe('preserve prior workspace')
       expect(await sandbox.readFile(handleFor(survivorId), 'GOAL.md')).toBe('original goal')
 

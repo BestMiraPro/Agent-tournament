@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import { buildProtectedRunArgs } from '../../../src/runtime/docker/cli.js'
-import { containerName, inspectContainerState, startShardContainer, waitForHealth } from '../../../src/runtime/docker/container.js'
+import { containerName, inspectContainerState, inspectRuntimeState, startShardContainer, waitForHealth } from '../../../src/runtime/docker/container.js'
 import { buildGatewayRunArgs } from '../../../src/runtime/docker/gateway.js'
 
 describe('startShardContainer with the protected runtime', () => {
@@ -69,6 +69,85 @@ describe('inspectContainerState', () => {
   test('a missing container or unreadable output is unknown, not "not killed"', async () => {
     expect(await inspectContainerState('gone', answer('', 1))).toBeNull()
     expect(await inspectContainerState('odd', answer('<no value>|true'))).toBeNull()
+  })
+})
+
+describe('inspectRuntimeState', () => {
+  const answer = (stdout: string, code = 0, stderr = '') =>
+    vi.fn(async () => ({ stdout, stderr, code }))
+
+  test('an exited, dead, or absent container is stopped', async () => {
+    expect(await inspectRuntimeState('cid-exited', answer('false|false|false\n'))).toBe('stopped')
+    expect(await inspectRuntimeState('cid-dead', answer('false|false|false\n'))).toBe('stopped')
+    const missing = answer('', 1, 'Error: No such object: cid-old')
+    expect(await inspectRuntimeState('cid-old', missing)).toBe('stopped')
+    expect(missing).toHaveBeenCalledWith(
+      ['inspect', '-f', '{{.State.Running}}|{{.State.Paused}}|{{.State.Restarting}}', 'cid-old'],
+      20_000,
+    )
+  })
+
+  test('a running, paused, or restarting container is running — none counts as stopped', async () => {
+    expect(await inspectRuntimeState('cid-run', answer('true|false|false\n'))).toBe('running')
+    expect(await inspectRuntimeState('cid-paused', answer('true|true|false\n'))).toBe('running')
+    expect(await inspectRuntimeState('cid-restart', answer('true|false|true\n'))).toBe('running')
+  })
+
+  test('a reused name does not confuse an old ID: the old ID is absent, so stopped', async () => {
+    // The daemon answers per ID. A new container reusing the old NAME has a
+    // different ID; resolving the old invocation against its own ID reports
+    // the absence instead of the new container's liveness.
+    const byId = vi.fn(async (args: string[]) => {
+      const id = args.at(-1)
+      return id === 'cid-old'
+        ? { stdout: '', stderr: 'Error: No such object: cid-old', code: 1 }
+        : { stdout: 'true|false|false\n', stderr: '', code: 0 }
+    })
+    expect(await inspectRuntimeState('cid-old', byId)).toBe('stopped')
+    expect(await inspectRuntimeState('cid-new', byId)).toBe('running')
+    expect(byId.mock.calls[0]![0].at(-1)).toBe('cid-old')
+  })
+
+  test('an unreadable daemon stays unknown, never absent', async () => {
+    expect(await inspectRuntimeState('cid', answer('', 1, 'Cannot connect to the Docker daemon'))).toBe('unknown')
+    expect(await inspectRuntimeState('cid', answer('', 1, 'permission denied'))).toBe('unknown')
+    expect(await inspectRuntimeState('cid', answer('', 1, 'Error: No such container: '))).toBe('stopped')
+    expect(await inspectRuntimeState('cid', answer('<no value>|true'))).toBe('unknown')
+    expect(await inspectRuntimeState('cid', async () => { throw new Error('socket hang up') })).toBe('unknown')
+    const uncalled = vi.fn(async () => ({ stdout: '', stderr: '', code: 0 }))
+    expect(await inspectRuntimeState('', uncalled)).toBe('unknown')
+    expect(uncalled).not.toHaveBeenCalled()
+  })
+})
+
+describe('startShardContainer container identity', () => {
+  const spec = {
+    runId: 'run1', shardIndex: 0, image: 'agent-arena:latest',
+    hostDir: '/host/shard-0', memory: '1g', cpus: 1, authFile: null,
+  }
+
+  test('returns the daemon container ID for a fresh worker', async () => {
+    const fake = vi.fn(async (args: string[]) => {
+      if (args[0] === 'inspect' && args[2] === '{{.Id}}') {
+        return { stdout: 'abc123def456\n', stderr: '', code: 0 }
+      }
+      if (args[0] === 'inspect') return { stdout: 'false', stderr: '', code: 0 }
+      if (args[0] === 'port') return { stdout: '4096/tcp -> 127.0.0.1:41000', stderr: '', code: 0 }
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    const r = await startShardContainer(spec, fake, async () => true)
+    expect(r.containerId).toBe('abc123def456')
+  })
+
+  test('an unreadable ID degrades to unknown, not to a failed start', async () => {
+    const fake = vi.fn(async (args: string[]) => {
+      if (args[0] === 'inspect') return { stdout: '', stderr: 'No such object', code: 1 }
+      if (args[0] === 'port') return { stdout: '4096/tcp -> 127.0.0.1:41000', stderr: '', code: 0 }
+      return { stdout: '', stderr: '', code: 0 }
+    })
+    const r = await startShardContainer(spec, fake, async () => true)
+    expect(r.containerId).toBeUndefined()
+    expect(r.baseUrl).toBe('http://127.0.0.1:41000')
   })
 })
 
