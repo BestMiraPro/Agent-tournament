@@ -53,6 +53,28 @@ Half a CPU was throttled for 14–22 s per trial and made the workload two to th
 
 ## Not measured
 
-- Memory during a long multi-turn agent session, and several agents' sessions concurrently.
 - Writable disk growth in `/work` (it is a host bind mount, bounded per file by `ulimit fsize`).
 - Native Linux Docker, and any machine but this one.
+
+## Task C sustained-conversation results (September 17 2026)
+
+Same script's `--mode sustained`: real OpenCode processes through the production
+protected worker/gateway path and provider relay, scripted deterministic upstream,
+`wandb/deepseek-ai/DeepSeek-V4-Flash`, 100 tool-response turns per worker per round
+(~2 MB conversation), 10 rounds, membership swap from round 6, capture before
+teardown. Full matrix in the Task C report; headline:
+
+| lifecycle | 768m | 1g |
+| --- | --- | --- |
+| retained N=1 | round-1 peak 744 MiB, then OOM death | peaks 761→828→882 MiB, OOM death ~round 5–6 |
+| recycled N=1 | peaks 727–761 every round, no deaths | PASS ×3 (peaks 725–762) |
+| recycled N=2 | — | PASS ×3 |
+| recycled N=3 | — | admission refused (3 × 1088m > committable) |
+
+- **768m does not sustain conversations**: every 100-turn round peaks above the
+  614 MiB ceiling, and retained workers die. The short-workload pass does not
+  transfer. The default stays at **1g**.
+- **Recycling bounds memory**: fresh workers peak 725–762 MiB per round
+  indefinitely; retained workers accumulate (761→882) and die.
+- Demonstrated ceiling on this host as loaded: **2 simultaneous protected agents
+  at 1g**; gateways steady at 13–14 MiB of their 64m.
