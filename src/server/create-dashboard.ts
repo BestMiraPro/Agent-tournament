@@ -152,6 +152,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     },
     emit: broadcast,
     activityFor: (runId) => defaultActivity.get(runId)?.snapshot() ?? null,
+    hasLiveBudget: (runId) => engine.budgetStatus(runId) !== null,
     capacity: async () => ({ host: await readHostCapacity(), reserved: processLedger.totals() }),
     sweepWith: (cfg, runId, onWarning, workspaceRoot) => {
       // Every registered docker run owns live containers; excluding only the new run

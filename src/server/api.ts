@@ -1,7 +1,8 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { DEFAULT_CONFIG, type AgentRow, type FileEntry, type RunConfig } from '../core/types.js'
-import type { Repos, RoundRow } from '../db/repos.js'
+import type { Repos, RoundRow, RunRow } from '../db/repos.js'
+import type { AgentUsage } from '../engine/budget.js'
 import { TournamentEngine } from '../engine/driver.js'
 import { defaultSeedStrategy } from '../engine/seed-strategy.js'
 import type { EventSink } from '../engine/events.js'
@@ -55,6 +56,9 @@ export interface ApiDeps {
   startModelsServer?: () => Promise<ServerHandle>
   /** Live activity for runs on the default engine, which have no per-run record. */
   activityFor?: (runId: string) => ActivitySnapshot | null
+  /** True when the DEFAULT engine still holds a budget tracker for the run — i.e. a
+   * legacy run created by this process, not a persisted run from an earlier one. */
+  hasLiveBudget?: (runId: string) => boolean
   /** Docker's capacity reading and what this process has reserved, for setup estimates. */
   capacity?: () => Promise<{ host: HostCapacity; reserved: { memoryBytes: number; cpus: number } }>
 }
@@ -140,6 +144,83 @@ function applySpecDefaults(
     }
   }
   return merged
+}
+
+/**
+ * Rebuilds the composition input for a run this process did not create. The runs table
+ * keeps the full RunConfig (post-PATCH), so every composed field round-trips except the
+ * three process-level paths, which come from the current server's defaults — a restart
+ * with the same flags resumes where it left off, a restart without them fails fast with
+ * the missing path named. `goal` only satisfies parse-time shape; the next round's goal
+ * arrives per-request.
+ */
+export function specForResume(run: RunRow, defaults?: SpecDefaults): RunSpec {
+  const cfg = run.config
+  const workspaceRoot = defaults?.workspaceRoot ?? null
+  const authFile = defaults?.authFile ?? null
+  // Same guards as parseRunSpec: a restart without the flags the sandbox needs fails
+  // fast with the missing path named, before compose touches the filesystem.
+  if (cfg.sandbox === 'docker' && !workspaceRoot) {
+    throw new Error('docker sandbox requires workspaceRoot')
+  }
+  if (cfg.sandbox === 'docker' && !authFile) {
+    throw new Error('docker sandbox requires authFile')
+  }
+  if (cfg.sandbox === 'local' && !workspaceRoot) {
+    throw new Error('local sandbox requires workspaceRoot')
+  }
+  return {
+    name: run.name,
+    goal: run.initialGoal ?? 'resumed',
+    sandbox: cfg.sandbox,
+    roster: cfg.roster,
+    population: cfg.populationSize,
+    judge: { modelId: cfg.judge.modelId, mode: cfg.judge.mode },
+    reflect: { modelId: cfg.reflect.modelId, topK: cfg.reflect.topK },
+    budget: {
+      maxRunTokens: cfg.budget.maxRunTokens,
+      maxRoundTokens: cfg.budget.maxRoundTokens,
+      maxAgentTokens: cfg.budget.maxAgentTokens,
+    },
+    selection: { ...cfg.selection },
+    concurrency: cfg.concurrency,
+    maxContainers: cfg.maxContainers,
+    containerMemory: cfg.containerMemory,
+    containerCpus: cfg.containerCpus,
+    isolation: cfg.isolation,
+    pricing: { ...cfg.pricing },
+    seedDir: cfg.seedDir,
+    workspaceRoot,
+    authFile,
+    contextDir: cfg.contextDir,
+    serverUrl: defaults?.serverUrl ?? null,
+    criteria: run.initialCriteria,
+  }
+}
+
+/**
+ * Every recorded agent spend for a run, for `attachExistingRun`. Model ids come from the
+ * round-idx genome (the record of that round); a missing genome keeps the stored tokens
+ * under an `unknown` model so totals still accumulate rather than silently dropping.
+ */
+export function collectRunUsage(repos: Repos, runId: string): AgentUsage[] {
+  const genomes = repos.genomes.forRunByRound(runId)
+  const out: AgentUsage[] = []
+  for (const round of repos.rounds.listForRun(runId)) {
+    for (const sub of repos.submissions.forRound(round.id)) {
+      const genome = genomes.get(`${sub.agentId}:${round.idx}`)
+      out.push({
+        agentId: sub.agentId,
+        modelId: genome?.modelId ?? 'unknown',
+        tokensIn: sub.tokensIn,
+        tokensOut: sub.tokensOut,
+        tokensCacheRead: sub.tokensCacheRead ?? 0,
+        tokensCacheWrite: sub.tokensCacheWrite ?? 0,
+        costUsd: sub.costUsd,
+      })
+    }
+  }
+  return out
 }
 
 /** Compose/create failures are client or contention problems, never 500s. */
@@ -383,6 +464,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         seedStrategy: defaultSeedStrategy,
         onEvent: emit,
         preparePopulation: composed.planFor ?? undefined,
+        releasePopulation: composed.releasePopulation ?? undefined,
         audit: new AuditCollector(deps.repos, {
           provenance: {
             sandbox: composed.config.sandbox,
@@ -843,6 +925,103 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     return { entries, metaDigest: output.metaDigest, mode: output.mode, preview }
   })
 
+  // Rebuilds the in-memory runtime for a run this process did not create, so a
+  // restart resumes where it left off instead of refusing. Composition mirrors POST
+  // /runs (same provider/judge/reflector/audit/bridges); the budget tracker is
+  // replayed from stored submissions, so cumulative caps survive the restart.
+  // No sweep: orphans belong to runs not yet resumed, and container names are stable
+  // (unprotected adopts, protected recreates with a fresh relay token).
+  async function resumeRun(runId: string, run: RunRow): Promise<RunRecord> {
+    const raced = deps.registry?.get(runId)
+    if (raced) return raced
+    const compose = deps.composeWith ?? deps.composeRun
+    if (!compose || !deps.registry) {
+      throw new Error(
+        `run ${runId} uses the ${run.config.sandbox} sandbox and was composed by an earlier ` +
+          `process, so this server cannot resume it after a restart. Start a new run.`,
+      )
+    }
+    const spec = specForResume(run, deps.specDefaults)
+    const holder: RunIdHolder = { value: runId }
+    const composed = await compose(spec, { runIdHolder: holder })
+    try {
+      const broadcast: EventSink = deps.emit ?? (() => {})
+      const activity = new ActivityCache({
+        currentSession: (agentId) => latestSessionFor(composed.sessionMap, agentId),
+      })
+      const emit: EventSink = (e) => {
+        const out = activity.record(e)
+        if (out) broadcast(out)
+      }
+      const engine = new TournamentEngine({
+        repos: deps.repos,
+        config: composed.config,
+        sandbox: composed.sandbox,
+        runner: composed.runner,
+        judge: new Judge(composed.provider, composed.config.judge, 42, undefined, {
+          contextPath: composed.config.contextDir ?? null,
+        }),
+        reflector: new Reflector(
+          composed.provider,
+          composed.config.reflect,
+          composed.config.roster.map((r) => r.modelId),
+        ),
+        seedStrategy: defaultSeedStrategy,
+        onEvent: emit,
+        preparePopulation: composed.planFor ?? undefined,
+        releasePopulation: composed.releasePopulation ?? undefined,
+        audit: new AuditCollector(deps.repos, {
+          provenance: {
+            sandbox: composed.config.sandbox,
+            isolation: composed.config.sandbox === 'docker' ? composed.config.isolation ?? null : null,
+            toolchainId: composed.toolchainId ?? null,
+          },
+        }),
+      })
+      engine.attachExistingRun(runId, collectRunUsage(deps.repos, runId))
+      const double = deps.registry.get(runId)
+      if (double) {
+        await composed.cleanup().catch(() => {})
+        return double
+      }
+      const manager = new RunManager(engine, emit)
+      const record: RunRecord = {
+        runId, spec, engine, manager, composed,
+        bridges: [], warnings: composed.warnings, capacity: composed.capacity,
+        activity,
+      }
+      deps.registry.set(record)
+      const lookupAgent = (sessionId: string): string | null =>
+        composed.sessionMap.get(sessionId) ?? null
+      const bridgeEmit: EventSink = (e) => {
+        engine.observe(e)
+        emit(e)
+      }
+      if (spec.sandbox === 'local' && spec.workspaceRoot) {
+        record.bridges.push(startEventBridge({
+          baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
+          runId, lookupAgent, emit: bridgeEmit,
+          ...streamHealth(runId, 'server', bridgeEmit),
+        }))
+      } else if (spec.sandbox === 'docker') {
+        if (composed.onShardServer) {
+          record.bridges.push(startDockerShardBridges({ composed, runId, lookupAgent, emit: bridgeEmit }))
+        } else {
+          composed.shardServers.forEach((shard, index) => {
+            record.bridges.push(startEventBridge({
+              baseUrl: shard.baseUrl, runId, lookupAgent, emit: bridgeEmit,
+              ...streamHealth(runId, `shard-${index}`, bridgeEmit),
+            }))
+          })
+        }
+      }
+      return record
+    } catch (e) {
+      await composed.cleanup().catch(() => {})
+      throw e
+    }
+  }
+
   app.post('/api/runs/:id/rounds', async (req, reply) => {
     const { id } = req.params as { id: string }
     let body: { goalMd: string; criteriaMd?: string | null }
@@ -855,24 +1034,27 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     } catch {
       return reply.code(400).send({ error: 'goalMd is required' })
     }
-    const record = deps.registry?.get(id)
+    let record = deps.registry?.get(id) ?? null
     // A registry record lives only in memory, so after a restart a persisted run has
-    // none and this route used to fall back to the DEFAULT manager — whose engine is the
-    // mock one. Running a docker or local run on it appends fabricated mock rounds to a
-    // real run's history, indistinguishable from the real ones afterwards. Refuse
-    // instead, immediately and without writing anything.
-    //
-    // A mock run is still served: the default engine genuinely can honour it, which keeps
-    // an ordinary restart usable. The residue is a spec-created MOCK run resumed after a
-    // restart, which runs at the default population rather than its own — wrong, but mock
-    // data either way. Real resume needs runtime reconstruction and cumulative budget
-    // recovery, which is a feature, not a fix.
-    if (!record && run.config.sandbox !== 'mock') {
-      return reply.code(409).send({
-        error:
-          `run ${id} uses the ${run.config.sandbox} sandbox and was composed by an earlier ` +
-          `process, so this server cannot resume it after a restart. Start a new run.`,
-      })
+    // none. Rebuild it from the stored config (plus the server's workspace/auth
+    // defaults) and replay cumulative spend, so the next round continues the same run
+    // instead of refusing or — worse — running a real run on the mock engine.
+    // Same-process legacy runs keep the default engine: their tracker is still live,
+    // and `dashboard.manager.waitForIdle` only watches that manager.
+    if (!record && !(deps.hasLiveBudget?.(id) ?? false)) {
+      try {
+        record = await resumeRun(id, run)
+      } catch (e) {
+        // No composition path (legacy harness): mock runs still use the default engine.
+        const compose = deps.composeWith ?? deps.composeRun
+        if (!compose || !deps.registry) {
+          if (run.config.sandbox !== 'mock') {
+            return reply.code(409).send({ error: specErrorMessage(e) })
+          }
+        } else {
+          return reply.code(specErrorCode(e)).send({ error: specErrorMessage(e) })
+        }
+      }
     }
     const mgr = record?.manager ?? deps.manager
     try {

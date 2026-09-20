@@ -3,7 +3,7 @@ import { serializeCompetitorProfile } from '../core/genome.js'
 import { planSelection } from '../core/selection.js'
 import { DEFAULT_CONFIG, type Genome, type RunConfig, type SubmissionStatus } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
-import { BudgetTracker, type BudgetBreach, type BudgetStatus } from './budget.js'
+import { BudgetTracker, type AgentUsage, type BudgetBreach, type BudgetStatus } from './budget.js'
 import { breed } from '../evolution/breed.js'
 import type { AuditCollector } from './audit.js'
 import type { EngineEvent, EventSink } from './events.js'
@@ -137,6 +137,23 @@ export class TournamentEngine {
     }
     void initialGoal
     return run
+  }
+
+  /**
+   * Registers a persisted run in a fresh process so its next round enforces cumulative
+   * spend. A restart loses the in-memory tracker, but every recorded agent spend survives
+   * in `submissions` — replaying it rebuilds the run totals (and any run-level breach)
+   * before the next `runRound`. No-op when a tracker already exists.
+   */
+  attachExistingRun(runId: string, usages: readonly AgentUsage[]): void {
+    if (this.budgets.has(runId)) return
+    const config = this.d.config
+    const models = [
+      ...new Set([...config.roster.map((r) => r.modelId), ...usages.map((u) => u.modelId)]),
+    ]
+    const tracker = new BudgetTracker({ ...config.budget, pricing: config.pricing, models })
+    for (const u of usages) tracker.record(u)
+    this.budgets.set(runId, tracker)
   }
 
   /**
