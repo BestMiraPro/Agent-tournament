@@ -223,6 +223,25 @@ export class TournamentEngine {
       throw new Error(`no budget tracker registered for run ${runId} — call createRun first`)
     }
 
+    // Preflight before the round exists, in this order:
+    // 1. the run has its budget tracker (above);
+    // 2. the active population;
+    // 3. prior execution reconciled — a retained OOM-killed worker is confirmed
+    //    against its original container, not the roster about to be planned;
+    // 4. placement planned and capacity verified;
+    // 5. cancellation rechecked before provisioning.
+    // A refusal here throws before any round row is inserted, so it consumes no
+    // round number and leaves no spurious failed round behind — the run manager
+    // still surfaces the error through lastError and the round.complete event.
+    const agents = repos.agents.listActive(runId)
+    // Prior writers can outlive culling and still reach a reused shared shard.
+    // Check all retained owners before planning/provision/reset, once per round.
+    await this.d.runner.assertReadyForRound?.()
+    await this.d.preparePopulation?.(agents.map((agent) => agent.id))
+    // Planning may wait on capacity or container bookkeeping. Preserve an abort
+    // that lands during that await and never enter the provisioning pool afterward.
+    if (this.aborted.has(runId)) throw new Error('round aborted by user')
+
     const roundIdx = repos.rounds.lastIdx(runId) + 1
     const round = repos.rounds.create({ runId, idx: roundIdx, goalMd: input.goalMd })
     repos.rounds.markStarted(round.id)
@@ -241,14 +260,6 @@ export class TournamentEngine {
       // PREPARE
       repos.rounds.setStatus(round.id, 'preparing')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'preparing' })
-      const agents = repos.agents.listActive(runId)
-      // Prior writers can outlive culling and still reach a reused shared shard.
-      // Check all retained owners before planning/provision/reset, once per round.
-      this.d.runner.assertReadyForRound?.()
-      await this.d.preparePopulation?.(agents.map((agent) => agent.id))
-      // Planning may wait on capacity or container bookkeeping. Preserve an abort
-      // that lands during that await and never enter the provisioning pool afterward.
-      if (this.aborted.has(runId)) throw new Error('round aborted by user')
       const prepared = agents.map((agent) => {
         const exact = repos.genomes.forRound(agent.id, roundIdx)
         if (exact) return { agent, genome: exact }
