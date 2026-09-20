@@ -37,6 +37,15 @@ export interface EngineDeps {
   onEvent?: EventSink
   /** Optional per-round preparation for sandboxes that need the full live roster. */
   preparePopulation?: (agentIds: readonly string[]) => Promise<void>
+  /**
+   * Optional per-round recycling for compositions holding Docker resources outside
+   * the sandbox (bridges, endpoint/catalogue/client caches, capacity). Called once
+   * per round after the audit freeze, and again from the `finally` path when the
+   * round never reached that point. Never lets a cleanup failure fail a graded
+   * round or mask the round's own error; the composition reports it separately
+   * and retains ownership for the next round's retry.
+   */
+  releasePopulation?: () => Promise<void>
   /** Durable behavioural evidence: fed every engine event, frozen at the judging boundary. */
   audit?: AuditCollector
 }
@@ -252,6 +261,22 @@ export class TournamentEngine {
     const submittedCriteria =
       input.criteriaMd !== null && input.criteriaMd.trim() !== '' ? input.criteriaMd : null
     if (submittedCriteria !== null) repos.rounds.setCriteria(round.id, submittedCriteria, 'user')
+
+    // Whether the per-round recycling below has been attempted. The `finally` path
+    // retries it only when the round never reached the normal boundary — never a
+    // second attempt after one already ran, so cleanup failures are retried by the
+    // next round rather than noisily twice in this one.
+    let cleanupAttempted = false
+    const releaseWorkers = async (): Promise<void> => {
+      cleanupAttempted = true
+      try {
+        await this.d.releasePopulation?.()
+      } catch {
+        // Best-effort by contract: the composition reports the failure on the run's
+        // warnings and retains ownership for the next round's retry. A graded round
+        // must not fail here, and a failed round must keep its original error.
+      }
+    }
 
     try {
       // Round counters reset; run totals and any run-level breach deliberately survive.
@@ -622,6 +647,12 @@ export class TournamentEngine {
       // grader sees this set, and anything observed later is kept as late evidence.
       const frozenAudit = this.d.audit?.freeze(runId, round.id, prepared.map((p) => p.agent.id)) ?? null
       for (const input of judgeInputs) input.evidence = evidenceFromAudit(frozenAudit, input.agentId)
+      // The per-round cleanup boundary: the execution pool has settled, per-agent
+      // capture completed, and collection, verification, submission persistence and
+      // the audit freeze above are all done. Workers go now; judging, reflection
+      // and breeding continue from persisted/captured inputs and the host provider.
+      // Sandbox file operations need live handles, so this must not move earlier.
+      await releaseWorkers()
       repos.rounds.setStatus(round.id, 'judging')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'judging' })
       // WHY re-read the row: an override accepted mid-round must win over what was
@@ -832,6 +863,14 @@ export class TournamentEngine {
       this.emit({ type: 'round.status', runId, roundIdx, status: 'failed' })
       throw e
     } finally {
+      // Local pool work the engine owns always settles before this runs: `runPool`
+      // never rejects and waits out every worker, so reaching here means nothing
+      // this round dispatched is still executing. Recycle workers that never saw
+      // the normal boundary (abort, judge failure); force-removal is permitted
+      // here because local execution has finished, and it also ends lingering
+      // child processes. Never masks the round's own error: `releaseWorkers`
+      // cannot throw.
+      if (!cleanupAttempted) await releaseWorkers()
       // WHY: a stale flag must never kill the next round.
       this.aborted.delete(runId)
     }

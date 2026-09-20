@@ -8,7 +8,7 @@ import { defaultSeedStrategy } from '../engine/seed-strategy.js'
 import type { EventSink } from '../engine/events.js'
 import { Reflector } from '../evolution/reflect.js'
 import { Judge, type JudgeInput, type JudgeOutput } from '../judge/judge.js'
-import { runConfigFor, type ComposedRun, type RunIdHolder, type ShardServer } from './compose-run.js'
+import { runConfigFor, type ComposedRun, type RunIdHolder, type ShardServerEvent } from './compose-run.js'
 import { startEventBridge, type BridgeHandle } from './event-bridge.js'
 import { disposeRunRecord, type RunRecord, type RunRegistry } from './runs.js'
 import { strategyDiversity } from '../core/analytics.js'
@@ -87,19 +87,28 @@ function startDockerShardBridges(opts: {
 }): BridgeHandle {
   const active = new Map<number, { baseUrl: string; bridge: BridgeHandle }>()
   let stopped = false
-  const attach = (server: ShardServer) => {
+  const attach = (event: ShardServerEvent) => {
     if (stopped) return
-    const current = active.get(server.shardIndex)
-    if (current?.baseUrl === server.baseUrl) return
+    if (event.type === 'stopped') {
+      // A retired runtime's bridge ends with it. Only the exact retired endpoint
+      // is detached, so a stale stop can never kill its replacement's bridge.
+      const current = active.get(event.shardIndex)
+      if (current?.baseUrl !== event.baseUrl) return
+      current.bridge.stop()
+      active.delete(event.shardIndex)
+      return
+    }
+    const current = active.get(event.shardIndex)
+    if (current?.baseUrl === event.baseUrl) return
     current?.bridge.stop()
-    active.set(server.shardIndex, {
-      baseUrl: server.baseUrl,
+    active.set(event.shardIndex, {
+      baseUrl: event.baseUrl,
       bridge: startEventBridge({
-        baseUrl: server.baseUrl,
+        baseUrl: event.baseUrl,
         runId: opts.runId,
         lookupAgent: opts.lookupAgent,
         emit: opts.emit,
-        ...streamHealth(opts.runId, `shard-${server.shardIndex}`, opts.emit),
+        ...streamHealth(opts.runId, `shard-${event.shardIndex}`, opts.emit),
       }),
     })
   }
