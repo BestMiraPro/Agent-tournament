@@ -131,6 +131,9 @@ export function WhyThisScore({ agentId, audit, records, coverage, calls, digestM
               </p>
               <pre>{c.prompt}</pre>
               <pre>{c.response === null ? 'no validated reply' : JSON.stringify(c.response, null, 2)}</pre>
+              {(c.reasoning ?? null)
+                ? <pre>{c.reasoning}</pre>
+                : <p className="muted">The model returned no reasoning trace for this call.</p>}
             </div>
           ))}
       </details>

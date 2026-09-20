@@ -215,6 +215,21 @@ export class Judge {
     return { scores, metaDigest: result.metaDigest, mode }
   }
 
+  /** Text plus reasoning trace, preferring the rich path when the runtime exposes one. */
+  private async completeRich(req: { purpose: CallPurpose; prompt: string; schema: unknown }): Promise<{ text: string; reasoning: string | null }> {
+    if (typeof this.provider.completeRich === 'function') {
+      return this.provider.completeRich({
+        purpose: req.purpose, prompt: req.prompt, modelId: this.cfg.modelId, schema: req.schema,
+      })
+    }
+    return {
+      text: await this.provider.complete({
+        purpose: req.purpose, prompt: req.prompt, modelId: this.cfg.modelId, schema: req.schema,
+      }),
+      reasoning: null,
+    }
+  }
+
   /** One model call with its bounded repair, recorded whether it succeeds or fails. */
   private async call<S extends z.ZodTypeAny>(
     req: { purpose: CallPurpose; stage: JudgeStage; prompt: string; schema: unknown; parser: S; refs?: ReadonlyMap<string, string> },
@@ -222,11 +237,13 @@ export class Judge {
   ): Promise<z.output<S>> {
     const startedAt = Date.now()
     let repaired = false
+    // The trace behind the reply that finally validated: the repair call's when repaired.
+    let reasoning: string | null = null
     const record = (response: unknown, error: string | null) => {
       try {
         recorder?.({
           stage: req.stage, purpose: req.purpose, modelId: this.cfg.modelId, promptVersion: JUDGING_PROMPT_VERSION,
-          refs: Object.fromEntries(req.refs ?? []), prompt: req.prompt, response, repaired, error,
+          refs: Object.fromEntries(req.refs ?? []), prompt: req.prompt, reasoning, response, repaired, error,
           startedAt, endedAt: Date.now(),
         })
       } catch {
@@ -234,17 +251,19 @@ export class Judge {
       }
     }
     try {
-      const raw = await this.provider.complete({
-        purpose: req.purpose, prompt: req.prompt, modelId: this.cfg.modelId, schema: req.schema,
+      const first = await this.completeRich({
+        purpose: req.purpose, prompt: req.prompt, schema: req.schema,
       })
-      const value = await parseWithRepair(raw, req.parser, (err) => {
+      reasoning = first.reasoning
+      const value = await parseWithRepair(first.text, req.parser, async (err) => {
         repaired = true
-        return this.provider.complete({
+        const retry = await this.completeRich({
           purpose: req.purpose,
           prompt: `${req.prompt}\n\nYour previous reply failed to parse: ${err}. Reply with JSON only.`,
-          modelId: this.cfg.modelId,
           schema: req.schema,
         })
+        reasoning = retry.reasoning
+        return retry.text
       })
       record(value, null)
       return value

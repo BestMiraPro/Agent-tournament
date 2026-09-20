@@ -15,6 +15,12 @@ export interface CompleteRequest {
 
 export interface Provider {
   complete(req: CompleteRequest): Promise<string>
+  /**
+   * The same call with the model's reasoning trace alongside the text, when the
+   * runtime exposes one. Optional so text-only providers (mocks, capability probes)
+   * keep working untouched — callers fall back to `complete` and record null.
+   */
+  completeRich?(req: CompleteRequest): Promise<{ text: string; reasoning: string | null }>
   /** The runtime that answers calls, recorded with grading audits: `opencode` or `mock`. */
   describe?(): string
 }
