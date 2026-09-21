@@ -306,7 +306,8 @@ describe('real-mode wiring', () => {
       method: 'POST', url: '/api/runs',
       payload: {
         name: 'planned', goal: 'g', sandbox: 'docker', isolation: 'shared',
-        workspaceRoot: 'C:\\tmp\\arena-planned', authFile: 'C:\\tmp\\auth.json',
+        workspaceRoot: process.platform === 'win32' ? 'C:\\tmp\\arena-planned' : '/tmp/arena-planned',
+        authFile: process.platform === 'win32' ? 'C:\\tmp\\auth.json' : '/tmp/auth.json',
         roster: [{ modelId: 'mock/model', count: 6, temperature: 0.7 }],
       },
     })
