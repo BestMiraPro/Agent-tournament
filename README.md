@@ -104,7 +104,7 @@ For real-agent and Docker modes, see [docs/operator-guide.md](docs/operator-guid
 
 The repository uses strict TypeScript with `noUncheckedIndexedAccess`, deterministic mocks, integration tests, runtime-boundary tests, and platform-aware end-to-end coverage.
 
-Current suite size: **1,022 test cases** (the pass/skip split varies by operating system and optional real-service gates).
+Current suite size: **1,400+ automated test cases** (the exact pass/skip split varies by operating system and optional real-service gates).
 
 Run the main quality gates with:
 
