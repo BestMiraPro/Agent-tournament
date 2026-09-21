@@ -1,8 +1,28 @@
 {
   "name": "agent-tournament",
   "version": "0.1.0",
+  "description": "Evolutionary tournaments for LLM agents: blind judging, selection and mutation across rounds, sealed evidence, and Docker-isolated execution.",
   "private": true,
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BestMiraPro/Agent-tournament.git"
+  },
+  "keywords": [
+    "llm",
+    "agents",
+    "evaluation",
+    "llm-as-judge",
+    "evolutionary-algorithms",
+    "sandbox",
+    "docker",
+    "fastify",
+    "react",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "vite build --logLevel warn && tsx src/server/index.ts",
     "test": "vitest run",

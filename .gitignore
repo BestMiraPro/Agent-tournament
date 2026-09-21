@@ -1,10 +1,23 @@
 node_modules/
 dist/
 runs/
+coverage/
+
+# Local databases (run history can contain task content and agent output)
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
+
+# Secrets and credentials: never commit these
 .env
-.env.local
+.env.*
+auth.json
+
+# Logs and scratch output
+*.log
 *.out
-build*.log
+
+# Local SDD working state (see AGENTS.md)
+.superpowers/
