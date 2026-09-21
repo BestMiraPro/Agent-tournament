@@ -1,6 +1,6 @@
 # Operator Guide
 
-How to run an Agent Tournament — the 100-agent parallel LLM competition with rounds, cloning/mutation, and an LLM judge.
+How to run an Agent Tournament: a population of LLM agents competing in rounds, with cloning/mutation between rounds and an LLM judge.
 
 ## Quick start (mock mode, no LLM tokens)
 

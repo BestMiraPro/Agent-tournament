@@ -1,6 +1,6 @@
 # Architecture
 
-The Agent Tournament is a 100-agent parallel LLM competition with evolutionary selection, an LLM judge, and a live dashboard. This doc describes how the pieces fit.
+Agent Tournament runs a population of LLM agents through repeated rounds with evolutionary selection, a blind LLM judge, and a live dashboard. This doc describes how the pieces fit.
 
 ## System diagram
 
@@ -52,8 +52,8 @@ One round, end to end:
 1. **Start** — `POST /api/runs/:id/rounds` (or the CLI loop) calls `engine.runRound(runId, { goalMd, criteriaMd })`.
 2. **Prepare** — the engine creates a round row, resolves each agent's genome (seed/elite/clone/mutation/crossover), and writes `GOAL.md` + `STRATEGY.md` into each agent's workspace.
 3. **Run** — the pool (`src/runtime/pool.ts`) runs agents in parallel (bounded by `concurrency`). Each agent is a sandboxed opencode session that reads its strategy and writes a `SUBMISSION.md`. The budget tracker (`src/engine/budget.ts`) tallies tokens/cost per agent/round/run and fails over-budget agents.
-4. **Capture** — `src/engine/capture.ts` reads each `SUBMISSION.md` + file manifest, verifies isolation (no tampering with shared evidence), stores a `submissions` row.
-5. **Judge** — `src/judge/judge.ts` scores the submissions against the goal + criteria (auto-generates criteria if none given). Mode: `single_call` (one prompt, all submissions) or `batched_finals` (pairwise finals). Stores `scores` rows (rank, score, band, rationale).
+4. **Capture** — `src/engine/capture.ts` reads each `SUBMISSION.md` + file manifest the moment its agent stops, then re-verifies it once no agent in the round is still running; a change in between is recorded as tampering and the captured copy is what gets judged. Stores a `submissions` row.
+5. **Judge** — the evidence audit (`src/engine/audit.ts`) is frozen and sealed with a digest first, so the grader sees a fixed evidence set. Then `src/judge/judge.ts` scores the submissions against the goal + criteria (auto-generates criteria if none given). Mode: `single_call` (one prompt, all submissions) or `batched_finals` (pairwise finals). Submissions are anonymised and shuffled per round. Stores `scores` rows (rank, score, band, rationale) and a grading audit per score (`src/judge/audit.ts`).
 6. **Select** — `src/core/selection.ts` ranks agents; the top band clones, the bottom band is culled, elites are kept verbatim, crossover (4d) breeds children. The `diversityFloor` (4f) rescues the most distinct culled agent.
 7. **Reflect** — `src/evolution/reflect.ts` rewrites each survivor's strategy for the next round (the mutation operator). LLM-recombine (4f) merges two parent strategies with a split-merge fallback.
 8. **Complete** — the round row is marked ended; the engine emits `round.complete`; the dashboard's grid clears for the next round.
@@ -89,7 +89,11 @@ runs       id, name, goal, status, config (JSON), createdAt
 
 - **MockSandbox** — in-memory, no real processes. Used by tests + mock mode.
 - **Local** — agents are host opencode processes against one shared server (`src/runtime/opencode/`). Workspaces are subdirs under `workspaceRoot`.
-- **Docker** — agents run in resource-capped containers (`src/runtime/docker/`), bind-mounting `auth.json` read-only. The host starts an opencode server; containers connect to it.
+- **Docker** — agents run in resource-capped containers (`src/runtime/docker/`), each running its own OpenCode server. Two isolation policies:
+  - **protected** (dashboard default) — one agent per container, read-only root, unprivileged user, no credentials inside, and an internal-only network whose one exit is a gateway container. Model calls go through the host-side provider relay (`src/runtime/provider-relay.ts`), which swaps a per-run token for the real key and only allows roster models within a request limit.
+  - **shared** — several agents may share a container, `auth.json` is bind-mounted read-only, and containers have ordinary network access.
+
+  See the operator guide's isolation section for the full list of what each policy enforces.
 
 The engine doesn't know which sandbox it's using — it calls `sandbox.run(handle, ...)` and `sandbox.readFile(handle, ...)`.
 

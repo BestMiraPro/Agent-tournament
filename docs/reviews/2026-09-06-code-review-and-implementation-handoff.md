@@ -1,5 +1,7 @@
 # Agent Tournament: review and implementation handoff
 
+> **Historical record.** This review describes the code at commit `de7a431` (6 September 2026) and was written as a handoff for the agent implementing the fixes. That work happened on the `phase5-review-fixes` branch, which has since been merged into `master`. The individual fixes and their regression tests are in the git history. Read this as a record of how the review drove the work, not as a list of current open issues.
+
 **Audience:** Opus 5 or another implementation agent.  
 **Reviewed:** 6 September 2026, commit `de7a431845c86ba0705aafc43d59aa220730ac69`.  
 **Handoff finalized:** 7 September 2026.  
