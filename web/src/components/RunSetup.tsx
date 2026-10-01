@@ -27,12 +27,16 @@ export interface RunSetupValue {
 }
 
 /** Before Start: which agents share which container, the summed ceilings, and the estimated fit. */
-export function DockerPlacementSummary({ capacity, ...plan }: PlacementPlan & { capacity: CapacityInfo | null }) {
+export function DockerPlacementSummary({ capacity, concurrency, ...plan }: PlacementPlan & { capacity: CapacityInfo | null; concurrency: number }) {
   const estimate = setupEstimate(plan, capacity)
+  const agents = Math.max(0, Math.floor(plan.population))
+  const atOnce = Math.max(1, Math.floor(concurrency))
   return (
     <div className="placement-summary" aria-live="polite">
+      <p className="help">Agents: {agents} in the roster, up to {atOnce} running at once (Max parallel agents — your setting, shown as-is and never reduced silently).</p>
       <p className="help">Placement: {estimate.placement || 'no agents yet'}. {estimate.sharing}</p>
       <p className="help">Ceilings: {estimate.ceilings}. These are limits, not memory set aside at launch.</p>
+      <p className="help">Worker runtimes restart between rounds: each round provisions fresh containers and retires the old ones after their evidence is captured, so per-round memory cannot accumulate across rounds. An agent&apos;s strategy and notes carry over; its OpenCode session history does not.</p>
       <p className={estimate.fit.state === 'does_not_fit' ? 'error' : 'help'}>{estimate.fit.message}</p>
       {estimate.refusal && <p className="error">{estimate.refusal}</p>}
       {estimate.memoryNote && <p className="help">{estimate.memoryNote}</p>}
@@ -197,6 +201,7 @@ export function RunSetup({ busy, error, onCreate }: {
               memory={containerMemory.trim()}
               cpus={Number(containerCpus)}
               isolation={isolation}
+              concurrency={Number(concurrency)}
               capacity={capacity}
             />
           </>

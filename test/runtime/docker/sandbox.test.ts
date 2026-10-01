@@ -71,6 +71,26 @@ describe('DockerSandbox placement and protected isolation', () => {
     expect(sb.containerNameFor('a1')).toBe('arena-t-0')
     expect(sb.containerNameFor('ghost')).toBeNull()
   })
+
+  test('provisioned handles carry no runtime ID when starting reports none', async () => {
+    const { sb } = await make(['a1', 'a2'], 2)
+    const plain = await sb.provision('a1', {})
+    expect(plain.runtimeId).toBeUndefined()
+  })
+
+  test('provisioned handles carry the worker container ID when starting reports one', async () => {
+    const root = await tmp()
+    const sb = new DockerSandbox({
+      runId: 't', root, maxContainers: 2, image: 'x', memory: '1g', cpus: 1, authFile: null,
+      startContainer: async (shardIndex: number) => ({
+        name: `arena-t-${shardIndex}`, baseUrl: 'http://127.0.0.1:40000', shardIndex,
+        containerId: `cid-${shardIndex}`,
+      }),
+      stopContainer: async () => {},
+    })
+    await sb.planFor(['a1'])
+    expect((await sb.provision('a1', {})).runtimeId).toBe('cid-0')
+  })
 })
 
 describe('DockerSandbox.isolatedWorkspace', () => {

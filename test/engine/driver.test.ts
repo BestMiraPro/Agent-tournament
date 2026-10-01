@@ -52,7 +52,7 @@ describe('TournamentEngine', () => {
     expect(plans[1]).not.toEqual(plans[0])
   })
 
-  test('a planning failure records a failed round and clears manager busy state', async () => {
+  test('a planning failure refuses the round before any round row exists', async () => {
     const { engine, repos, sandbox } = makeMockEngine({
       seed: 1,
       populationSize: 2,
@@ -68,8 +68,9 @@ describe('TournamentEngine', () => {
 
     expect(manager.isBusy(run.id)).toBe(false)
     expect(manager.lastError(run.id)).toMatch(/planner exploded/)
-    expect(repos.rounds.listForRun(run.id)).toHaveLength(1)
-    expect(repos.rounds.listForRun(run.id)[0]!.status).toBe('failed')
+    // Preflight runs before the round row is inserted: the refusal consumes no
+    // round number and leaves no spurious failed round behind.
+    expect(repos.rounds.listForRun(run.id)).toHaveLength(0)
     expect(provision).not.toHaveBeenCalled()
   })
 
@@ -98,7 +99,7 @@ describe('TournamentEngine', () => {
 
     expect(provision).not.toHaveBeenCalled()
     expect(manager.lastError(run.id)).toMatch(/aborted/)
-    expect(repos.rounds.listForRun(run.id)[0]!.status).toBe('failed')
+    expect(repos.rounds.listForRun(run.id)).toHaveLength(0)
   })
 
   test('seeds the population from the roster', async () => {
@@ -203,23 +204,34 @@ describe('criteria persistence', () => {
     expect(repos.runs.get(engine.createRun('c', 'goal').id)!.initialCriteria).toBeNull()
   })
 
-  test('submitted criteria are on the round row before PREPARE, so a refresh during work shows them', async () => {
+  test('submitted criteria are on the round row during work, so a refresh shows them', async () => {
     // The row used to receive criteria only at the judging boundary, so for the whole of
-    // PREPARE and WORK a reload showed the round as having no criteria at all.
+    // the round a reload showed it as having no criteria at all. It is written at
+    // round creation now; hook the first dispatch to read what a refresh sees mid-round.
     let inspect: () => void = () => {}
     const { engine, repos } = makeMockEngine({
       seed: 1, populationSize: 2,
-      preparePopulation: async () => { inspect() },
+      wrapRunner: (inner) => {
+        let inspected = false
+        return {
+          run: async (handle, ctx) => {
+            if (!inspected) { inspected = true; inspect() }
+            return inner.run(handle, ctx)
+          },
+          abortAll: () => inner.abortAll(),
+          quiesce: inner.quiesce?.bind(inner),
+        }
+      },
     })
     const run = engine.createRun('r', 'goal')
-    let duringPrepare: { criteriaMd: string | null; source: string } | null = null
+    let duringWork: { criteriaMd: string | null; source: string } | null = null
     inspect = () => {
       const row = repos.rounds.listForRun(run.id).at(-1)!
-      duringPrepare = { criteriaMd: row.criteriaMd, source: row.criteriaSource }
+      duringWork = { criteriaMd: row.criteriaMd, source: row.criteriaSource }
     }
 
     await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: CRITERIA })
-    expect(duringPrepare).toEqual({ criteriaMd: CRITERIA, source: 'user' })
+    expect(duringWork).toEqual({ criteriaMd: CRITERIA, source: 'user' })
     const row = repos.rounds.listForRun(run.id).at(-1)!
     expect(row.criteriaMd).toBe(CRITERIA)
     expect(row.criteriaSource).toBe('user')
@@ -229,18 +241,28 @@ describe('criteria persistence', () => {
     let inspect: () => void = () => {}
     const { engine, repos } = makeMockEngine({
       seed: 1, populationSize: 2,
-      preparePopulation: async () => { inspect() },
+      wrapRunner: (inner) => {
+        let inspected = false
+        return {
+          run: async (handle, ctx) => {
+            if (!inspected) { inspected = true; inspect() }
+            return inner.run(handle, ctx)
+          },
+          abortAll: () => inner.abortAll(),
+          quiesce: inner.quiesce?.bind(inner),
+        }
+      },
     })
     const run = engine.createRun('r', 'goal', 'creation default the round was not given')
-    let duringPrepare: { criteriaMd: string | null; source: string } | null = null
+    let duringWork: { criteriaMd: string | null; source: string } | null = null
     inspect = () => {
       const row = repos.rounds.listForRun(run.id).at(-1)!
-      duringPrepare = { criteriaMd: row.criteriaMd, source: row.criteriaSource }
+      duringWork = { criteriaMd: row.criteriaMd, source: row.criteriaSource }
     }
 
     await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
     // Explicit null means generate: the creation default must not be applied behind it.
-    expect(duringPrepare).toEqual({ criteriaMd: null, source: 'generated' })
+    expect(duringWork).toEqual({ criteriaMd: null, source: 'generated' })
     const row = repos.rounds.listForRun(run.id).at(-1)!
     expect(row.criteriaSource).toBe('generated')
     expect(row.criteriaMd).not.toBe('creation default the round was not given')

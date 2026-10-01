@@ -14,12 +14,21 @@ describe('docker placement choice', () => {
 
   test('the summary previews placement, refuses an impossible protected plan, and admits unknown capacity', () => {
     const html = renderToStaticMarkup(createElement(DockerPlacementSummary, {
-      population: 7, maxContainers: 4, memory: '1g', cpus: 1, isolation: 'protected', capacity: null,
+      population: 7, maxContainers: 4, memory: '1g', cpus: 1, isolation: 'protected', concurrency: 8, capacity: null,
     }))
     expect(html).toContain('[1,5] [2,6] [3,7] [4]')
     expect(html).toContain('Protected isolation needs 7 containers for 7 agents')
     expect(html).toContain('Docker capacity could not be read')
     expect(html).toContain('4 containers × 1g + 4 gateways × 64m = 4.25 GiB memory, 5 CPUs')
+  })
+
+  test('population and parallel agents stay separate, and restarts between rounds are explained', () => {
+    const html = renderToStaticMarkup(createElement(DockerPlacementSummary, {
+      population: 7, maxContainers: 4, memory: '1g', cpus: 1, isolation: 'shared', concurrency: 3, capacity: null,
+    }))
+    expect(html).toContain('7 in the roster, up to 3 running at once')
+    expect(html).toContain('never reduced silently')
+    expect(html).toContain('Worker runtimes restart between rounds')
   })
 })
 

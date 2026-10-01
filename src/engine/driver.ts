@@ -3,7 +3,7 @@ import { serializeCompetitorProfile } from '../core/genome.js'
 import { planSelection } from '../core/selection.js'
 import { DEFAULT_CONFIG, type Genome, type RunConfig, type SubmissionStatus } from '../core/types.js'
 import type { Repos } from '../db/repos.js'
-import { BudgetTracker, type BudgetBreach, type BudgetStatus } from './budget.js'
+import { BudgetTracker, type AgentUsage, type BudgetBreach, type BudgetStatus } from './budget.js'
 import { breed } from '../evolution/breed.js'
 import type { AuditCollector } from './audit.js'
 import type { EngineEvent, EventSink } from './events.js'
@@ -37,6 +37,15 @@ export interface EngineDeps {
   onEvent?: EventSink
   /** Optional per-round preparation for sandboxes that need the full live roster. */
   preparePopulation?: (agentIds: readonly string[]) => Promise<void>
+  /**
+   * Optional per-round recycling for compositions holding Docker resources outside
+   * the sandbox (bridges, endpoint/catalogue/client caches, capacity). Called once
+   * per round after the audit freeze, and again from the `finally` path when the
+   * round never reached that point. Never lets a cleanup failure fail a graded
+   * round or mask the round's own error; the composition reports it separately
+   * and retains ownership for the next round's retry.
+   */
+  releasePopulation?: () => Promise<void>
   /** Durable behavioural evidence: fed every engine event, frozen at the judging boundary. */
   audit?: AuditCollector
 }
@@ -140,6 +149,23 @@ export class TournamentEngine {
   }
 
   /**
+   * Registers a persisted run in a fresh process so its next round enforces cumulative
+   * spend. A restart loses the in-memory tracker, but every recorded agent spend survives
+   * in `submissions` — replaying it rebuilds the run totals (and any run-level breach)
+   * before the next `runRound`. No-op when a tracker already exists.
+   */
+  attachExistingRun(runId: string, usages: readonly AgentUsage[]): void {
+    if (this.budgets.has(runId)) return
+    const config = this.d.config
+    const models = [
+      ...new Set([...config.roster.map((r) => r.modelId), ...usages.map((u) => u.modelId)]),
+    ]
+    const tracker = new BudgetTracker({ ...config.budget, pricing: config.pricing, models })
+    for (const u of usages) tracker.record(u)
+    this.budgets.set(runId, tracker)
+  }
+
+  /**
    * Reconfigures a run between rounds — the engine-side half of a PATCH. The next
    * `runRound` resolves this run's config/judge/reflector through `depsFor`, so recording
    * them is enough; the budget tracker is updated in place, keeping its accumulated spend.
@@ -206,6 +232,25 @@ export class TournamentEngine {
       throw new Error(`no budget tracker registered for run ${runId} — call createRun first`)
     }
 
+    // Preflight before the round exists, in this order:
+    // 1. the run has its budget tracker (above);
+    // 2. the active population;
+    // 3. prior execution reconciled — a retained OOM-killed worker is confirmed
+    //    against its original container, not the roster about to be planned;
+    // 4. placement planned and capacity verified;
+    // 5. cancellation rechecked before provisioning.
+    // A refusal here throws before any round row is inserted, so it consumes no
+    // round number and leaves no spurious failed round behind — the run manager
+    // still surfaces the error through lastError and the round.complete event.
+    const agents = repos.agents.listActive(runId)
+    // Prior writers can outlive culling and still reach a reused shared shard.
+    // Check all retained owners before planning/provision/reset, once per round.
+    await this.d.runner.assertReadyForRound?.()
+    await this.d.preparePopulation?.(agents.map((agent) => agent.id))
+    // Planning may wait on capacity or container bookkeeping. Preserve an abort
+    // that lands during that await and never enter the provisioning pool afterward.
+    if (this.aborted.has(runId)) throw new Error('round aborted by user')
+
     const roundIdx = repos.rounds.lastIdx(runId) + 1
     const round = repos.rounds.create({ runId, idx: roundIdx, goalMd: input.goalMd })
     repos.rounds.markStarted(round.id)
@@ -217,6 +262,22 @@ export class TournamentEngine {
       input.criteriaMd !== null && input.criteriaMd.trim() !== '' ? input.criteriaMd : null
     if (submittedCriteria !== null) repos.rounds.setCriteria(round.id, submittedCriteria, 'user')
 
+    // Whether the per-round recycling below has been attempted. The `finally` path
+    // retries it only when the round never reached the normal boundary — never a
+    // second attempt after one already ran, so cleanup failures are retried by the
+    // next round rather than noisily twice in this one.
+    let cleanupAttempted = false
+    const releaseWorkers = async (): Promise<void> => {
+      cleanupAttempted = true
+      try {
+        await this.d.releasePopulation?.()
+      } catch {
+        // Best-effort by contract: the composition reports the failure on the run's
+        // warnings and retains ownership for the next round's retry. A graded round
+        // must not fail here, and a failed round must keep its original error.
+      }
+    }
+
     try {
       // Round counters reset; run totals and any run-level breach deliberately survive.
       budget.startRound()
@@ -224,14 +285,6 @@ export class TournamentEngine {
       // PREPARE
       repos.rounds.setStatus(round.id, 'preparing')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'preparing' })
-      const agents = repos.agents.listActive(runId)
-      // Prior writers can outlive culling and still reach a reused shared shard.
-      // Check all retained owners before planning/provision/reset, once per round.
-      this.d.runner.assertReadyForRound?.()
-      await this.d.preparePopulation?.(agents.map((agent) => agent.id))
-      // Planning may wait on capacity or container bookkeeping. Preserve an abort
-      // that lands during that await and never enter the provisioning pool afterward.
-      if (this.aborted.has(runId)) throw new Error('round aborted by user')
       const prepared = agents.map((agent) => {
         const exact = repos.genomes.forRound(agent.id, roundIdx)
         if (exact) return { agent, genome: exact }
@@ -594,6 +647,12 @@ export class TournamentEngine {
       // grader sees this set, and anything observed later is kept as late evidence.
       const frozenAudit = this.d.audit?.freeze(runId, round.id, prepared.map((p) => p.agent.id)) ?? null
       for (const input of judgeInputs) input.evidence = evidenceFromAudit(frozenAudit, input.agentId)
+      // The per-round cleanup boundary: the execution pool has settled, per-agent
+      // capture completed, and collection, verification, submission persistence and
+      // the audit freeze above are all done. Workers go now; judging, reflection
+      // and breeding continue from persisted/captured inputs and the host provider.
+      // Sandbox file operations need live handles, so this must not move earlier.
+      await releaseWorkers()
       repos.rounds.setStatus(round.id, 'judging')
       this.emit({ type: 'round.status', runId, roundIdx, status: 'judging' })
       // WHY re-read the row: an override accepted mid-round must win over what was
@@ -804,6 +863,14 @@ export class TournamentEngine {
       this.emit({ type: 'round.status', runId, roundIdx, status: 'failed' })
       throw e
     } finally {
+      // Local pool work the engine owns always settles before this runs: `runPool`
+      // never rejects and waits out every worker, so reaching here means nothing
+      // this round dispatched is still executing. Recycle workers that never saw
+      // the normal boundary (abort, judge failure); force-removal is permitted
+      // here because local execution has finished, and it also ends lingering
+      // child processes. Never masks the round's own error: `releaseWorkers`
+      // cannot throw.
+      if (!cleanupAttempted) await releaseWorkers()
       // WHY: a stale flag must never kill the next round.
       this.aborted.delete(runId)
     }

@@ -237,6 +237,10 @@ export function resolveSandboxMode(
  * server, and a fresh client per agent would multiply connections by the population for no
  * benefit. An empty baseUrl means "no dedicated server" (LocalSandbox), so the shared
  * client is returned unchanged.
+ *
+ * Retired endpoints are evicted between rounds (see the Docker composition's per-round
+ * recycling): a replacement runtime must never inherit a client — and its pooled
+ * connections — created for the instance that held its port before.
  */
 export function makeClientResolver(
   sandbox: Sandbox,
@@ -244,7 +248,7 @@ export function makeClientResolver(
   create: (baseUrl: string) => OpenCodeClient,
 ): ClientResolver {
   const byBaseUrl = new Map<string, OpenCodeClient>()
-  return (handle: AgentHandle) => {
+  const resolve = (handle: AgentHandle) => {
     const { baseUrl } = sandbox.endpoint(handle)
     if (!baseUrl) return shared
     let client = byBaseUrl.get(baseUrl)
@@ -254,6 +258,10 @@ export function makeClientResolver(
     }
     return client
   }
+  resolve.evict = (baseUrl: string): void => {
+    if (baseUrl) byBaseUrl.delete(baseUrl)
+  }
+  return resolve
 }
 
 /**
@@ -382,6 +390,8 @@ interface RealDeps {
    * caller must plan each round before `runRound` provisions anything.
    */
   planFor: ((agentIds: readonly string[]) => Promise<void>) | null
+  /** Non-null under Docker only: recycles workers between rounds (see compose-run). */
+  releasePopulation: (() => Promise<void>) | null
 }
 
 /**
@@ -483,6 +493,7 @@ async function buildRealDeps(
     provider: composed.provider,
     runner: composed.runner,
     planFor: composed.planFor,
+    releasePopulation: composed.releasePopulation ?? null,
   }
 }
 
@@ -510,6 +521,7 @@ export async function runTournamentCli(
     let provider: Provider
     let runner: AgentRunner
     let planFor: ((agentIds: readonly string[]) => Promise<void>) | null = null
+    let releasePopulation: (() => Promise<void>) | null = null
     const runIdHolder: RunIdHolder = { value: '' }
 
     if (mode === 'real') {
@@ -529,6 +541,7 @@ export async function runTournamentCli(
       provider = built.provider
       runner = built.runner
       planFor = built.planFor
+      releasePopulation = built.releasePopulation
       stopServer = built.server.stop
 
       // Pre-flight: fail fast and legibly before any agent runs or money is spent,
@@ -569,6 +582,7 @@ export async function runTournamentCli(
       // transfer. Uniform seeds leave nothing to imitate and the curve stays flat.
       seedStrategy: defaultSeedStrategy,
       preparePopulation: planFor ?? undefined,
+      releasePopulation: releasePopulation ?? undefined,
       audit: new AuditCollector(repos, {
         provenance: {
           sandbox: config.sandbox,

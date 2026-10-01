@@ -118,8 +118,12 @@ export interface CapacityRequest {
   cpus: number
 }
 
-/** `1g` for whole GiB, otherwise whole MiB — the same notation the run settings use. */
-function memoryLabel(bytes: number): string {
+/**
+ * `1g` for whole GiB, otherwise whole MiB — the same notation the run settings use.
+ * Exported so the dashboard's setup estimate names the very ceiling admission checks,
+ * instead of maintaining its own formatter that could drift from this one.
+ */
+export function memoryLabel(bytes: number): string {
   return bytes % 1024 ** 3 === 0 ? `${bytes / 1024 ** 3}g` : `${Math.ceil(bytes / 1024 ** 2)}m`
 }
 

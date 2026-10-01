@@ -4,6 +4,13 @@ export interface AgentHandle {
   agentId: string
   workspacePath: string
   baseUrl: string
+  /**
+   * Immutable identity of the runtime that executes this handle — the Docker
+   * container ID for Docker workers. Absent for mock and local handles, which
+   * have no container to outlive them. Termination of an old invocation is
+   * resolved against this ID, never against a reusable container name.
+   */
+  runtimeId?: string
 }
 
 export interface ProvisionOpts {

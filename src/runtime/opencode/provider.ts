@@ -1,6 +1,6 @@
 import type { CompleteRequest, Provider } from '../provider.js'
-import type { OpenCodeClient } from './client.js'
-import { extractStructured, extractText } from './client.js'
+import type { OpenCodeClient, PromptResponse } from './client.js'
+import { extractReasoning, extractStructured, extractText } from './client.js'
 import { GRADER_AGENT } from './grader-profile.js'
 import { splitModelId } from './model-id.js'
 import { promptOnce } from './one-shot.js'
@@ -57,6 +57,10 @@ export class OpenCodeProvider implements Provider {
   ) {}
 
   async complete(req: CompleteRequest): Promise<string> {
+    return (await this.completeRich(req)).text
+  }
+
+  async completeRich(req: CompleteRequest): Promise<{ text: string; reasoning: string | null }> {
     // A failed prompt used to leave its session live on the server, still generating and
     // still spending, and the judge's retry loop made three of them per failed call.
     const asGrader =
@@ -85,6 +89,10 @@ export class OpenCodeProvider implements Provider {
       throw new Error(`OpenCodeProvider ${req.purpose} on ${req.modelId} failed: ${code} ${res.info.error.data?.message ?? ''}`)
     }
 
+    return { text: this.answer(req, res), reasoning: extractReasoning(res) }
+  }
+
+  private answer(req: CompleteRequest, res: PromptResponse): string {
     if (req.schema) {
       const structured = extractStructured(res)
       if (structured !== null) return JSON.stringify(structured)

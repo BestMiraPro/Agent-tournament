@@ -473,6 +473,8 @@ export interface JudgingCall {
   modelId: string
   refs: Record<string, string>
   prompt: string
+  /** The model's reasoning trace; null when none arrived, or for envelopes sealed before it was recorded. */
+  reasoning: string | null
   response: unknown
   repaired: boolean
   error: string | null

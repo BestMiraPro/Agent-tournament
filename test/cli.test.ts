@@ -299,6 +299,24 @@ describe('makeClientResolver', () => {
     )
     expect(resolve(handle('a', ''))).toBe(fallbackClient)
   })
+
+  test('an evicted endpoint resolves to a fresh client on next use', () => {
+    let created = 0
+    const resolve = makeClientResolver(endpointOnly(), fallbackClient, (baseUrl) => {
+      created++
+      return new OpenCodeClient({ baseUrl, timeoutMs: 1000 })
+    })
+
+    const first = resolve(handle('a', 'http://127.0.0.1:1111'))
+    resolve.evict?.('http://127.0.0.1:1111')
+    const second = resolve(handle('a', 'http://127.0.0.1:1111'))
+
+    expect(created).toBe(2)
+    expect(second).not.toBe(first)
+    // Evicting one endpoint leaves the others cached, and empty means shared.
+    resolve.evict?.('')
+    expect(resolve(handle('a', ''))).toBe(fallbackClient)
+  })
 })
 
 describe('capacity preflight uses the effective container count', () => {

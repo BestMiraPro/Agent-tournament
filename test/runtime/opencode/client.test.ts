@@ -4,6 +4,7 @@ import { describe, expect, test, afterEach } from 'vitest'
 import {
   OpenCodeClient,
   OpenCodeHttpError,
+  extractReasoning,
   extractStructured,
   extractText,
   type HttpTransport,
@@ -176,5 +177,31 @@ describe('extractText', () => {
       { type: 'text', text: 'b' },
     ] } as any
     expect(extractText(res)).toBe('ab')
+  })
+
+  test('leaves reasoning parts out', () => {
+    const res = { info: {}, parts: [
+      { type: 'reasoning', text: 'private thought' },
+      { type: 'text', text: 'hi' },
+    ] } as any
+    expect(extractText(res)).toBe('hi')
+  })
+})
+
+describe('extractReasoning', () => {
+  test('concatenates reasoning parts in order, ignoring everything else', () => {
+    const res = { info: {}, parts: [
+      { type: 'reasoning', text: 'first thought ' },
+      { type: 'text', text: 'hi' },
+      { type: 'tool', tool: 'Bash', state: {} },
+      { type: 'reasoning', text: 'second thought' },
+    ] } as any
+    expect(extractReasoning(res)).toBe('first thought second thought')
+  })
+
+  test('returns null when no reasoning part carries text', () => {
+    expect(extractReasoning({ info: {}, parts: [{ type: 'text', text: 'hi' }] } as any)).toBeNull()
+    expect(extractReasoning({ info: {}, parts: [] } as any)).toBeNull()
+    expect(extractReasoning({ info: {} } as any)).toBeNull()
   })
 })

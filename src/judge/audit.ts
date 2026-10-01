@@ -75,6 +75,12 @@ export interface JudgeCallRecord {
   /** Anonymous reference → agent id, so the record reads back against the agents. */
   refs: Record<string, string>
   prompt: string
+  /**
+   * The model's private thinking behind the reply, when the runtime exposed it.
+   * Null when none arrived — most structured-output calls send none — and old
+   * envelopes predate the field, so readers must treat a missing value as null.
+   */
+  reasoning: string | null
   /** The validated reply; null when the call failed. */
   response: unknown
   repaired: boolean

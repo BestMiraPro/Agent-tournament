@@ -203,6 +203,28 @@ describe('behavioural review of attempts with nothing to grade', () => {
   })
 })
 
+describe("the grader's reasoning trace", () => {
+  test('a provider exposing reasoning has it recorded on the call, verbatim', async () => {
+    const base = replying(() => ({ rankings: [entry('S1', 1), entry('S2', 2)], meta_digest: 'd' }))
+    const provider: Provider = {
+      complete: (req) => base.complete(req),
+      completeRich: async (req) => ({ text: await base.complete(req), reasoning: 'S1 reads cleaner, so it leads' }),
+    }
+    const records: JudgeCallRecord[] = []
+    await new Judge(provider, cfg, 42).score('goal', 'crit', [input('a'), input('b')], 1, (r) => records.push(r))
+    expect(records).toHaveLength(1)
+    expect(records[0]!.reasoning).toBe('S1 reads cleaner, so it leads')
+  })
+
+  test('a plain text provider records a null trace rather than inventing one', async () => {
+    const records: JudgeCallRecord[] = []
+    const j = new Judge(new MockProvider(1), cfg, 42)
+    await j.score('goal', 'crit', [input('a'), input('b')], 1, (r) => records.push(r))
+    expect(records).toHaveLength(1)
+    expect(records[0]!.reasoning).toBeNull()
+  })
+})
+
 describe('score derivation and call records', () => {
   test('single-call scores are model-awarded, and every call is recorded with stage, public prompt and ref map', async () => {
     const records: JudgeCallRecord[] = []

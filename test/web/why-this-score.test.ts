@@ -23,8 +23,8 @@ const audit: ScoringAudit = {
 }
 
 const calls: JudgingCall[] = [
-  { stage: 'single', purpose: 'judge', modelId: 'w/m', refs: { S1: 'a', S2: 'b' }, prompt: 'SUBMISSIONS: <submission ref="S1">', response: { rankings: [] }, repaired: true, error: null },
-  { stage: 'safety', purpose: 'review', modelId: 'w/m', refs: { F1: 'c' }, prompt: 'other agent only', response: null, error: 'upstream 429', repaired: false },
+  { stage: 'single', purpose: 'judge', modelId: 'w/m', refs: { S1: 'a', S2: 'b' }, prompt: 'SUBMISSIONS: <submission ref="S1">', reasoning: null, response: { rankings: [] }, repaired: true, error: null },
+  { stage: 'safety', purpose: 'review', modelId: 'w/m', refs: { F1: 'c' }, prompt: 'other agent only', reasoning: null, response: null, error: 'upstream 429', repaired: false },
 ]
 
 const render = (over: Partial<Parameters<typeof WhyThisScore>[0]> = {}) =>
@@ -85,6 +85,15 @@ describe('Why this score', () => {
     expect(html).toContain('repaired after an invalid reply')
     expect(html).toContain('SUBMISSIONS: &lt;submission ref=&quot;S1&quot;&gt;')
     expect(html).not.toContain('other agent only')
+  })
+
+  test("a call's reasoning trace is shown as text, and a missing trace says so", () => {
+    const withTrace = render({
+      calls: [{ ...calls[0]!, reasoning: 'S1 reads cleaner <b>bold</b>' }],
+    })
+    expect(withTrace).toContain('S1 reads cleaner &lt;b&gt;bold&lt;/b&gt;')
+    expect(withTrace).not.toContain('<b>bold</b>')
+    expect(render()).toContain('The model returned no reasoning trace for this call.')
   })
 
   test('a round with no grading record says so instead of showing an empty one', () => {

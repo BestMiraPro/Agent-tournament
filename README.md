@@ -111,12 +111,13 @@ npm run typecheck   # tsc --noEmit, strict mode with noUncheckedIndexedAccess
 npm run web:build   # Vite production build of the dashboard
 ```
 
-The suite has **1,428 test cases in 112 files**. Some are platform-specific or opt-in, so the pass/skip split depends on where it runs (Linux measured 1 October 2026; the Windows row is the 21 September measurement plus twelve platform-neutral cases added since):
+The suite has **1,499 test cases in 119 files**. Some are platform-specific or opt-in, so the pass/skip split depends on where it runs (macOS measured 1 October 2026; Linux has the same POSIX-only skips, and the Windows row is the 21 September measurement plus 83 platform-neutral cases added since):
 
 | Environment | Passed | Skipped |
 |---|---|---|
-| Linux (Node 24, as in CI) | 1,413 | 15 |
-| Windows 11 (Node 24) | 1,409 | 19 |
+| macOS (Node 26) | 1,484 | 15 |
+| Linux (Node 24, as in CI) | 1,484 | 15 |
+| Windows 11 (Node 24) | 1,480 | 19 |
 
 The skipped cases are:
 - Four opt-in end-to-end suites that need real services: a real provider (`ARENA_E2E=1`), Docker (`ARENA_DOCKER_E2E=1`), the real dashboard (`ARENA_DASHBOARD_E2E=1`), and the protected-container policy check (also `ARENA_DOCKER_E2E=1`).

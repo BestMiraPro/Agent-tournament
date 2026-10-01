@@ -305,3 +305,16 @@ export function extractText(res: PromptResponse): string {
     .map((p) => p.text as string)
     .join('')
 }
+
+/**
+ * The model's private thinking, when the server sent it as `reasoning` parts.
+ * Null when no reasoning part carries text — many models and structured-output
+ * modes send none, and that absence is reported, never filled in.
+ */
+export function extractReasoning(res: PromptResponse): string | null {
+  const text = (res.parts ?? [])
+    .filter((p) => p.type === 'reasoning' && typeof p.text === 'string')
+    .map((p) => p.text as string)
+    .join('')
+  return text === '' ? null : text
+}

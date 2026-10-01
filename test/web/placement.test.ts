@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'vitest'
 import { setupEstimate } from '../../web/src/lib/placement.js'
+import { planCapacity } from '../../src/runtime/docker/capacity.js'
+import { GATEWAY_CPUS, GATEWAY_MEMORY_BYTES } from '../../src/runtime/docker/gateway-limits.js'
+import { parseMemoryLimit } from '../../src/core/memory.js'
 
 const GiB = 1024 ** 3
 const capacity = { totalMemoryBytes: 8 * GiB, usedMemoryBytes: 1 * GiB, cpus: 16, reservedMemoryBytes: 0, reservedCpus: 0 }
@@ -65,12 +68,41 @@ describe('setupEstimate', () => {
     })
   })
 
-  test('each size says what was measured for it, and an unmeasured size says so', () => {
-    expect(setupEstimate(plan(), capacity).memoryNote).toBeNull()
-    expect(setupEstimate(plan({ memory: '768m' }), capacity).memoryNote).toContain('peak of 592 MiB')
+  test('each size says what was measured for it, with the workload and scope', () => {
+    expect(setupEstimate(plan(), capacity).memoryNote).toContain('2 simultaneous protected agents passed')
+    expect(setupEstimate(plan({ memory: '768m' }), capacity).memoryNote).toContain('727–761 MiB')
     expect(setupEstimate(plan({ memory: '512M' }), capacity).memoryNote).toContain('ran out of memory in every measured research trial')
     expect(setupEstimate(plan({ memory: '2g' }), capacity).memoryNote).toBe(
-      '2g has not been measured under research workloads; 768m and 1g are the measured sizes.',
+      '2g has not been measured under sustained-conversation workloads; 1g sustained 100 tool-turn rounds with peaks of 725–762 MiB per worker.',
     )
+  })
+
+  test('the fit decision is the server admission arithmetic: estimate and planCapacity agree', () => {
+    const memories = ['512m', '768m', '1g', '2g']
+    const isolations = ['shared', 'protected'] as const
+    const populations = [0, 1, 4, 7, 20]
+    const reserveds = [
+      { reservedMemoryBytes: 0, reservedCpus: 0 },
+      { reservedMemoryBytes: 3 * GiB, reservedCpus: 4 },
+    ]
+    for (const memory of memories) {
+      for (const isolation of isolations) {
+        for (const population of populations) {
+          for (const reserved of reserveds) {
+            const p = plan({ population, maxContainers: 4, memory, isolation })
+            const estimate = setupEstimate(p, { ...capacity, ...reserved })
+            const groups = population > 0 ? Math.min(4, population) : 0
+            const perContainer = parseMemoryLimit(memory) + (isolation === 'protected' ? GATEWAY_MEMORY_BYTES : 0)
+            const label = perContainer % 1024 ** 3 === 0 ? `${perContainer / 1024 ** 3}g` : `${Math.ceil(perContainer / 1024 ** 2)}m`
+            const verdict = planCapacity(
+              { containers: groups, memory: label, cpus: 1 + (isolation === 'protected' ? GATEWAY_CPUS : 0) },
+              { totalMemoryBytes: capacity.totalMemoryBytes, usedMemoryBytes: capacity.usedMemoryBytes, cpus: capacity.cpus },
+              { memoryBytes: reserved.reservedMemoryBytes, cpus: reserved.reservedCpus, observedBytes: 0 },
+            )
+            expect(estimate.fit.state === 'fits').toBe(verdict.ok)
+          }
+        }
+      }
+    }
   })
 })

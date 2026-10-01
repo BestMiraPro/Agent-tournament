@@ -43,6 +43,8 @@ const mockSeams = () => ({
   relay: vi.fn(async () => ({ policy: new RelayPolicy(), port: 45678 })),
   createShardNetworkFn: vi.fn(async (runId: string, shardIndex: number) => `arena-${runId}-net-${shardIndex}`),
   removeShardNetworkFn: vi.fn(async (_name: string, _onWarning?: (message: string) => void) => true),
+  // Strict removal confirmation reads the fake daemon, never a real one.
+  runtimeStateOf: vi.fn(async (_id: string) => 'stopped' as const),
 })
 
 describe('composeRun', () => {
@@ -453,6 +455,43 @@ describe('composeRun', () => {
         rmSync(root, { recursive: true, force: true })
       }
     })
+
+    test('a Docker-confirmed worker death unblocks the next round and keeps the failure record', async () => {
+      const ledger = new CapacityLedger()
+      const root = mkdtempSync(join(tmpdir(), 'compose-oom-'))
+      const states = new Map<string, 'running' | 'stopped' | 'unknown'>([['cid-9', 'running']])
+      const runtimeStateOf = vi.fn(async (id: string) => states.get(id) ?? 'unknown')
+      try {
+        const c = await composeRun(spec(root, 1), seamsWith(ledger, {
+          startShardContainerFn: vi.fn(async (s: { shardIndex: number }) => ({
+            name: `arena-run-${s.shardIndex}`, baseUrl: `http://127.0.0.1:${45000 + s.shardIndex}`, shardIndex: s.shardIndex,
+            containerId: 'cid-9',
+          })),
+          removeContainerFn: vi.fn(async () => {}),
+          createShardClient: () => shardClient(async () => { throw new Error('socket hang up') }),
+          inspectContainer: vi.fn(async () => ({ oomKilled: true, running: false })),
+          runtimeStateOf,
+        }) as never)
+        await c.planFor!(['a1'])
+        const h = await c.sandbox.provision('a1', {})
+        // The provisioned handle carries the worker's container ID for later termination checks.
+        expect(h.runtimeId).toBe('cid-9')
+        const result = await c.runner.run(h, { agentId: 'a1', goalMd: 'g', timeoutMs: 1000, genome })
+        expect(result.failure).toMatchObject({ code: 'CONTAINER_OOM' })
+        const ready = () => c.runner.assertReadyForRound?.()
+        // The original container is still running: the next round stays refused.
+        await expect(ready()).rejects.toThrow(/still running/)
+        expect(runtimeStateOf).toHaveBeenCalledWith('cid-9')
+        // The daemon confirms the original container stopped: reconciled, while
+        // the recorded failure still says what killed the worker.
+        states.set('cid-9', 'stopped')
+        await expect(ready()).resolves.toBeUndefined()
+        expect(result.failure).toMatchObject({ code: 'CONTAINER_OOM' })
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
   })
 
   describe('context folder', () => {
@@ -615,7 +654,9 @@ describe('composeRun', () => {
         workspaceRoot: root, authFile: join(root, 'auth.json'),
       }), { ...seams, ...dockerBoundary } as never)
       const seen: { shardIndex: number; baseUrl: string }[] = []
-      const unsubscribe = c.onShardServer!((server) => seen.push(server))
+      const unsubscribe = c.onShardServer!((event) => {
+        if (event.type === 'started') seen.push(event)
+      })
 
       expect(c.shardServers).toEqual([])
       await c.planFor!(['a1', 'a2'])
@@ -624,8 +665,8 @@ describe('composeRun', () => {
         c.sandbox.provision('a2', {}),
       ])
       expect(seen.sort((a, b) => a.shardIndex - b.shardIndex)).toEqual([
-        { shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' },
-        { shardIndex: 1, baseUrl: 'http://127.0.0.1:41001' },
+        { type: 'started', shardIndex: 0, baseUrl: 'http://127.0.0.1:41000' },
+        { type: 'started', shardIndex: 1, baseUrl: 'http://127.0.0.1:41001' },
       ])
 
       await c.planFor!(['a1', 'a2'])
