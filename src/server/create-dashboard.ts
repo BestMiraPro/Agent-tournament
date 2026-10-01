@@ -18,7 +18,8 @@ import { sweepOrphanRuntimeDirs } from '../runtime/runtime-dirs.js'
 import { buildApi } from './api.js'
 import { ActivityCache } from './activity.js'
 import { AuditCollector } from '../engine/audit.js'
-import { composeRun, defaultSeams, type ComposedRun, type RunIdHolder } from './compose-run.js'
+import { bridgeSeams, composeRun, defaultSeams, type ComposedRun, type RunIdHolder } from './compose-run.js'
+import type { DockerReach } from '../runtime/docker/container.js'
 import type { RunSpec } from './run-spec.js'
 import { RunManager } from './run-manager.js'
 import { disposeRunRecord, RunRegistry } from './runs.js'
@@ -37,7 +38,20 @@ export interface DashboardOptions {
    * the app is one process on one address. Tests leave it unset and get the API alone.
    */
   uiDir?: string | null
+  /**
+   * False refuses docker-sandbox runs up front, before model validation spends anything. The
+   * container image sets it when Docker's socket is not mounted, where a docker run could only
+   * fail later.
+   */
+  dockerSandbox?: boolean
+  /** How docker runs reach their containers; `bridge` when this app itself runs in a container. */
+  dockerReach?: DockerReach
 }
+
+/** Why a docker run is refused when `dockerSandbox` is false. */
+export const DOCKER_SANDBOX_OFF =
+  'Docker runs are turned off in this dashboard (--no-docker-sandbox). In the container image that means ' +
+  'Docker\'s socket is not mounted; compose.yaml mounts it. Or choose local or mock here.'
 
 export interface Dashboard {
   app: FastifyInstance
@@ -110,17 +124,20 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
   // Real-mode composition for spec POSTs. Per-spec values win; anything omitted
   // falls back to the process-level defaults, and the seams are the same ones the
   // CLI uses so local/docker compose identically.
+  const seams = opts.dockerReach === 'bridge' ? bridgeSeams(defaultSeams) : defaultSeams
   const composeWith = (spec: RunSpec, o?: { runIdHolder?: RunIdHolder }): Promise<ComposedRun> =>
-    composeRun(
-      {
-        ...spec,
-        workspaceRoot: spec.workspaceRoot ?? opts.workspaceRoot ?? null,
-        authFile: spec.authFile ?? opts.authFile ?? null,
-        serverUrl: spec.serverUrl ?? opts.serverUrl ?? null,
-      },
-      defaultSeams,
-      o ?? {},
-    )
+    opts.dockerSandbox === false && spec.sandbox === 'docker'
+      ? Promise.reject(new Error(DOCKER_SANDBOX_OFF))
+      : composeRun(
+        {
+          ...spec,
+          workspaceRoot: spec.workspaceRoot ?? opts.workspaceRoot ?? null,
+          authFile: spec.authFile ?? opts.authFile ?? null,
+          serverUrl: spec.serverUrl ?? opts.serverUrl ?? null,
+        },
+        seams,
+        o ?? {},
+      )
 
   const app = buildApi({
     repos,

@@ -1,8 +1,15 @@
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
+import type { DockerReach } from '../runtime/docker/container.js'
 
 export interface StartOptions {
   port: number
+  /**
+   * Address the server binds. Loopback by default: the dashboard has no authentication.
+   * The container image binds 0.0.0.0 inside its own network namespace and is published on
+   * the host's loopback only (compose.yaml).
+   */
+  host: string
   dbPath: string
   population: number
   workspaceRoot: string | null
@@ -12,6 +19,10 @@ export interface StartOptions {
   uiDir: string
   /** Open the default browser once listening. */
   open: boolean
+  /** Accept docker-sandbox runs. The container image turns them off without Docker's socket. */
+  dockerSandbox: boolean
+  /** How docker runs reach their containers: `bridge` from the container image, else `loopback`. */
+  dockerReach: DockerReach
 }
 
 /**
@@ -60,12 +71,15 @@ export function resolveStartOptions(input: {
     strict: true,
     options: {
       port: { type: 'string' },
+      host: { type: 'string' },
       db: { type: 'string' },
       population: { type: 'string' },
       'workspace-root': { type: 'string' },
       'auth-file': { type: 'string' },
       'server-url': { type: 'string' },
       'no-open': { type: 'boolean' },
+      'no-docker-sandbox': { type: 'boolean' },
+      'docker-reach': { type: 'string' },
     },
   })
 
@@ -78,9 +92,17 @@ export function resolveStartOptions(input: {
     throw new Error(`--population must be a whole number of at least 1, got "${values.population}"`)
   }
 
+  const host = values.host ?? '127.0.0.1'
+  if (host.length === 0) throw new Error('--host must not be empty')
+  const dockerReach = values['docker-reach'] ?? 'loopback'
+  if (dockerReach !== 'loopback' && dockerReach !== 'bridge') {
+    throw new Error(`--docker-reach must be loopback or bridge, got "${dockerReach}"`)
+  }
+
   const runsDir = join(input.projectRoot, 'runs')
   return {
     port,
+    host,
     population,
     dbPath: values.db ?? join(runsDir, 'dashboard.db'),
     // Absolute by construction, which run-spec validation requires.
@@ -89,5 +111,7 @@ export function resolveStartOptions(input: {
     serverUrl: values['server-url'] ?? null,
     uiDir: join(input.projectRoot, 'dist'),
     open: values['no-open'] !== true,
+    dockerSandbox: values['no-docker-sandbox'] !== true,
+    dockerReach,
   }
 }

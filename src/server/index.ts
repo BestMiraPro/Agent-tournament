@@ -24,8 +24,8 @@ try {
   process.exit(2)
 }
 
-// 127.0.0.1 rather than localhost: the server binds IPv4 loopback only, and on Windows
-// `localhost` can resolve to ::1 first.
+// 127.0.0.1 rather than localhost: the server binds IPv4 loopback by default, and on Windows
+// `localhost` can resolve to ::1 first. A server bound to 0.0.0.0 answers here too.
 const url = `http://127.0.0.1:${options.port}`
 
 // Probe BEFORE opening the database. createDashboard recovers interrupted rounds by marking
@@ -51,6 +51,8 @@ async function start(o: StartOptions): Promise<void> {
     authFile: o.authFile,
     serverUrl: o.serverUrl,
     uiDir: o.uiDir,
+    dockerSandbox: o.dockerSandbox,
+    dockerReach: o.dockerReach,
   })
   if (dashboard.recovered > 0) {
     console.log(`recovered ${dashboard.recovered} interrupted round(s)`)
@@ -58,7 +60,7 @@ async function start(o: StartOptions): Promise<void> {
   dashboard.attachWebSocket()
 
   try {
-    await dashboard.app.listen({ port: o.port, host: '127.0.0.1' })
+    await dashboard.app.listen({ port: o.port, host: o.host })
   } catch (e) {
     await dashboard.shutdown().catch(() => {})
     if ((e as NodeJS.ErrnoException).code === 'EADDRINUSE') {
@@ -80,6 +82,8 @@ async function start(o: StartOptions): Promise<void> {
   console.log(
     `  credentials  ${o.authFile ?? 'none found (docker runs will be refused; run `opencode auth login`)'}`,
   )
+  if (!o.dockerSandbox) console.log('  docker runs  off (--no-docker-sandbox)')
+  else if (o.dockerReach === 'bridge') console.log("  docker runs  from this container, over Docker's bridge network")
   console.log('')
   console.log('  Press Ctrl+C, or close this window, to stop.')
   console.log('')

@@ -7,7 +7,7 @@ Guidance for AI agents (and humans) working in this repo.
 Run all three before claiming work is done. All must pass.
 
 ```powershell
-npm test           # vitest run — 1,416 cases; see the platform split below
+npm test           # vitest run — 1,428 cases; see the platform split below
 npm run typecheck  # tsc --noEmit — expect exit 0, no output
 npm run web:build  # vite build — expect exit 0
 ```
@@ -17,7 +17,7 @@ CI (`.github/workflows/ci.yml`) runs the same three gates on Ubuntu with Node 24
 - 10 skips are the opt-in suites needing real services: `test/e2e/real-tournament.test.ts` (`ARENA_E2E=1`), `test/e2e/docker-tournament.test.ts` and `test/e2e/container-policy.test.ts` (`ARENA_DOCKER_E2E=1`), and `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`).
 - 8 are the file-symlink cases in `test/runtime/workspace-links.test.ts`. Creating a file symlink on Windows needs SeCreateSymbolicLink (Developer Mode or admin); without it the probe gets EPERM and those 8 skip. Directory-junction coverage runs regardless. On Linux they RUN — if they skip there, the capability probe is broken, not the platform.
 - `test/runtime/opencode/server.test.ts` has one POSIX-only termination test (skipped on win32) and five win32-only taskkill tests (skipped on POSIX).
-- Baseline at 2026-09-21, 1,416 total cases on every platform: **Windows 1,397 passed / 19 skipped; Linux 1,401 passed / 15 skipped.** If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
+- Baseline at 2026-10-01, 1,428 total cases on every platform: **Windows 1,409 passed / 19 skipped; Linux 1,413 passed / 15 skipped.** (Linux measured; Windows is the 2026-09-21 measurement plus twelve platform-neutral cases.) If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
 - There is no separate lint script — `typecheck` is the type gate.
 
 ## Stack
@@ -70,7 +70,9 @@ Or double-click `Start Agent Tournament.cmd` in the project root. No flags are n
 - workspaces in `runs/workspaces`;
 - credentials from `~/.local/share/opencode/auth.json` when that file exists (honours `XDG_DATA_HOME`).
 
-Every default has a flag (`--port`, `--db`, `--workspace-root`, `--auth-file`, `--server-url`, `--population`, `--no-open`), passed after `--`. Launching while it is already running opens the running instance instead of failing, and does so before touching the database — a second instance's startup recovery would otherwise mark the first one's in-flight round failed.
+Every default has a flag (`--port`, `--host`, `--db`, `--workspace-root`, `--auth-file`, `--server-url`, `--population`, `--no-open`, `--no-docker-sandbox`, `--docker-reach`), passed after `--`. Launching while it is already running opens the running instance instead of failing, and does so before touching the database — a second instance's startup recovery would otherwise mark the first one's in-flight round failed.
+
+In Docker instead (macOS, Linux): `docker compose up -d --build` from the repository folder (root `Dockerfile` + `compose.yaml`; README "Run in Docker"). All three sandboxes work. Docker runs drive the host's Docker through the mounted socket with `--docker-reach bridge`: the dashboard sits on Docker's default bridge (`network_mode: bridge`), reaches shard containers and gateways at their bridge addresses instead of host-loopback ports, and binds the provider relay to its own bridge address, which gateways forward to instead of `host.docker.internal`. Every path the app hands Docker must resolve on the host, so `runs/` and the OpenCode data folder are mounted at their host paths (`$PWD`, `$HOME`), and `XDG_CACHE_HOME` puts the model catalogue under `runs/`. The entrypoint (`docker/dashboard-entrypoint.sh`) runs node as root (socket access is root-equivalent anyway) with gid 1000 and umask 0002, so protected workers (uid 1000) can write workspaces on a Linux host. Without the socket it passes `--no-docker-sandbox`. `tsx` is a runtime dependency because the image runs `npm ci --omit=dev`. `ARENA_DOCKER_E2E=1 ARENA_DOCKER_REACH=bridge` runs `test/e2e/container-policy.test.ts` the same way, from such a container.
 
 No `OPENCODE_SERVER_*` clearing is needed any more: the one place opencode is spawned (`src/runtime/opencode/server.ts`) scrubs those variables itself.
 

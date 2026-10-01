@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { RelayPolicy } from '../../src/runtime/provider-relay.js'
 import { startProviderRelay, type ProviderRelay, type UpstreamCall } from '../../src/runtime/provider-relay-server.js'
 import { docker } from '../../src/runtime/docker/cli.js'
-import { startShardContainer, type ShardContainer } from '../../src/runtime/docker/container.js'
+import { ownBridgeAddress, startShardContainer, type ShardContainer } from '../../src/runtime/docker/container.js'
 import { ensureImage } from '../../src/runtime/docker/image.js'
 import { createShardNetwork, removeShardNetwork } from '../../src/runtime/docker/network.js'
 import { agentImageTag, readToolchainId } from '../../src/runtime/tool-manifest.js'
@@ -20,8 +20,13 @@ import { relayProviderConfig } from '../../src/runtime/opencode/relay-config.js'
  *
  * Gated like the other Docker suites: `ARENA_DOCKER_E2E=1`. It builds the toolchain image when
  * missing, which takes minutes the first time.
+ *
+ * `ARENA_DOCKER_REACH=bridge` runs it as the dashboard image does: from a container on Docker's
+ * default bridge with the socket mounted and the project folder at its host path. The relay then
+ * listens on this container's bridge address, and fixtures live under runs/, which Docker can see.
  */
 const ENABLED = process.env.ARENA_DOCKER_E2E === '1'
+const REACH = process.env.ARENA_DOCKER_REACH === 'bridge' ? 'bridge' : 'loopback'
 const d = describe.skipIf(!ENABLED)
 
 const RUN = `policy${Date.now().toString(36)}`
@@ -65,9 +70,16 @@ d('protected container policy (ARENA_DOCKER_E2E=1)', () => {
       token: TOKEN, allowedModels: [MODEL], maxRequests: 3,
       upstreams: [{ providerId: 'fake', baseUrl: 'https://upstream.invalid/v1', authStyle: 'bearer', apiKey: UPSTREAM_KEY }],
     })
-    relay = await startProviderRelay({ policy, upstream: fakeUpstream })
+    relay = await startProviderRelay({ policy, upstream: fakeUpstream, ...(REACH === 'bridge' ? { host: await ownBridgeAddress() } : {}) })
 
-    root = await mkdtemp(join(tmpdir(), 'arena-policy-'))
+    if (REACH === 'bridge') {
+      // Not mkdtemp, which makes the folder owner-only: like the dashboard image's workspaces, it
+      // must admit the workers' uid 1000 (run this with the image's umask and group).
+      root = join(process.cwd(), 'runs', `arena-policy-${RUN}`)
+      await mkdir(root, { recursive: true })
+    } else {
+      root = await mkdtemp(join(tmpdir(), 'arena-policy-'))
+    }
     const models = await readFile(catalogue, 'utf8')
     for (const shardIndex of [0, 1]) {
       const hostDir = join(root, `shard-${shardIndex}`)
@@ -82,8 +94,8 @@ d('protected container policy (ARENA_DOCKER_E2E=1)', () => {
       const network = await createShardNetwork(RUN, shardIndex)
       networks.push(network)
       shards.push(await startShardContainer({
-        runId: RUN, shardIndex, image, hostDir, memory: '1g', cpus: 1, authFile: null, toolsDir,
-        protectedRuntime: { network, configDir, relayPort: relay.port },
+        runId: RUN, shardIndex, image, hostDir, memory: '1g', cpus: 1, authFile: null, toolsDir, reach: REACH,
+        protectedRuntime: { network, configDir, relayPort: relay.port, ...(REACH === 'bridge' ? { relayHost: relay.host } : {}) },
       }, docker, // Bounded per probe, as the app does: one connection held open through the gateway
       // otherwise stalls the whole wait.
       async (baseUrl) => fetch(`${baseUrl}/global/health`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false)))
@@ -130,7 +142,8 @@ d('protected container policy (ARENA_DOCKER_E2E=1)', () => {
     const probes = await inWorker(a!, [
       'getent hosts example.com >/dev/null && echo dns-resolves || echo dns-blocked',
       connectProbe('1.1.1.1', 443),
-      connectProbe('host.docker.internal', relay.port),
+      // The relay's own address: reachable only through the gateway's fixed route.
+      connectProbe(REACH === 'bridge' ? relay.host : 'host.docker.internal', relay.port),
       connectProbe(siblingIp, 4096),
       `python3 -c "import urllib.request\ntry:\n urllib.request.urlopen('https://pypi.org/simple/requests/', timeout=5);print('downloaded')\nexcept Exception as e:\n print('download-blocked')"`,
       `node -e "fetch('https://registry.npmjs.org/').then(()=>console.log('downloaded'),()=>console.log('download-blocked'))"`,

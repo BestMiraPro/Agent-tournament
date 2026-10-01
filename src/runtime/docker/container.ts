@@ -1,14 +1,28 @@
+import { hostname } from 'node:os'
 import { buildProtectedRunArgs, buildRunArgs, docker, parsePortMapping, removeContainer } from './cli.js'
 import type { DockerFn } from './cli.js'
 import { buildGatewayRunArgs, GATEWAY_ALIAS, GATEWAY_API_PORT, gatewayName } from './gateway.js'
+
+/**
+ * How this process reaches the containers it starts.
+ *
+ * - `loopback`: the app runs on the Docker host and uses the port each container publishes on
+ *   the host's 127.0.0.1.
+ * - `bridge`: the app runs in a container on Docker's default bridge network, where the host's
+ *   loopback is out of reach, and uses each container's own address on that bridge instead.
+ *   Agent containers and gateways join that bridge already; nothing about them changes.
+ */
+export type DockerReach = 'loopback' | 'bridge'
 
 /** Where a protected shard's worker gets its network, relay config and relay route. */
 export interface ProtectedRuntimeSpec {
   network: string
   /** Host folder with the relay `opencode.json` and a copy of the model catalogue. */
   configDir: string
-  /** The host relay's loopback port, which the shard gateway forwards to. */
+  /** The relay's port, which the shard gateway forwards to. */
   relayPort: number
+  /** The relay's address as the gateway reaches it; the host's loopback when unset. */
+  relayHost?: string
 }
 
 export interface ShardContainerSpec {
@@ -28,6 +42,8 @@ export interface ShardContainerSpec {
   healthTimeoutMs?: number
   /** Present for protected isolation: no credentials, no egress, served through a gateway. */
   protectedRuntime?: ProtectedRuntimeSpec
+  /** How the app reaches the container's API. Default `loopback`. */
+  reach?: DockerReach
 }
 
 export interface ShardContainer {
@@ -60,6 +76,50 @@ export async function inspectContainerState(
   const isRunning = bool(running)
   if (oomKilled === null || isRunning === null) return null
   return { oomKilled, running: isRunning }
+}
+
+const IPV4 = /^(?:\d{1,3}\.){3}\d{1,3}$/
+
+/** A container's IPv4 address on Docker's default bridge network, or null when it has none. */
+export async function bridgeAddress(name: string, run: DockerFn = docker): Promise<string | null> {
+  const r = await run(['inspect', '-f', '{{with index .NetworkSettings.Networks "bridge"}}{{.IPAddress}}{{end}}', name], 20_000)
+  const address = r.stdout.trim()
+  return r.code === 0 && IPV4.test(address) ? address : null
+}
+
+/**
+ * This process's own address on Docker's default bridge, for an app running in a container there.
+ * Docker names a container's host after its id, so the hostname finds it.
+ */
+export async function ownBridgeAddress(run: DockerFn = docker, name: string = hostname()): Promise<string> {
+  const address = await bridgeAddress(name, run)
+  if (address === null) {
+    throw new Error(
+      `Docker runs from a container need it on Docker's default bridge network, and this one (${name}) has no address there. ` +
+        'Start it with network_mode: bridge, as compose.yaml does.',
+    )
+  }
+  return address
+}
+
+/** The base URL this process uses for a server listening on `containerPort` in a container. */
+export async function containerBaseUrl(
+  name: string,
+  containerPort: number,
+  reach: DockerReach,
+  run: DockerFn = docker,
+): Promise<string> {
+  if (reach === 'bridge') {
+    const address = await bridgeAddress(name, run)
+    if (address === null) throw new Error(`Could not find an address for ${name} on Docker's bridge network`)
+    return `http://${address}:${containerPort}`
+  }
+  const portOut = await run(['port', name, `${containerPort}/tcp`], 20_000)
+  const port = parsePortMapping(portOut.stdout)
+  if (port === null) {
+    throw new Error(`Could not discover a published port for ${name}`)
+  }
+  return `http://127.0.0.1:${port}`
 }
 
 export async function waitForHealth(
@@ -117,12 +177,7 @@ export async function startShardContainer(
   // someone runs `docker rm -f` by hand. So: own the container from here on, and remove
   // it on any failure path.
   try {
-    const portOut = await run(['port', name, '4096/tcp'], 20_000)
-    const port = parsePortMapping(portOut.stdout)
-    if (port === null) {
-      throw new Error(`Could not discover a published port for ${name}`)
-    }
-    const baseUrl = `http://127.0.0.1:${port}`
+    const baseUrl = await containerBaseUrl(name, 4096, spec.reach ?? 'loopback', run)
 
     if (healthProbe) {
       const healthy = await waitForHealth(
@@ -186,7 +241,13 @@ async function startProtectedShard(
   let gatewayStarted = false
   try {
     const started = await run(
-      buildGatewayRunArgs({ runId: spec.runId, shardIndex: spec.shardIndex, image: spec.image, relayPort: runtime.relayPort }),
+      buildGatewayRunArgs({
+        runId: spec.runId,
+        shardIndex: spec.shardIndex,
+        image: spec.image,
+        relayPort: runtime.relayPort,
+        ...(runtime.relayHost ? { relayHost: runtime.relayHost } : {}),
+      }),
       120_000,
     )
     if (started.code !== 0) {
@@ -197,10 +258,7 @@ async function startProtectedShard(
     if (joined.code !== 0) {
       throw new Error(`Could not connect gateway ${gateway} to ${runtime.network}: ${(joined.stderr || joined.stdout).trim().slice(-300)}`)
     }
-    const portOut = await run(['port', gateway, `${GATEWAY_API_PORT}/tcp`], 20_000)
-    const port = parsePortMapping(portOut.stdout)
-    if (port === null) throw new Error(`Could not discover a published port for ${gateway}`)
-    const baseUrl = `http://127.0.0.1:${port}`
+    const baseUrl = await containerBaseUrl(gateway, GATEWAY_API_PORT, spec.reach ?? 'loopback', run)
     if (healthProbe) {
       const healthy = await waitForHealth(() => healthProbe(baseUrl), spec.healthTimeoutMs ?? 60_000)
       if (!healthy) throw new Error(`Container ${name} started but never became healthy through its gateway at ${baseUrl}`)
