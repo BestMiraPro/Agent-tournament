@@ -1,0 +1,29 @@
+# docker compose up -d --build   ->   http://127.0.0.1:4300
+#
+# Real (local) runs need OpenCode credentials. Put the path to your auth.json in a .env file
+# next to this one, for example:
+#   OPENCODE_AUTH_FILE=~/.local/share/opencode/auth.json
+# Without it the app starts with no credentials: mock runs work, real runs are refused.
+services:
+  dashboard:
+    build: .
+    image: agent-tournament:local
+    ports:
+      # Host loopback only: the dashboard has no authentication.
+      - "127.0.0.1:${ARENA_PORT:-4300}:4300"
+    volumes:
+      # Database and workspaces, kept across restarts and rebuilds.
+      - runs:/app/runs
+      - type: bind
+        source: ${OPENCODE_AUTH_FILE:-./docker/no-credentials}
+        target: /run/secrets/opencode-auth.json
+        read_only: true
+        bind:
+          # A mistyped path fails loudly instead of Docker creating an empty folder there.
+          create_host_path: false
+    restart: unless-stopped
+    # Time for in-flight work to stop and OpenCode servers to shut down.
+    stop_grace_period: 30s
+
+volumes:
+  runs:

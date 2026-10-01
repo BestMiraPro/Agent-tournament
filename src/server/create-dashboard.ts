@@ -37,7 +37,18 @@ export interface DashboardOptions {
    * the app is one process on one address. Tests leave it unset and get the API alone.
    */
   uiDir?: string | null
+  /**
+   * False refuses docker-sandbox runs up front. The container image sets it: agent containers
+   * are orchestrated from the host (loopback ports, host bind mounts, the provider relay), so
+   * from inside a container a docker run could only fail later, after model validation.
+   */
+  dockerSandbox?: boolean
 }
+
+/** Why a docker run is refused when `dockerSandbox` is false. */
+export const DOCKER_SANDBOX_OFF =
+  'Docker runs are turned off in this dashboard (--no-docker-sandbox), as they are in its container image: ' +
+  'agent containers are started from the host. Start the app with `npm start` on the host for docker runs, or choose local or mock here.'
 
 export interface Dashboard {
   app: FastifyInstance
@@ -111,16 +122,18 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
   // falls back to the process-level defaults, and the seams are the same ones the
   // CLI uses so local/docker compose identically.
   const composeWith = (spec: RunSpec, o?: { runIdHolder?: RunIdHolder }): Promise<ComposedRun> =>
-    composeRun(
-      {
-        ...spec,
-        workspaceRoot: spec.workspaceRoot ?? opts.workspaceRoot ?? null,
-        authFile: spec.authFile ?? opts.authFile ?? null,
-        serverUrl: spec.serverUrl ?? opts.serverUrl ?? null,
-      },
-      defaultSeams,
-      o ?? {},
-    )
+    opts.dockerSandbox === false && spec.sandbox === 'docker'
+      ? Promise.reject(new Error(DOCKER_SANDBOX_OFF))
+      : composeRun(
+        {
+          ...spec,
+          workspaceRoot: spec.workspaceRoot ?? opts.workspaceRoot ?? null,
+          authFile: spec.authFile ?? opts.authFile ?? null,
+          serverUrl: spec.serverUrl ?? opts.serverUrl ?? null,
+        },
+        defaultSeams,
+        o ?? {},
+      )
 
   const app = buildApi({
     repos,

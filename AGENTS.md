@@ -7,7 +7,7 @@ Guidance for AI agents (and humans) working in this repo.
 Run all three before claiming work is done. All must pass.
 
 ```powershell
-npm test           # vitest run — 1,416 cases; see the platform split below
+npm test           # vitest run — 1,419 cases; see the platform split below
 npm run typecheck  # tsc --noEmit — expect exit 0, no output
 npm run web:build  # vite build — expect exit 0
 ```
@@ -17,7 +17,7 @@ CI (`.github/workflows/ci.yml`) runs the same three gates on Ubuntu with Node 24
 - 10 skips are the opt-in suites needing real services: `test/e2e/real-tournament.test.ts` (`ARENA_E2E=1`), `test/e2e/docker-tournament.test.ts` and `test/e2e/container-policy.test.ts` (`ARENA_DOCKER_E2E=1`), and `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`).
 - 8 are the file-symlink cases in `test/runtime/workspace-links.test.ts`. Creating a file symlink on Windows needs SeCreateSymbolicLink (Developer Mode or admin); without it the probe gets EPERM and those 8 skip. Directory-junction coverage runs regardless. On Linux they RUN — if they skip there, the capability probe is broken, not the platform.
 - `test/runtime/opencode/server.test.ts` has one POSIX-only termination test (skipped on win32) and five win32-only taskkill tests (skipped on POSIX).
-- Baseline at 2026-09-21, 1,416 total cases on every platform: **Windows 1,397 passed / 19 skipped; Linux 1,401 passed / 15 skipped.** If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
+- Baseline at 2026-10-01, 1,419 total cases on every platform: **Windows 1,400 passed / 19 skipped; Linux 1,404 passed / 15 skipped.** (Linux measured; Windows is the 2026-09-21 measurement plus three platform-neutral cases.) If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
 - There is no separate lint script — `typecheck` is the type gate.
 
 ## Stack
@@ -70,7 +70,9 @@ Or double-click `Start Agent Tournament.cmd` in the project root. No flags are n
 - workspaces in `runs/workspaces`;
 - credentials from `~/.local/share/opencode/auth.json` when that file exists (honours `XDG_DATA_HOME`).
 
-Every default has a flag (`--port`, `--db`, `--workspace-root`, `--auth-file`, `--server-url`, `--population`, `--no-open`), passed after `--`. Launching while it is already running opens the running instance instead of failing, and does so before touching the database — a second instance's startup recovery would otherwise mark the first one's in-flight round failed.
+Every default has a flag (`--port`, `--host`, `--db`, `--workspace-root`, `--auth-file`, `--server-url`, `--population`, `--no-open`, `--no-docker-sandbox`), passed after `--`. Launching while it is already running opens the running instance instead of failing, and does so before touching the database — a second instance's startup recovery would otherwise mark the first one's in-flight round failed.
+
+In Docker instead: `docker compose up -d --build` (root `Dockerfile` + `compose.yaml`; README "Run in Docker"). The entrypoint (`docker/dashboard-entrypoint.sh`) binds `0.0.0.0` inside the container (published on host loopback only), links a mounted `auth.json` into OpenCode's data folder, and passes `--no-docker-sandbox`: docker runs need host loopback ports, host bind mounts and the host-side relay, so they are refused there and need `npm start` on the host. `tsx` is a runtime dependency because the image runs `npm ci --omit=dev`.
 
 No `OPENCODE_SERVER_*` clearing is needed any more: the one place opencode is spawned (`src/runtime/opencode/server.ts`) scrubs those variables itself.
 

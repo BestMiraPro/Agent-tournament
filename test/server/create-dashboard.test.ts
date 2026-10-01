@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WebSocket } from 'ws'
@@ -99,6 +99,46 @@ describe('createDashboard after a restart', () => {
       }
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('createDashboard with docker runs turned off', () => {
+  const dockerSpec = {
+    name: 'docker run', goal: 'g', sandbox: 'docker', isolation: 'shared',
+    roster: [{ modelId: 'anthropic/claude-sonnet-4-5', count: 2, temperature: 0.7 }],
+    pricing: { 'anthropic/claude-sonnet-4-5': { inPerM: 3, outPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 } },
+  }
+
+  test('refuses a docker run before composing anything, and says where docker runs work', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-no-docker-'))
+    const workspaceRoot = join(dir, 'workspaces')
+    const dashboard = createDashboard({
+      population: 2, dockerSandbox: false, workspaceRoot, authFile: join(dir, 'auth.json'),
+    })
+    try {
+      const res = await dashboard.app.inject({ method: 'POST', url: '/api/runs', payload: dockerSpec })
+      expect(res.statusCode).toBe(400)
+      expect(JSON.parse(res.body).error).toMatch(/Docker runs are turned off.*npm start/)
+      // Composition never began: it creates the workspace root first thing.
+      expect(existsSync(workspaceRoot)).toBe(false)
+      expect(dashboard.repos.runs.list()).toEqual([])
+    } finally {
+      await dashboard.shutdown()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('still accepts mock runs', async () => {
+    const dashboard = createDashboard({ population: 2, dockerSandbox: false })
+    try {
+      const res = await dashboard.app.inject({
+        method: 'POST', url: '/api/runs',
+        payload: { name: 'mock run', goal: 'g', sandbox: 'mock', roster: [{ modelId: 'mock/model', count: 2, temperature: 0.7 }] },
+      })
+      expect(res.statusCode).toBe(201)
+    } finally {
+      await dashboard.shutdown()
     }
   })
 })
