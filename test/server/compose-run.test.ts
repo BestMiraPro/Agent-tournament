@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { composeRun, pathKind, runConfigFor, type ComposeSeams } from '../../src/server/compose-run.js'
+import { bridgeSeams, composeRun, pathKind, runConfigFor, type ComposeSeams } from '../../src/server/compose-run.js'
 import { CapacityLedger } from '../../src/runtime/docker/capacity.js'
 import { RelayPolicy } from '../../src/runtime/provider-relay.js'
 
@@ -191,6 +191,35 @@ describe('composeRun', () => {
         expect(seams.removeContainerFn.mock.calls.map((call) => call[0]).sort()).toEqual(['arena-run-9-0', 'arena-run-9-1', 'arena-run-9-gw-0', 'arena-run-9-gw-1'])
         expect(seams.removeShardNetworkFn.mock.calls.map((call) => call[0]).sort()).toEqual(['arena-run-9-net-0', 'arena-run-9-net-1'])
         expect(existsSync(join(root, '.arena-runtime', 'run-9'))).toBe(false)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('from a container on Docker\'s bridge, shards are reached there and gateways forward to the app\'s bridge address', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-protected-'))
+      const startShardContainerFn = started()
+      const startRelay = vi.fn(async (_host: string) => ({ policy: new RelayPolicy(), port: 45678 }))
+      const base = {
+        ...mockSeams(),
+        startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+        readCapacity: vi.fn(async () => host),
+        startShardContainerFn,
+        removeContainerFn: vi.fn(async (_name: string) => {}),
+      }
+      const seams = bridgeSeams(base as never, { selfAddress: async () => '172.17.0.2', startRelay })
+      try {
+        const c = await composeRun(spec(root), seams, { runIdHolder: { value: 'run-9' } })
+        expect(startRelay).toHaveBeenCalledWith('172.17.0.2')
+        await c.planFor!(['a1', 'a2'])
+        await Promise.all([c.sandbox.provision('a1', {}), c.sandbox.provision('a2', {})])
+        const specs = startShardContainerFn.mock.calls.map((call) => (call as unknown as [{ reach: string; protectedRuntime: { relayPort: number; relayHost: string } }])[0])
+        expect(specs).toHaveLength(2)
+        for (const s of specs) {
+          expect(s.reach).toBe('bridge')
+          expect(s.protectedRuntime).toMatchObject({ relayPort: 45678, relayHost: '172.17.0.2' })
+        }
+        await c.cleanup()
       } finally {
         rmSync(root, { recursive: true, force: true })
       }

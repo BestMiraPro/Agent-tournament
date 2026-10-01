@@ -84,28 +84,22 @@ Real-agent and Docker modes need OpenCode and provider credentials. See the [ope
 
 ## Run in Docker
 
-The dashboard also runs as a container, with Docker as the only requirement (Docker Desktop on Windows and macOS):
+The dashboard also runs as a container, with Docker as the only requirement: Docker Desktop on macOS (Apple Silicon or Intel), or Docker Engine on Linux. From the repository folder:
 
 ```bash
 docker compose up -d --build
 ```
 
-Open `http://127.0.0.1:4300`. Runs are kept in the `runs` volume across restarts and rebuilds. `docker compose down` stops the app; `docker compose down -v` also deletes its runs.
+Open `http://127.0.0.1:4300`. Mock, local and **docker** runs all work: for docker runs the container starts agent containers on your Docker beside itself, as `npm start` would, and builds the agent image the first time (a few minutes). The run database is kept in a Docker volume, and agent workspaces go to `runs/workspaces` in the repository folder. `docker compose down` stops the app; `docker compose down -v` also deletes the database.
 
-For real runs, put the path to your OpenCode credentials in a `.env` file next to `compose.yaml`, then run `docker compose up -d` again:
+Credentials come from `~/.local/share/opencode/auth.json`, read-only, as with `npm start`, so run `opencode auth login` on the host first. If yours live elsewhere, put `OPENCODE_DATA_DIR=/path/to/opencode` in a `.env` file next to `compose.yaml`. `ARENA_PORT=4400` in the same file changes the host port.
 
-```bash
-OPENCODE_AUTH_FILE=~/.local/share/opencode/auth.json
-# Windows, if ~ does not resolve: OPENCODE_AUTH_FILE=C:/Users/<you>/.local/share/opencode/auth.json
-```
-
-The file is mounted read-only. A path that does not exist makes `up` fail rather than start without credentials. `ARENA_PORT=4400` in the same file changes the host port.
-
-What runs where:
-- **mock** and **local** runs work. Local-run agents execute inside the dashboard container, not on your machine. They can still read the mounted credentials and the run database, so local mode is still for trusted tasks only.
-- **docker** runs are refused. The app starts agent containers from the host, so Docker-isolated agents need `npm start` on the host.
-
-On Linux the container runs as uid 1000, so the credentials file must be readable by that uid.
+Things to know:
+- **Run `docker compose` from the repository folder.** Docker resolves the folders the app hands it on the host, so `runs/` and your OpenCode data folder are mounted at the same path inside. On macOS the repository must be in a folder Docker Desktop shares; everything under `/Users` is shared by default.
+- **The container controls your Docker** through its socket, which is root-equivalent on the Docker host: the same access `npm start` has there. Local runs inside it are not isolated, as on the host.
+- **Shared isolation** puts agents on Docker's default bridge with the dashboard, where they could reach its unauthenticated API. Protected isolation, the default, does not: workers sit on internal networks and reach only the relay.
+- A run's context folder must be inside `runs/` but outside `runs/workspaces`, because only `runs/` is mounted.
+- On Windows, use `npm start`, or run compose from WSL.
 
 ## Tests and quality gates
 
@@ -117,12 +111,12 @@ npm run typecheck   # tsc --noEmit, strict mode with noUncheckedIndexedAccess
 npm run web:build   # Vite production build of the dashboard
 ```
 
-The suite has **1,419 test cases in 112 files**. Some are platform-specific or opt-in, so the pass/skip split depends on where it runs (Linux measured 1 October 2026; the Windows row is the 21 September measurement plus three platform-neutral cases added since):
+The suite has **1,428 test cases in 112 files**. Some are platform-specific or opt-in, so the pass/skip split depends on where it runs (Linux measured 1 October 2026; the Windows row is the 21 September measurement plus twelve platform-neutral cases added since):
 
 | Environment | Passed | Skipped |
 |---|---|---|
-| Linux (Node 24, as in CI) | 1,404 | 15 |
-| Windows 11 (Node 24) | 1,400 | 19 |
+| Linux (Node 24, as in CI) | 1,413 | 15 |
+| Windows 11 (Node 24) | 1,409 | 19 |
 
 The skipped cases are:
 - Four opt-in end-to-end suites that need real services: a real provider (`ARENA_E2E=1`), Docker (`ARENA_DOCKER_E2E=1`), the real dashboard (`ARENA_DASHBOARD_E2E=1`), and the protected-container policy check (also `ARENA_DOCKER_E2E=1`).

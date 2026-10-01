@@ -14,6 +14,16 @@ describe('shard gateway', () => {
     for (const bad of [0, 70000, 1.5, Number.NaN]) expect(() => gatewayScript(bad)).toThrow(/relay port/)
   })
 
+  test('forwards model calls to the app\'s bridge address when the app itself runs in a container', () => {
+    const script = gatewayScript(41234, '172.17.0.2')
+    expect(script).toContain('pipe(8787,"172.17.0.2",41234)')
+    expect(script).toContain('pipe(14096,"worker",4096)')
+    const args = buildGatewayRunArgs({ runId: 'run-7', shardIndex: 0, image: 'agent-arena:tc-x', relayPort: 41234, relayHost: '172.17.0.2' })
+    expect(args.at(-1)).toBe(script)
+    // Interpolated into the forwarder's source, so anything but a plain host name or address is refused.
+    for (const bad of ['', 'a b', '1.2.3.4",1);process.exit(1);("']) expect(() => gatewayScript(41234, bad)).toThrow(/relay host/)
+  })
+
   test('runs unprivileged, read-only and small, publishing only the worker API on loopback', () => {
     const args = buildGatewayRunArgs({ runId: 'run-7', shardIndex: 0, image: 'agent-arena:tc-x', relayPort: 41234 })
     expect(args.slice(0, 4)).toEqual(['run', '-d', '--name', 'arena-run-7-gw-0'])

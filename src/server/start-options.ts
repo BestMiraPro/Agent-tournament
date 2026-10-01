@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
+import type { DockerReach } from '../runtime/docker/container.js'
 
 export interface StartOptions {
   port: number
@@ -18,8 +19,10 @@ export interface StartOptions {
   uiDir: string
   /** Open the default browser once listening. */
   open: boolean
-  /** Accept docker-sandbox runs. The container image turns them off (createDashboard). */
+  /** Accept docker-sandbox runs. The container image turns them off without Docker's socket. */
   dockerSandbox: boolean
+  /** How docker runs reach their containers: `bridge` from the container image, else `loopback`. */
+  dockerReach: DockerReach
 }
 
 /**
@@ -76,6 +79,7 @@ export function resolveStartOptions(input: {
       'server-url': { type: 'string' },
       'no-open': { type: 'boolean' },
       'no-docker-sandbox': { type: 'boolean' },
+      'docker-reach': { type: 'string' },
     },
   })
 
@@ -90,6 +94,10 @@ export function resolveStartOptions(input: {
 
   const host = values.host ?? '127.0.0.1'
   if (host.length === 0) throw new Error('--host must not be empty')
+  const dockerReach = values['docker-reach'] ?? 'loopback'
+  if (dockerReach !== 'loopback' && dockerReach !== 'bridge') {
+    throw new Error(`--docker-reach must be loopback or bridge, got "${dockerReach}"`)
+  }
 
   const runsDir = join(input.projectRoot, 'runs')
   return {
@@ -104,5 +112,6 @@ export function resolveStartOptions(input: {
     uiDir: join(input.projectRoot, 'dist'),
     open: values['no-open'] !== true,
     dockerSandbox: values['no-docker-sandbox'] !== true,
+    dockerReach,
   }
 }

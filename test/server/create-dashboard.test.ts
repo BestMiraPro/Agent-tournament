@@ -110,7 +110,7 @@ describe('createDashboard with docker runs turned off', () => {
     pricing: { 'anthropic/claude-sonnet-4-5': { inPerM: 3, outPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 } },
   }
 
-  test('refuses a docker run before composing anything, and says where docker runs work', async () => {
+  test('refuses a docker run before composing anything, and says why', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dashboard-no-docker-'))
     const workspaceRoot = join(dir, 'workspaces')
     const dashboard = createDashboard({
@@ -119,7 +119,7 @@ describe('createDashboard with docker runs turned off', () => {
     try {
       const res = await dashboard.app.inject({ method: 'POST', url: '/api/runs', payload: dockerSpec })
       expect(res.statusCode).toBe(400)
-      expect(JSON.parse(res.body).error).toMatch(/Docker runs are turned off.*npm start/)
+      expect(JSON.parse(res.body).error).toMatch(/Docker runs are turned off.*socket is not mounted/)
       // Composition never began: it creates the workspace root first thing.
       expect(existsSync(workspaceRoot)).toBe(false)
       expect(dashboard.repos.runs.list()).toEqual([])

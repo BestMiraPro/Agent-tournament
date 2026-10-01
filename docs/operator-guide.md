@@ -102,7 +102,8 @@ Nothing needs configuring first. The defaults, each overridable with a flag afte
 | `--server-url` | none — start a fresh opencode server per run |
 | `--population` | `8` — size of the default mock run |
 | `--no-open` | the browser opens by default |
-| `--no-docker-sandbox` | docker runs are accepted; the container image sets this, because agent containers are started from the host |
+| `--no-docker-sandbox` | docker runs are accepted; the container image sets this only when Docker's socket is not mounted |
+| `--docker-reach` | `loopback`: the app runs on the Docker host and reaches containers through ports published on `127.0.0.1`. The container image uses `bridge`: it reaches them at their addresses on Docker's default bridge, and its provider relay listens there for the gateways |
 
 To run the dashboard itself in Docker, see [Run in Docker](../README.md#run-in-docker) in the README.
 

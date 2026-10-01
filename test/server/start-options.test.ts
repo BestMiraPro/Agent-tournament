@@ -31,6 +31,8 @@ describe('resolveStartOptions', () => {
       uiDir: join(root, 'dist'),
       open: true,
       dockerSandbox: true,
+      // The app on the Docker host, reaching containers through ports published on loopback.
+      dockerReach: 'loopback',
     })
   })
 
@@ -38,11 +40,11 @@ describe('resolveStartOptions', () => {
     const o = resolve([
       '--port', '5000', '--host', '0.0.0.0', '--db', ':memory:', '--population', '3',
       '--workspace-root', '/elsewhere', '--auth-file', '/creds.json',
-      '--server-url', 'http://127.0.0.1:4096', '--no-open', '--no-docker-sandbox',
+      '--server-url', 'http://127.0.0.1:4096', '--no-open', '--no-docker-sandbox', '--docker-reach', 'bridge',
     ], { files: [opencodeAuth] })
     expect(o).toMatchObject({
       port: 5000, host: '0.0.0.0', dbPath: ':memory:', population: 3, workspaceRoot: '/elsewhere',
-      authFile: '/creds.json', serverUrl: 'http://127.0.0.1:4096', open: false, dockerSandbox: false,
+      authFile: '/creds.json', serverUrl: 'http://127.0.0.1:4096', open: false, dockerSandbox: false, dockerReach: 'bridge',
     })
   })
 
@@ -52,6 +54,10 @@ describe('resolveStartOptions', () => {
 
   test.each([['0'], ['70000'], ['abc'], ['4300.5']])('rejects port %j', (port) => {
     expect(() => resolve(['--port', port])).toThrow(/--port/)
+  })
+
+  test('rejects a docker reach other than loopback or bridge', () => {
+    expect(() => resolve(['--docker-reach', 'host'])).toThrow(/--docker-reach must be loopback or bridge/)
   })
 
   test('rejects an empty bind address', () => {

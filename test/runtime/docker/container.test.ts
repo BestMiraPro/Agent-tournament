@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import { buildProtectedRunArgs } from '../../../src/runtime/docker/cli.js'
-import { containerName, inspectContainerState, startShardContainer, waitForHealth } from '../../../src/runtime/docker/container.js'
+import { containerName, inspectContainerState, ownBridgeAddress, startShardContainer, waitForHealth } from '../../../src/runtime/docker/container.js'
 import { buildGatewayRunArgs } from '../../../src/runtime/docker/gateway.js'
 
 describe('startShardContainer with the protected runtime', () => {
@@ -53,6 +53,62 @@ describe('startShardContainer with the protected runtime', () => {
     const d = fakeDocker((args) => (args[0] === 'run' && args.includes('node') ? { stdout: '', stderr: 'port is already allocated', code: 1 } : undefined))
     await expect(startShardContainer(spec, d.fn, async () => true)).rejects.toThrow(/Failed to start gateway arena-run1-gw-0: port is already allocated/)
     expect(d.calls.at(-1)).toEqual(['rm', '-f', 'arena-run1-0'])
+  })
+})
+
+describe('startShardContainer from a container on Docker\'s bridge', () => {
+  type Exec = { stdout: string; stderr: string; code: number }
+  const ok = (stdout = ''): Exec => ({ stdout, stderr: '', code: 0 })
+  /** Answers the bridge-address inspect with `addresses[name]`, everything else with success. */
+  const fakeDocker = (addresses: Record<string, string>) => {
+    const calls: string[][] = []
+    const fn = vi.fn(async (args: string[]) => {
+      calls.push(args)
+      if (args[0] === 'inspect' && args[2]?.includes('"bridge"')) return ok(addresses[args[3]!] ?? '')
+      return ok()
+    })
+    return { fn, calls }
+  }
+  const base = { runId: 'run1', shardIndex: 0, image: 'agent-arena:tc-x', hostDir: '/host/shard-0', memory: '1g', cpus: 1, authFile: null, reach: 'bridge' as const }
+
+  test('a shared shard is reached at its own bridge address, not a port published on the host', async () => {
+    const d = fakeDocker({ 'arena-run1-0': '172.17.0.5' })
+    const probed: string[] = []
+    const r = await startShardContainer(base, d.fn, async (url) => { probed.push(url); return true })
+    expect(r.baseUrl).toBe('http://172.17.0.5:4096')
+    expect(probed).toEqual(['http://172.17.0.5:4096'])
+    expect(d.calls.some((c) => c[0] === 'port')).toBe(false)
+  })
+
+  test('a protected shard is reached through its gateway\'s bridge address, and the gateway forwards to the app\'s relay', async () => {
+    const d = fakeDocker({ 'arena-run1-gw-0': '172.17.0.6' })
+    const r = await startShardContainer({
+      ...base, toolsDir: '/host/tools',
+      protectedRuntime: { network: 'arena-run1-net-0', configDir: '/host/config', relayPort: 41234, relayHost: '172.17.0.2' },
+    }, d.fn, async () => true)
+    expect(r.baseUrl).toBe('http://172.17.0.6:14096')
+    const gatewayRun = d.calls.filter((c) => c[0] === 'run')[1]
+    expect(gatewayRun).toEqual(buildGatewayRunArgs({ runId: 'run1', shardIndex: 0, image: 'agent-arena:tc-x', relayPort: 41234, relayHost: '172.17.0.2' }))
+    expect(d.calls.some((c) => c[0] === 'port')).toBe(false)
+  })
+
+  test('a container with no bridge address is removed, and the error says so', async () => {
+    const d = fakeDocker({})
+    await expect(startShardContainer(base, d.fn, async () => true)).rejects.toThrow(/address for arena-run1-0 on Docker's bridge network/)
+    expect(d.calls.at(-1)).toEqual(['rm', '-f', 'arena-run1-0'])
+  })
+})
+
+describe('ownBridgeAddress', () => {
+  test('is this container\'s address on the default bridge, found by its hostname', async () => {
+    const run = vi.fn(async (_args: string[]) => ({ stdout: '172.17.0.2\n', stderr: '', code: 0 }))
+    await expect(ownBridgeAddress(run, 'abc123')).resolves.toBe('172.17.0.2')
+    expect(run.mock.calls[0]![0]).toEqual(['inspect', '-f', '{{with index .NetworkSettings.Networks "bridge"}}{{.IPAddress}}{{end}}', 'abc123'])
+  })
+
+  test('says how to fix a container that is not on the default bridge', async () => {
+    const run = vi.fn(async () => ({ stdout: '\n', stderr: '', code: 0 }))
+    await expect(ownBridgeAddress(run, 'abc123')).rejects.toThrow(/default bridge network.*network_mode: bridge/)
   })
 })
 

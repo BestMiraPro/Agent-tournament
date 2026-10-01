@@ -18,4 +18,11 @@ describe('processRelay', () => {
     const c = await processRelay()
     expect(c.policy).not.toBe(a.policy)
   })
+
+  test('listens on the address it is first started with, and refuses to be asked for another', async () => {
+    const a = await processRelay({ host: '127.0.0.1' })
+    expect(a.host).toBe('127.0.0.1')
+    await expect(processRelay({ host: '0.0.0.0' })).rejects.toThrow(/already listens on 127\.0\.0\.1, not 0\.0\.0\.0/)
+    expect((await processRelay()).port).toBe(a.port)
+  })
 })

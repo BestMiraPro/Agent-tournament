@@ -1,29 +1,38 @@
 # docker compose up -d --build   ->   http://127.0.0.1:4300
 #
-# Real (local) runs need OpenCode credentials. Put the path to your auth.json in a .env file
-# next to this one, for example:
-#   OPENCODE_AUTH_FILE=~/.local/share/opencode/auth.json
-# Without it the app starts with no credentials: mock runs work, real runs are refused.
+# Run it from the repository folder (macOS or Linux). Docker resolves the folders this app hands
+# it on the host, so they are mounted at the same path inside: runs/ beside this file, and your
+# OpenCode data folder for credentials. Overrides go in a .env file next to this one:
+#   ARENA_PORT=4400                          host port
+#   OPENCODE_DATA_DIR=/path/to/opencode      where auth.json lives, if not ~/.local/share/opencode
 services:
   dashboard:
     build: .
     image: agent-tournament:local
+    # Docker's default bridge, which the agent containers this app starts join too: it reaches
+    # them, and their gateways reach its provider relay, at their bridge addresses.
+    network_mode: bridge
     ports:
       # Host loopback only: the dashboard has no authentication.
       - "127.0.0.1:${ARENA_PORT:-4300}:4300"
+    environment:
+      ARENA_WORKSPACE_ROOT: ${PWD:?run docker compose from the repository folder}/runs/workspaces
+      ARENA_OPENCODE_DATA: ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}
+      # OpenCode's cache, including the model catalogue docker runs mount into agent containers.
+      XDG_CACHE_HOME: ${PWD:?run docker compose from the repository folder}/runs/opencode-cache
     volumes:
-      # Database and workspaces, kept across restarts and rebuilds.
+      # Docker runs start agent containers on this Docker. Access to its socket is root-equivalent
+      # on the Docker host, which is what `npm start` on the host has too.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The database, kept across restarts and rebuilds.
       - runs:/app/runs
-      - type: bind
-        source: ${OPENCODE_AUTH_FILE:-./docker/no-credentials}
-        target: /run/secrets/opencode-auth.json
-        read_only: true
-        bind:
-          # A mistyped path fails loudly instead of Docker creating an empty folder there.
-          create_host_path: false
+      # Agent workspaces and OpenCode's cache, at the same path as on the host.
+      - ${PWD:?run docker compose from the repository folder}/runs:${PWD:?run docker compose from the repository folder}/runs
+      # Credentials, read-only, at the same path as on the host.
+      - ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}:${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}:ro
     restart: unless-stopped
-    # Time for in-flight work to stop and OpenCode servers to shut down.
-    stop_grace_period: 30s
+    # Time for in-flight work to stop, and agent containers to be removed.
+    stop_grace_period: 60s
 
 volumes:
   runs:

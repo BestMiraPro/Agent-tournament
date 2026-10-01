@@ -31,6 +31,7 @@ import { processLedger, readHostCapacity, type CapacityLedger } from '../runtime
 import {
   containerName,
   inspectContainerState,
+  ownBridgeAddress,
   startShardContainer,
   type ProtectedRuntimeSpec,
 } from '../runtime/docker/container.js'
@@ -85,8 +86,11 @@ export interface ComposeSeams {
   ledger: CapacityLedger
   /** The daemon's account of a container's end, to tell an OOM kill from a model failure. */
   inspectContainer: (name: string) => Promise<{ oomKilled: boolean; running: boolean } | null>
-  /** The process's provider relay: its policy, and the loopback port shard gateways forward to. */
-  relay: () => Promise<{ policy: RelayPolicy; port: number }>
+  /**
+   * The process's provider relay: its policy, the port shard gateways forward to, and the address
+   * they forward to when it is not the host's loopback (the app runs in a container).
+   */
+  relay: () => Promise<{ policy: RelayPolicy; port: number; gatewayHost?: string }>
   /** Reads a host file the protected runtime needs (credentials, catalogue) as text. */
   readTextFile: (path: string) => Promise<string>
   createShardNetworkFn: (runId: string, shardIndex: number) => Promise<string>
@@ -132,6 +136,31 @@ export const defaultSeams: ComposeSeams = {
   readTextFile: (path) => readFile(path, 'utf8'),
   createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
   removeShardNetworkFn: (name, onWarning) => removeShardNetwork(name, onWarning),
+}
+
+/**
+ * The seams for an app running in a container on Docker's default bridge (`--docker-reach bridge`,
+ * which the dashboard image sets). The host's loopback is out of reach from there, so containers
+ * are reached at their bridge addresses, and the relay listens on this container's own bridge
+ * address, which is where gateways forward model calls. Everything else is `base`.
+ */
+export function bridgeSeams(
+  base: ComposeSeams,
+  deps: {
+    selfAddress: () => Promise<string>
+    startRelay: (host: string) => Promise<{ policy: RelayPolicy; port: number }>
+  } = { selfAddress: () => ownBridgeAddress(), startRelay: (host) => processRelay({ host }) },
+): ComposeSeams {
+  return {
+    ...base,
+    startShardContainerFn: (spec, run, healthProbe, onWarning) =>
+      base.startShardContainerFn({ ...spec, reach: 'bridge' }, run, healthProbe, onWarning),
+    relay: async () => {
+      const host = await deps.selfAddress()
+      const { policy, port } = await deps.startRelay(host)
+      return { policy, port, gatewayHost: host }
+    },
+  }
 }
 
 /**
@@ -436,10 +465,12 @@ export async function composeRun(
       // Granted before any container work, so every failure below revokes it.
       let relayToken: string | null = null
       let relayPort = 0
+      let relayHost: string | undefined
       if (relayPlan) {
         const relay = await s.relay()
         relayToken = randomBytes(24).toString('hex')
         relayPort = relay.port
+        relayHost = relay.gatewayHost
         relay.policy.grant(reservationId, {
           token: relayToken,
           allowedModels: config.roster.map((r) => r.modelId),
@@ -604,7 +635,12 @@ export async function composeRun(
           if (relayPlan) {
             const network = await s.createShardNetworkFn(runId, shardIndex)
             shardNetworks.add(network)
-            protectedRuntime = { network, configDir: await writeRelayConfig(runId, shardIndex), relayPort }
+            protectedRuntime = {
+              network,
+              configDir: await writeRelayConfig(runId, shardIndex),
+              relayPort,
+              ...(relayHost ? { relayHost } : {}),
+            }
           }
           const started = await s.startShardContainerFn(
             {

@@ -52,6 +52,7 @@ async function start(o: StartOptions): Promise<void> {
     serverUrl: o.serverUrl,
     uiDir: o.uiDir,
     dockerSandbox: o.dockerSandbox,
+    dockerReach: o.dockerReach,
   })
   if (dashboard.recovered > 0) {
     console.log(`recovered ${dashboard.recovered} interrupted round(s)`)
@@ -82,6 +83,7 @@ async function start(o: StartOptions): Promise<void> {
     `  credentials  ${o.authFile ?? 'none found (docker runs will be refused; run `opencode auth login`)'}`,
   )
   if (!o.dockerSandbox) console.log('  docker runs  off (--no-docker-sandbox)')
+  else if (o.dockerReach === 'bridge') console.log("  docker runs  from this container, over Docker's bridge network")
   console.log('')
   console.log('  Press Ctrl+C, or close this window, to stop.')
   console.log('')
