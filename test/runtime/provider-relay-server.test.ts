@@ -108,8 +108,10 @@ describe('provider relay server', () => {
     }))
     const { relay, records } = await start(upstream)
     const res = await post(relay.port, '/wandb/chat/completions', headers, body)
-    expect(res.body.length).toBeLessThanOrEqual(4096)
-    expect(res.body).not.toContain('z')
+    // What fit under the cap arrives; the reply then ends without its final chunk.
+    expect(res.status).toBe(200)
+    expect(res.body).toBe('x'.repeat(3000))
+    expect(res.aborted).toBe(true)
     await vi.waitFor(() => expect(records[0]).toMatchObject({ outcome: 'truncated', error: 'response exceeded 4096 bytes' }))
   })
 

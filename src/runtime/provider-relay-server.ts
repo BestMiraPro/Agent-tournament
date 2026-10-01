@@ -131,19 +131,25 @@ export async function startProviderRelay(opts: {
     }
     res.writeHead(reply.status, headers)
     let sent = 0
+    // Settles once the last chunk is handed to the socket. res.write can hold chunks in the
+    // response itself until a later tick (Node 26 does), so the socket may not have them yet.
+    let flushed = Promise.resolve()
     try {
       for await (const chunk of reply.body) {
         if (sent + chunk.length > maxResponseBytes) {
           controller.abort()
           // Flush what was already written, then close without the final chunk: the worker
           // sees an incomplete reply, never one that looks finished.
+          await flushed
           if (res.socket) res.socket.end()
           else res.destroy()
           report({ ...base, status: reply.status, outcome: 'truncated', responseBytes: sent, error: `response exceeded ${maxResponseBytes} bytes` })
           return
         }
         sent += chunk.length
-        if (!res.write(chunk)) await new Promise<void>((resolve) => res.once('drain', resolve))
+        let ok = true
+        flushed = new Promise<void>((resolve) => { ok = res.write(chunk, () => resolve()) })
+        if (!ok) await new Promise<void>((resolve) => res.once('drain', resolve))
       }
     } catch {
       res.destroy()
