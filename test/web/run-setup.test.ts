@@ -50,6 +50,18 @@ describe('run setup form', () => {
     expect(readFileSync('web/src/App.tsx', 'utf8')).toContain('contextDir: value.contextDir.trim() || null')
   })
 
+  test('offers a seed strategies folder, and App sends it, blank as null', () => {
+    expect(html).toContain('Seed strategies folder (optional)')
+    expect(html).toContain('id="setup-seed-strategies"')
+    expect(readFileSync('web/src/App.tsx', 'utf8')).toContain('seedStrategiesDir: value.seedStrategiesDir.trim() || null')
+  })
+
+  test('the export menu offers the markdown report', () => {
+    const src = readFileSync('web/src/App.tsx', 'utf8')
+    expect(src).toContain('<option value="md">Markdown report</option>')
+    expect(src).toContain("v === 'json' || v === 'csv' || v === 'md'")
+  })
+
   test('the credentials field cannot be mistaken for context', () => {
     const src = readFileSync('web/src/components/RunSetup.tsx', 'utf8')
     expect(src).toContain('Credentials file (auth.json)')

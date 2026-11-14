@@ -4,7 +4,7 @@ import { DEFAULT_CONFIG, type AgentRow, type FileEntry, type RunConfig } from '.
 import type { Repos, RoundRow, RunRow } from '../db/repos.js'
 import type { AgentUsage } from '../engine/budget.js'
 import { TournamentEngine } from '../engine/driver.js'
-import { defaultSeedStrategy } from '../engine/seed-strategy.js'
+import { defaultSeedStrategy, loadSeedStrategies, seedStrategyFrom } from '../engine/seed-strategy.js'
 import type { EventSink } from '../engine/events.js'
 import { Reflector } from '../evolution/reflect.js'
 import { Judge, type JudgeInput, type JudgeOutput } from '../judge/judge.js'
@@ -17,7 +17,7 @@ import { buildRunSnapshot } from './state.js'
 import { RunManager } from './run-manager.js'
 import { startServer, type ServerHandle } from '../runtime/opencode/server.js'
 import { discoverModels } from '../runtime/opencode/discovery.js'
-import { buildCsvRows, buildJsonDump } from './export.js'
+import { buildCsvRows, buildJsonDump, buildMarkdownReport } from './export.js'
 import { submissionView } from './submission-view.js'
 import { ActivityCache, type ActivitySnapshot } from './activity.js'
 import { AuditCollector, readRoundAudit } from '../engine/audit.js'
@@ -202,6 +202,8 @@ export function specForResume(run: RunRow, defaults?: SpecDefaults): RunSpec {
     workspaceRoot,
     authFile,
     contextDir: cfg.contextDir,
+    // Only read when a run is created; a resumed run already has its genomes.
+    seedStrategiesDir: null,
     serverUrl: defaults?.serverUrl ?? null,
     criteria: run.initialCriteria,
   }
@@ -434,6 +436,15 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       if (!compose) {
         return reply.code(400).send({ error: 'real modes unavailable' })
       }
+      // Read before anything is composed, so a wrong folder costs no setup.
+      let seedStrategies: string[] = []
+      if (spec.seedStrategiesDir) {
+        try {
+          seedStrategies = await loadSeedStrategies(spec.seedStrategiesDir)
+        } catch (e) {
+          return reply.code(400).send({ error: specErrorMessage(e) })
+        }
+      }
       // Mutable carrier for the live run id (mirrors cli.ts): compose runs
       // before the run row exists, containers start during the first round and
       // read it live, and the orphan sweep below runs with it — so a
@@ -470,7 +481,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           composed.config.reflect,
           composed.config.roster.map((r) => r.modelId),
         ),
-        seedStrategy: defaultSeedStrategy,
+        seedStrategy: seedStrategyFrom(seedStrategies),
         onEvent: emit,
         preparePopulation: composed.planFor ?? undefined,
         releasePopulation: composed.releasePopulation ?? undefined,
@@ -818,6 +829,11 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       reply.header('Content-Type', 'application/json')
       reply.header('Content-Disposition', `attachment; filename="run-${runId}.json"`)
       return reply.send(buildJsonDump(runId, deps.repos))
+    }
+    if (format === 'md') {
+      reply.header('Content-Type', 'text/markdown; charset=utf-8')
+      reply.header('Content-Disposition', `attachment; filename="run-${runId}.md"`)
+      return reply.send(buildMarkdownReport(runId, deps.repos))
     }
     return reply.code(400).send({ error: 'unknown format' })
   })

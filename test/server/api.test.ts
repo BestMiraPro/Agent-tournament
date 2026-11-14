@@ -37,6 +37,18 @@ const setup = () => {
 }
 
 describe('API', () => {
+  test('GET export?format=md returns the markdown report', async () => {
+    const { app } = setup()
+    const { runId } = JSON.parse(
+      (await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })).body,
+    ) as { runId: string }
+    const res = await app.inject({ method: 'GET', url: `/api/runs/${runId}/export?format=md` })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('text/markdown')
+    expect(res.headers['content-disposition']).toBe(`attachment; filename="run-${runId}.md"`)
+    expect(res.body).toContain('# Tournament report: demo')
+  })
+
   test('POST /api/runs creates a run and returns its id', async () => {
     const { app } = setup()
     const res = await app.inject({ method: 'POST', url: '/api/runs', payload: { name: 'demo', goal: 'g' } })

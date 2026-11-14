@@ -112,7 +112,9 @@ Retires (does not delete — lineage is preserved). Fails if it would empty the 
 
 ## Export
 
-### `GET /api/runs/:runId/export?format=json|csv` — export a run
+### `GET /api/runs/:runId/export?format=json|csv|md` — export a run
+
+- `md` → `text/markdown` — report: goal, leaderboard by round, the last scored round's winner with its strategy lineage, strategy, judge's rationale and submission.
 
 - `json` → `application/json` — full dump: `{ run, config, rounds: [{...round, entries: [...]}], agents, genomes }`.
 - `csv` → `text/csv` — flat table, one row per (round × agent): `round,agentLabel,modelId,score,rank,band,tokensIn,tokensOut,costUsd,submissionStatus`. `\r\n` line endings.

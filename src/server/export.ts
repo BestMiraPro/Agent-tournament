@@ -97,3 +97,66 @@ export function buildJsonDump(runId: string, repos: Repos): JsonDump | null {
   const genomes = agents.flatMap((a) => repos.genomes.forAgent(a.id))
   return { run, config: run.config, rounds, agents, genomes }
 }
+
+/**
+ * The run as a markdown report another reader, or another agent, can act on without the
+ * dashboard: what was asked, how each round went, who won, the strategy that won and
+ * where it came from, and the winning submission with the judge's reasons.
+ * The winner is rank 1 of the last scored round. Returns null for a missing run.
+ */
+export function buildMarkdownReport(runId: string, repos: Repos): string | null {
+  const run = repos.runs.get(runId)
+  if (!run) return null
+  const agents = repos.agents.listAll(runId)
+  const labelOf = new Map(agents.map((a) => [a.id, a.label]))
+  const genomeById = new Map(agents.flatMap((a) => repos.genomes.forAgent(a.id)).map((g) => [g.id, g]))
+  const rounds = repos.rounds.listForRun(runId)
+  const scored = rounds
+    .map((round) => ({ round, scores: repos.scores.forRound(round.id) }))
+    .filter((r) => r.scores.length > 0)
+  const subs = rounds.flatMap((round) => repos.submissions.forRound(round.id))
+  const sum = (pick: (s: (typeof subs)[number]) => number): number => subs.reduce((n, s) => n + pick(s), 0)
+
+  const out = [
+    `# Tournament report: ${run.name}`,
+    '',
+    `- Run: ${run.id}`,
+    `- Goal: ${rounds.at(-1)?.goalMd ?? run.initialGoal ?? ''}`,
+    `- Sandbox: ${run.config.sandbox}`,
+    `- Population: ${agents.length}, rounds scored: ${scored.length}`,
+    `- Judge: ${run.config.judge.modelId}, reflector: ${run.config.reflect.modelId}`,
+    `- Worker usage: ${sum((s) => s.tokensIn)} tokens in, ${sum((s) => s.tokensOut)} tokens out, $${sum((s) => s.costUsd).toFixed(4)}`,
+    '',
+  ]
+  const last = scored.at(-1)
+  if (!last) {
+    out.push('No round has been scored yet.', '')
+    return out.join('\n')
+  }
+
+  out.push('## Leaderboard by round', '', '| Round | Best | Mean | Leader | Model |', '|---|---|---|---|---|')
+  for (const { round, scores } of scored) {
+    const top = scores[0]!
+    const mean = scores.reduce((n, s) => n + s.score, 0) / scores.length
+    const model = repos.genomes.forRound(top.agentId, round.idx)?.modelId ?? ''
+    out.push(`| ${round.idx} | ${top.score} | ${mean.toFixed(2)} | ${labelOf.get(top.agentId) ?? ''} | ${model} |`)
+  }
+
+  const winner = last.scores[0]!
+  const genome = repos.genomes.forRound(winner.agentId, last.round.idx)
+  out.push('', `## Winner: ${labelOf.get(winner.agentId) ?? ''} (round ${last.round.idx}, score ${winner.score})`, '')
+  out.push('### Lineage', '')
+  for (let g = genome; g; g = g.parentGenomeId ? genomeById.get(g.parentGenomeId) ?? null : null) {
+    out.push(`- Round ${g.roundIdx}: ${g.origin}, ${labelOf.get(g.agentId) ?? ''}, ${g.modelId}`)
+  }
+  out.push('', '### Strategy', '', genome?.strategyMd ?? '_Not recorded_', '')
+  out.push("### Judge's rationale", '', winner.rationaleMd, '')
+  out.push(
+    '### Submission',
+    '',
+    repos.submissions.forAgent(last.round.id, winner.agentId)?.submissionMd ?? '_No submission_',
+    '',
+  )
+  if (last.round.criteriaMd) out.push(`## Criteria (round ${last.round.idx})`, '', last.round.criteriaMd, '')
+  return out.join('\n')
+}
