@@ -331,6 +331,7 @@ export class TournamentEngine {
           repos, sandbox: this.d.sandbox, runner: this.d.runner, judge, reflector, config, budget,
           audit: this.d.audit, channelLimits: this.d.channel, sealedArtifacts: this.d.sealedArtifacts,
           readableDirs: readableDirsFor(config), teamSeeds: this.teamSeeds,
+          connectorIds: agentConnectorIds(config), toolRules: toolRulesFor(config),
           emit: (e) => this.emit(e),
           aborted: () => this.aborted.has(runId),
           releaseWorkers,

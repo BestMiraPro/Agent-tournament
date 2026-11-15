@@ -140,6 +140,19 @@ describe('a collaboration round', () => {
     expect(parseChannel(t.repos.teamOutputs.get(r2.roundId)!.channelMd!)).toHaveLength(ch1.length + ch2.length)
   })
 
+  test('member profiles get the same connector and web rules as competitor profiles', async () => {
+    // A local run with web access and one connector; the mock sandbox stands in for the folder.
+    const t = makeTeam({ population: 2, config: { sandbox: 'local', webAccess: true, connectors: [{ id: 'github', writeTools: [] }] } })
+    const run = t.engine.createRun('team', 'g')
+    await t.engine.runRound(run.id, { goalMd: 'g', criteriaMd: null })
+    const [first] = t.repos.agents.listActive(run.id)
+    const team = await t.sandbox.provisionTeam(run.id, [first!.id], {})
+    const profile = (await t.sandbox.readFile(team.handles.get(first!.id)!, '.opencode/agents/member-agent-01.md'))!
+    expect(profile).toContain('  "arena_*": allow')
+    expect(profile).toContain('  "github_*": allow')
+    expect(profile).toContain('  websearch: deny')
+  })
+
   test('the seed is copied once, and seeded files do not count against the team quota', async () => {
     const t = makeTeam({ population: 2, config: { seedDir: '/seed', maxWorkspaceFiles: 5 } })
     const run = t.engine.createRun('team', 'g')

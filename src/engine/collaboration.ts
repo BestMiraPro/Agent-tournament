@@ -68,6 +68,10 @@ export interface CollaborationHost {
   sealedArtifacts?: SealedArtifactWriter
   /** Folders outside the workspace each member's profile may read. */
   readableDirs: string[]
+  /** Connectors whose `<id>_*` tools each member's profile allows: the run's own plus the built-in web tools. */
+  connectorIds: string[]
+  /** Whole-tool answers for the sandbox, as tournament profiles get them (OpenCode's own websearch denied locally). */
+  toolRules: Record<string, 'allow' | 'deny'>
   /** Seed sizes of each run's team workspace, taken when it was created. */
   teamSeeds: Map<string, Map<string, number>>
   emit: (event: EngineEvent) => void
@@ -119,7 +123,12 @@ export async function runCollaborationRound(
     await sandbox.writeFile(
       workspace,
       `.opencode/agents/${teamProfileName(p.agent.label)}.md`,
-      serializeCompetitorProfile(p.genome, { label: p.agent.label, readableDirs: host.readableDirs }),
+      serializeCompetitorProfile(p.genome, {
+        label: p.agent.label,
+        readableDirs: host.readableDirs,
+        connectorIds: host.connectorIds,
+        toolRules: host.toolRules,
+      }),
     )
   }
   // Earlier rounds' entries stay in the file for the team to read; they are not news.
