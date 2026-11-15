@@ -24,6 +24,7 @@ import { deadlineTimer, type AgentRunner, type AgentRunResult } from '../runtime
 import { CONTAINER_CONTEXT_PATH } from '../runtime/docker/cli.js'
 import { runPool } from '../runtime/pool.js'
 import { TOOLS_MOUNT } from '../runtime/tool-manifest.js'
+import { localToolRules } from '../connectors/web/opencode.js'
 import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
 
 export interface EngineDeps {
@@ -336,6 +337,7 @@ export class TournamentEngine {
           serializeCompetitorProfile(p.genome, {
             label: p.agent.label,
             readableDirs: readableDirsFor(config),
+            toolRules: toolRulesFor(config),
           }),
         )
         return h
@@ -923,6 +925,15 @@ export function readableDirsFor(config: Pick<RunConfig, 'sandbox' | 'contextDir'
     return [...(config.contextDir ? [CONTAINER_CONTEXT_PATH] : []), TOOLS_MOUNT]
   }
   return config.sandbox === 'local' && config.contextDir ? [config.contextDir] : []
+}
+
+/**
+ * Whole-tool permission answers for the run's sandbox: a local run's web tools when it has web
+ * access, and OpenCode's own `websearch` denied (the shared host server offers it for the grader).
+ * Docker profiles are unchanged.
+ */
+export function toolRulesFor(config: Pick<RunConfig, 'sandbox' | 'webAccess'>): Record<string, 'allow' | 'deny'> {
+  return config.sandbox === 'local' ? localToolRules(config.webAccess === true) : {}
 }
 
 /** Marker for the driver's own timeout, so a runner's rejection is not mistaken for one. */

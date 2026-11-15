@@ -39,10 +39,13 @@ export function serializeGenome(g: Genome, opts: { label: string }): string {
  * the Docker paths, OpenCode asked to read the mounted brief and TOOLS.md and the unattended
  * answer rejected it (September 15 relay acceptance run). Locally this is the most rules can
  * do: `bash` cannot be confined to paths, so a local agent could still change the folder.
+ *
+ * `toolRules` adds whole-tool answers for tools the runtime may offer, such as a local run's
+ * web tools; keys must not repeat a rule above.
  */
 export function serializeCompetitorProfile(
   g: Genome,
-  opts: { label: string; readableDirs?: readonly string[] },
+  opts: { label: string; readableDirs?: readonly string[]; toolRules?: Readonly<Record<string, 'allow' | 'deny'>> },
 ): string {
   const dirs = opts.readableDirs ?? []
   return [
@@ -54,6 +57,7 @@ export function serializeCompetitorProfile(
     ...permissionFor('edit', 'allow', 'deny', dirs),
     '  bash: allow',
     '  webfetch: deny',
+    ...Object.entries(opts.toolRules ?? {}).map(([tool, action]) => `  ${tool}: ${action}`),
     ...permissionFor('external_directory', 'deny', 'allow', dirs),
     '  doom_loop: deny',
     '  question: deny',

@@ -102,6 +102,11 @@ export interface RunConfig {
   seedDir: string | null
   /** Read-only reference folder for worker agents and the grader; null when the run has none. */
   contextDir: string | null
+  /**
+   * Whether workers get the host's web tools (`web_search`, `web_fetch`). Wired for local runs;
+   * absent means off — configs from before the toggle, and the CLI, ran without them.
+   */
+  webAccess?: boolean
   roster: RosterEntry[]
   judge: {
     modelId: string

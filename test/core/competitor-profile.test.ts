@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'vitest'
 import { serializeCompetitorProfile } from '../../src/core/genome.js'
+import { localToolRules } from '../../src/connectors/web/opencode.js'
+import { toolRulesFor } from '../../src/engine/driver.js'
 import type { Genome } from '../../src/core/types.js'
 
 interface Rule { permission: string; pattern: string; action: 'allow' | 'deny' | 'ask' }
@@ -99,6 +101,31 @@ describe('competitor profile', () => {
     expect(evaluate(rules, 'edit', '/run/arena/tools.json')).toBe('deny')
     expect(evaluate(rules, 'external_directory', '/run/arena-config/opencode.json')).toBe('deny')
     expect(evaluate(rules, 'external_directory', '/tmp/x')).toBe('deny')
+  })
+
+  test('a local run allows its web tools and denies OpenCode\'s own web tools', () => {
+    const local = serializeCompetitorProfile(genome, { label: 'c', toolRules: localToolRules(true) })
+    const defaults = contract.competitorAgent.rules.slice(0, -declaredRules(md).length)
+    const rules = [...defaults, ...declaredRules(local)]
+    expect(evaluate(rules, 'arena_web_search', '*')).toBe('allow')
+    expect(evaluate(rules, 'arena_web_fetch', '*')).toBe('allow')
+    expect(evaluate(rules, 'websearch', 'rust async')).toBe('deny')
+    expect(evaluate(rules, 'webfetch', 'https://example.com')).toBe('deny')
+    expect(evaluate(rules, 'bash', 'ls')).toBe('allow')
+
+    const offline = [...defaults, ...declaredRules(serializeCompetitorProfile(genome, { label: 'c', toolRules: localToolRules(false) }))]
+    expect(evaluate(offline, 'websearch', 'rust async')).toBe('deny')
+    expect(evaluate(offline, 'arena_web_search', '*')).toBeUndefined()
+    const keys = local.split('\n').filter((l) => /^ {2}[a-z_]+:/.test(l)).map((l) => l.trim().split(':')[0])
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  test('the driver gives tool rules to local runs only, by web access', () => {
+    expect(toolRulesFor({ sandbox: 'local', webAccess: true })).toEqual({ websearch: 'deny', arena_web_search: 'allow', arena_web_fetch: 'allow' })
+    expect(toolRulesFor({ sandbox: 'local', webAccess: false })).toEqual({ websearch: 'deny' })
+    expect(toolRulesFor({ sandbox: 'local' })).toEqual({ websearch: 'deny' })
+    expect(toolRulesFor({ sandbox: 'docker', webAccess: true })).toEqual({})
+    expect(toolRulesFor({ sandbox: 'mock', webAccess: true })).toEqual({})
   })
 
   test('the driver writes this profile, not the strategy-bearing genome file', () => {

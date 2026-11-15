@@ -58,6 +58,11 @@ import { CONTAINER_CONTEXT_PATH, removeContainer } from '../runtime/docker/cli.j
 import { sweepOrphanContainers, type SweepOptions } from '../runtime/docker/sweep.js'
 import { DockerSandbox } from '../runtime/docker/sandbox.js'
 import type { RunSpec } from './run-spec.js'
+import type { EventSink } from '../engine/events.js'
+import { webCallEvent } from '../connectors/web/evidence.js'
+import { processWebTools, type RunWebGrant } from '../connectors/web/http-server.js'
+import { DEFAULT_WEB_LIMITS } from '../connectors/web/limits.js'
+import { webOpencodeConfig, webToolsPrompt } from '../connectors/web/opencode.js'
 
 export interface ComposeSeams {
   startHostServer: (opts: { timeoutMs: number; env?: Record<string, string> }) => Promise<ServerHandle>
@@ -102,6 +107,8 @@ export interface ComposeSeams {
   readTextFile: (path: string) => Promise<string>
   createShardNetworkFn: (runId: string, shardIndex: number) => Promise<string>
   removeShardNetworkFn: (name: string, onWarning: (message: string) => void) => Promise<boolean>
+  /** The process's web tool endpoint for local workers: grants per run, and the URL agents use. */
+  webTools: () => Promise<{ host: { grant(): RunWebGrant }; url: string }>
 }
 
 export type PathKind = 'file' | 'directory' | 'missing'
@@ -144,6 +151,7 @@ export const defaultSeams: ComposeSeams = {
   readTextFile: (path) => readFile(path, 'utf8'),
   createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
   removeShardNetworkFn: (name, onWarning) => removeShardNetwork(name, onWarning),
+  webTools: () => processWebTools(),
 }
 
 /**
@@ -285,6 +293,12 @@ export interface ComposedRun {
    * attempt. Absent for mock and local runs, which hold no such state.
    */
   releasePopulation?: (() => Promise<void>) | null
+  /**
+   * Local runs with web access: starts serving the run's web tools, with each call's record sent to
+   * `sink` as an `agent.web` event (the audit and the live view). Called once the run id exists;
+   * calls before it are refused. Absent when the run has no web tools.
+   */
+  attachWebEvidence?: (runId: string, sink: EventSink) => void
   cleanup: () => Promise<void>
 }
 
@@ -316,6 +330,7 @@ export function runConfigFor(spec: RunSpec): RunConfig {
     pricing: { ...DEFAULT_CONFIG.pricing, ...spec.pricing },
     seedDir: spec.seedDir,
     contextDir: spec.contextDir ?? null,
+    webAccess: spec.webAccess === true,
   }
 }
 
@@ -851,19 +866,32 @@ export async function composeRun(
       }
     }
 
+    // Local workers reach the web only through the host's audited tools: a grant on the process's
+    // loopback endpoint, and a per-agent token in each workspace's OpenCode config.
+    const web = spec.webAccess ? await s.webTools() : null
+    const grant = web ? web.host.grant() : null
     const sandbox = new LocalSandbox(workspaceRoot)
     return {
       config, sandbox, provider,
       runner: new OpenCodeAgentRunner(server.client, sandbox, {
         onSessionCreated: sessionHook,
         contextPath: spec.contextDir,
+        ...(web && grant
+          ? {
+              opencodeConfig: (agentId: string) => webOpencodeConfig(web.url, grant.tokenFor(agentId)),
+              webToolsNote: webToolsPrompt(DEFAULT_WEB_LIMITS),
+            }
+          : {}),
       }),
       planFor: null,
       serverHandle: server,
       shardServers: [{ baseUrl: '' }],
       sessionMap, sessionHook, warnings,
       capacity: null,
+      ...(grant ? { attachWebEvidence: (runId: string, sink: EventSink) => grant.attach(runId, (record) => sink(webCallEvent(record))) } : {}),
       cleanup: async () => {
+        // First: from here on this run's agents can make no further web calls.
+        grant?.revoke()
         await server.stop().catch(() => {})
       },
     }

@@ -39,6 +39,13 @@ export interface AgentRunnerOptions {
   /** The container path of TOOLS.md when the runtime provides a tool manifest; null otherwise. */
   toolsPath?: string | null
   /**
+   * The agent's own `.opencode/opencode.json`, written into its workspace before its session is
+   * created (OpenCode reads it when the directory's instance starts): a local run's web tools.
+   */
+  opencodeConfig?: (agentId: string) => string
+  /** What the prompt says about the run's web tools; null or absent when it has none. */
+  webToolsNote?: string | null
+  /**
    * The runtime's own evidence that an agent failed because of a resource limit — an OOM kill
    * recorded by the daemon — or null when there is none. Consulted only for runs that ended
    * without a response, and bounded, so a slow daemon cannot hold a failed run open.
@@ -72,6 +79,7 @@ export function buildAgentPrompt(
   goalMd: string,
   contextPath: string | null = null,
   toolsPath: string | null = null,
+  webTools: string | null = null,
 ): string {
   return [
     'GOAL:',
@@ -83,6 +91,7 @@ export function buildAgentPrompt(
     ...(toolsPath
       ? [`The tools already installed here are listed in ${toolsPath}. Read it before you install or set anything up.`, '']
       : []),
+    ...(webTools ? [webTools, ''] : []),
     `When you are finished, write your final answer to ${SUBMISSION_FILE} in your working directory.`,
     'Anything else you create is supporting evidence. Only ' + SUBMISSION_FILE + ' is judged.',
   ].join('\n')
@@ -328,6 +337,9 @@ export class OpenCodeAgentRunner implements AgentRunner {
     this.live.set(ctx.agentId, tracked)
 
     try {
+      if (this.options.opencodeConfig) {
+        await this.sandbox.writeFile(handle, '.opencode/opencode.json', this.options.opencodeConfig(ctx.agentId))
+      }
       const session = await client.createSession(handle.workspacePath, `agent-${ctx.agentId}`)
       tracked.sessionId = session.id
       try {
@@ -343,7 +355,10 @@ export class OpenCodeAgentRunner implements AgentRunner {
         // profile's temperature and unattended permission policy never apply.
         agent: COMPETITOR_AGENT,
         system: ctx.genome.strategyMd,
-        parts: [{ type: 'text' as const, text: buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null, this.options.toolsPath ?? null) }],
+        parts: [{
+          type: 'text' as const,
+          text: buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null, this.options.toolsPath ?? null, this.options.webToolsNote ?? null),
+        }],
       }
 
       let timer: ReturnType<typeof setTimeout> | undefined

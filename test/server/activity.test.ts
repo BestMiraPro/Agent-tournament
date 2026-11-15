@@ -28,6 +28,20 @@ describe('ActivityCache', () => {
     expect(cache.snapshot().agents.a!.lastObservedAt).toBe(2_000)
   })
 
+  test('a host web tool call shows on the agent\'s card as a settled tool item', () => {
+    const cache = new ActivityCache({ currentSession: () => 'ses_a' })
+    cache.record(preparing(2))
+    const out = cache.record({
+      type: 'agent.web', runId: 'r', agentId: 'a', callId: 'W4', tool: 'web_search', outcome: 'failed', at: 5_000,
+      summary: 'web_search "x" failed: LangSearch rate_limited, exa_timeout', detail: 'outcome=failed',
+    })
+    expect(out).toMatchObject({
+      type: 'agent.activity', runId: 'r', agentId: 'a', kind: 'tool', detail: 'web_search "x" failed: LangSearch rate_limited, exa_timeout',
+      item: { id: 'web:W4', kind: 'tool', status: 'error', sessionId: '', output: 'outcome=failed', observedAt: 5_000, roundIdx: 2 },
+    })
+    expect(cache.snapshot().agents.a!.items.map((i) => i.id)).toEqual(['web:W4'])
+  })
+
   test('text deltas append once and a full part update reconciles without duplicating', () => {
     const cache = new ActivityCache()
     cache.record(activity('a', { id: 'prt_text', kind: 'text', summary: 'Planning the backtest' }))
