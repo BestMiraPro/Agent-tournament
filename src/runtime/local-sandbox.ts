@@ -1,7 +1,7 @@
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import type { FileEntry } from '../core/types.js'
-import type { AgentHandle, ProvisionOpts, Sandbox } from './sandbox.js'
+import { assertTeamId, type AgentHandle, type ProvisionOpts, type Sandbox, type TeamWorkspace } from './sandbox.js'
 import { resolveInWorkspace, seedWorkspace } from './workspace-path.js'
 
 /**
@@ -34,6 +34,21 @@ export class LocalSandbox implements Sandbox {
     await seedWorkspace(dir, opts.seedDir, this.root)
     this.live.add(agentId)
     return { agentId, workspacePath: dir, baseUrl: '' }
+  }
+
+  /** `<root>/team-<teamId>`, shared by every member; seeded only when it is created. */
+  async provisionTeam(teamId: string, agentIds: readonly string[], opts: ProvisionOpts): Promise<TeamWorkspace> {
+    assertTeamId(teamId)
+    const dir = join(this.root, `team-${teamId}`)
+    const created = !(await pathExists(dir))
+    if (created) await seedWorkspace(dir, opts.seedDir, this.root)
+    else await resolveInWorkspace(dir, '', this.root)
+    const handles = new Map<string, AgentHandle>()
+    for (const agentId of agentIds) {
+      this.live.add(agentId)
+      handles.set(agentId, { agentId, workspacePath: dir, baseUrl: '' })
+    }
+    return { handles, created }
   }
 
   async reset(handle: AgentHandle, opts: ProvisionOpts): Promise<void> {
@@ -103,5 +118,15 @@ export class LocalSandbox implements Sandbox {
 
   async teardown(handle: AgentHandle): Promise<void> {
     this.live.delete(handle.agentId)
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path)
+    return true
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw e
   }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { CapacityLedger, parseMemoryLimit, planCapacity, readHostCapacity } from '../../../src/runtime/docker/capacity.js'
+import { CapacityLedger, parseMemoryLimit, planCapacity, readHostCapacity, teamContainerLimits } from '../../../src/runtime/docker/capacity.js'
 import type { DockerFn, ExecResult } from '../../../src/runtime/docker/cli.js'
 
 describe('CapacityLedger', () => {
@@ -233,5 +233,18 @@ describe('planCapacity refusal wording', () => {
     const r = planCapacity({ containers: 4, memory: '256m', cpus: 8 }, roomy)
     expect(r.ok).toBe(false)
     expect(r.reason).toMatch(/CPUs per container/)
+  })
+})
+
+describe('teamContainerLimits', () => {
+  test('one agent\'s ceilings per member: memory, CPUs, processes and open files', () => {
+    expect(teamContainerLimits({ memory: '1g', cpus: 1 }, 4)).toEqual({
+      memory: '4g', memoryBytes: 4 * 1024 ** 3, cpus: 4, pidsLimit: 1024, maxOpenFiles: 8192,
+    })
+    expect(teamContainerLimits({ memory: '768m', cpus: 0.5 }, 3)).toMatchObject({ memory: '2304m', cpus: 1.5, pidsLimit: 768 })
+  })
+
+  test('a team of one is sized like one worker', () => {
+    expect(teamContainerLimits({ memory: '1g', cpus: 1 }, 0)).toMatchObject({ memory: '1g', cpus: 1, pidsLimit: 256, maxOpenFiles: 2048 })
   })
 })

@@ -14,8 +14,10 @@ import { MockAgentRunner, type AgentRunner } from './runtime/agent-runner.js'
 import { GOOD_KEYWORDS, MockProvider } from './runtime/mock-provider.js'
 import { MockSandbox } from './runtime/mock-sandbox.js'
 import {
+  memoryLabel,
   planCapacity,
   readHostCapacity,
+  teamContainerLimits,
   type CapacityLedger,
   type HostCapacity,
 } from './runtime/docker/capacity.js'
@@ -350,32 +352,56 @@ export async function assertHostCapacity(
     return
   }
 
+  // A collaboration team is ONE container sized for every member (teamContainerLimits).
+  const team = config.workflow === 'collaboration'
+  const members = Math.max(1, config.populationSize)
+  const perAgent = { memory: config.containerMemory, cpus: config.containerCpus }
+  const perContainer = team
+    ? teamContainerLimits(perAgent, members)
+    : { memory: config.containerMemory, memoryBytes: parseMemoryLimit(config.containerMemory), cpus: config.containerCpus }
   // Check the containers this run will ACTUALLY start, not the configured ceiling.
   // `planShards` clamps shard count to the population, so a 2-agent run never starts
   // more than 2 containers however high `maxContainers` is. Validating the ceiling
   // instead refuses runs that would have fit comfortably.
-  const containers = Math.max(1, Math.min(config.maxContainers, config.populationSize))
+  const containers = team ? 1 : Math.max(1, Math.min(config.maxContainers, config.populationSize))
+  const extraMemory = opts.extraMemoryBytes ?? 0
+  const extraCpus = opts.extraCpus ?? 0
 
   const verdict = opts.ledger && opts.reservationId
     ? opts.ledger.admit(
         opts.reservationId,
         {
           containers,
-          memoryBytes: parseMemoryLimit(config.containerMemory) + (opts.extraMemoryBytes ?? 0),
-          cpus: config.containerCpus + (opts.extraCpus ?? 0),
+          memoryBytes: perContainer.memoryBytes + extraMemory,
+          cpus: perContainer.cpus + extraCpus,
         },
         host,
       )
     : planCapacity(
         {
           containers,
-          memory: config.containerMemory,
-          cpus: config.containerCpus,
+          memory: memoryLabel(perContainer.memoryBytes + extraMemory),
+          cpus: perContainer.cpus + extraCpus,
         },
         host,
       )
   if (!verdict.ok) {
-    throw new Error(`docker sandbox: ${verdict.reason}`)
+    if (!team) throw new Error(`docker sandbox: ${verdict.reason}`)
+    // Fewer containers is no remedy for a team; fewer members is.
+    const reserved = opts.ledger && opts.reservationId ? opts.ledger.reservedFor(opts.reservationId, host) : undefined
+    let fit = 0
+    for (let n = members - 1; n >= 1 && fit === 0; n--) {
+      const smaller = teamContainerLimits(perAgent, n)
+      const plan = { containers: 1, memory: memoryLabel(smaller.memoryBytes + extraMemory), cpus: smaller.cpus + extraCpus }
+      if (planCapacity(plan, host, reserved).ok) fit = n
+    }
+    throw new Error(
+      `docker sandbox: Collaboration runs all ${members} agents in one container sized ${members} x ${config.containerMemory} = ${perContainer.memory}` +
+        `${extraMemory > 0 ? ' plus its gateway' : ''}. ${verdict.reason} ` +
+        (fit > 0
+          ? `A team of at most ${fit} agents fits: remove agents, or lower the memory per agent.`
+          : 'Not even a team of one fits: lower the memory per agent, or free Docker memory.'),
+    )
   }
 }
 
@@ -488,8 +514,9 @@ async function buildRealDeps(
       maxContainers: config.maxContainers,
       containerMemory: config.containerMemory,
       containerCpus: config.containerCpus,
-      // The CLI keeps the placement it always had unless its config says otherwise.
-      isolation: config.isolation ?? 'shared',
+      // The CLI keeps the placement it always had unless its config says otherwise; a
+      // collaboration team's one container is always protected.
+      isolation: config.workflow === 'collaboration' ? 'protected' : config.isolation ?? 'shared',
       pricing: { ...config.pricing },
       budget: {
         maxRunTokens: config.budget.maxRunTokens,

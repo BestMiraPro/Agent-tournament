@@ -241,6 +241,34 @@ describe('composeRun', () => {
       }
     })
 
+    test('a collaboration team gets ONE protected container sized for every member, and its workspace is /work', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-team-'))
+      const ledger = new CapacityLedger()
+      const startShardContainerFn = started()
+      const seams = {
+        ...mockSeams(), ledger, readCapacity: vi.fn(async () => host),
+        startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+        startShardContainerFn,
+        removeContainerFn: vi.fn(async (_name: string) => {}),
+      }
+      try {
+        const teamSpec = spec(root, { workflow: 'collaboration', roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 3, temperature: 0.7 }], maxContainers: 1 })
+        const c = await composeRun(teamSpec, seams as never, { runIdHolder: { value: 'run-t' } })
+        expect(c.capacity).toEqual({ committed: 1, maxContainers: 1 })
+        await c.planFor!(['a1', 'a2', 'a3'])
+        expect(ledger.active()).toEqual([expect.objectContaining({ containers: 1, memoryBytes: 3 * GiB + 64 * 1024 ** 2, cpus: 3.25 })])
+        const team = await c.sandbox.provisionTeam!('run-t', ['a1', 'a2', 'a3'], {})
+        expect([...team.handles.values()].map((h) => h.workspacePath)).toEqual(['/work', '/work', '/work'])
+        expect(startShardContainerFn).toHaveBeenCalledTimes(1)
+        const [s] = startShardContainerFn.mock.calls[0] as unknown as [{ hostDir: string; memory: string; cpus: number; pidsLimit: number; maxOpenFiles: number; authFile: string | null; protectedRuntime?: unknown }]
+        expect(s).toMatchObject({ hostDir: join(root, 'team-run-t'), memory: '3g', cpus: 3, pidsLimit: 768, maxOpenFiles: 6144, authFile: null })
+        expect(s.protectedRuntime).toBeDefined()
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
     test('without a host model catalogue a protected run is refused rather than started unpinned', async () => {
       const root = mkdtempSync(join(tmpdir(), 'compose-protected-'))
       const seams = { ...mockSeams(), hostModelsFile: vi.fn(() => null) }

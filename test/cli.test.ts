@@ -159,6 +159,27 @@ describe('CLI host-capacity preflight', () => {
     expect(ledger.active()).toEqual([{ id: 'r1', containers: 2, memoryBytes: 1024 ** 3, cpus: 1 }])
   })
 
+  describe('a collaboration team in one container', () => {
+    const GiB = 1024 ** 3
+    // The reference host: ~5.2 GiB of free Docker memory, 80% of it committable (~4.16 GiB).
+    const reference: HostCapacity = { totalMemoryBytes: 5.2 * GiB, usedMemoryBytes: 0, cpus: 16 }
+    const team = (n: number) => ({ ...dockerConfig(), workflow: 'collaboration' as const, isolation: 'protected' as const, populationSize: n, maxContainers: 1 })
+    const gateway = { extraMemoryBytes: 64 * 1024 ** 2, extraCpus: 0.25 }
+
+    test('is admitted as one container charged one agent ceiling per member plus its gateway', async () => {
+      const { CapacityLedger } = await import('../src/runtime/docker/capacity.js')
+      const ledger = new CapacityLedger()
+      await assertHostCapacity(team(DEFAULT_TEAM_SIZE), async () => reference, () => {}, { ledger, reservationId: 't', ...gateway })
+      expect(ledger.active()).toEqual([{ id: 't', containers: 1, memoryBytes: 4 * GiB + 64 * 1024 ** 2, cpus: 4.25 }])
+    })
+
+    test('a team that does not fit is refused with its size, its ceiling and the largest team that fits', async () => {
+      await expect(assertHostCapacity(team(5), async () => reference, () => {}, gateway)).rejects.toThrow(
+        /docker sandbox: Collaboration runs all 5 agents in one container sized 5 x 1g = 5g.*Requested 1 containers.*A team of at most 4 agents fits/s,
+      )
+    })
+  })
+
   test('the CLI refuses to start a docker run that would overcommit the host', async () => {
     const hooks: DockerStartupHooks = {
       readCapacity: async () => cramped,

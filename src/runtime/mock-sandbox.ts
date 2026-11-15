@@ -1,8 +1,10 @@
 import type { FileEntry } from '../core/types.js'
-import type { AgentHandle, ProvisionOpts, Sandbox } from './sandbox.js'
+import { assertTeamId, type AgentHandle, type ProvisionOpts, type Sandbox, type TeamWorkspace } from './sandbox.js'
 
 export class MockSandbox implements Sandbox {
   private spaces = new Map<string, Map<string, string>>()
+  /** Collaboration workspaces by team id; they outlive any one round's handles. */
+  private teams = new Map<string, Map<string, string>>()
   private seedFiles: Record<string, string>
 
   constructor(opts: { seedFiles?: Record<string, string> } = {}) {
@@ -16,11 +18,31 @@ export class MockSandbox implements Sandbox {
   }
 
   private seed(agentId: string, opts: ProvisionOpts): void {
+    this.spaces.set(agentId, this.seeded(opts))
+  }
+
+  private seeded(opts: ProvisionOpts): Map<string, string> {
     const files = new Map<string, string>()
     if (opts.seedDir) {
       for (const [p, c] of Object.entries(this.seedFiles)) files.set(p, c)
     }
-    this.spaces.set(agentId, files)
+    return files
+  }
+
+  async provisionTeam(teamId: string, agentIds: readonly string[], opts: ProvisionOpts): Promise<TeamWorkspace> {
+    assertTeamId(teamId)
+    let space = this.teams.get(teamId)
+    const created = space === undefined
+    if (!space) {
+      space = this.seeded(opts)
+      this.teams.set(teamId, space)
+    }
+    const handles = new Map<string, AgentHandle>()
+    for (const agentId of agentIds) {
+      this.spaces.set(agentId, space)
+      handles.set(agentId, { agentId, workspacePath: `/mock/team-${teamId}`, baseUrl: `mock://team-${teamId}` })
+    }
+    return { handles, created }
   }
 
   async provision(agentId: string, opts: ProvisionOpts): Promise<AgentHandle> {
