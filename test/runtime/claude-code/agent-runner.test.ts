@@ -70,6 +70,8 @@ function setup(opts: {
   credentials?: () => Promise<ClaudeCredentials>
   gate?: SubscriptionLimitGate
   runtimeState?: () => Promise<'running' | 'stopped' | 'unknown'>
+  mcpServers?: () => { id: string; url: string; headers: Record<string, string> }[]
+  webToolsNote?: string
 } = {}) {
   const sandbox = new MockSandbox()
   const requests: LaunchRequest[] = []
@@ -96,6 +98,8 @@ function setup(opts: {
     limitGate: opts.gate ?? new SubscriptionLimitGate(),
     newSessionId: () => '11111111-2222-4333-8444-555555555555',
     ...(opts.runtimeState ? { runtimeState: opts.runtimeState } : {}),
+    ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
+    ...(opts.webToolsNote ? { webToolsNote: opts.webToolsNote } : {}),
   })
   return { sandbox, runner, requests, procs, sessions, activity }
 }
@@ -161,6 +165,27 @@ describe('ClaudeCodeAgentRunner', () => {
     p.stdout.write(fixture('genuine-haiku-ok.jsonl'))
     await running
     expect(await runner.send(handle, 'late')).toBe(false)
+  })
+
+  test('a collaboration member gets the team prompt, shares the folder with teammates, and loads the bridge servers', async () => {
+    const { sandbox, runner, procs, requests } = setup({
+      proc: () => new FakeProc({}),
+      mcpServers: () => [{ id: 'arena', url: 'http://gateway:8788/mcp/arena', headers: { Authorization: 'Bearer team-token' } }],
+      webToolsNote: 'Web access: arena tools.',
+    })
+    const h1 = await handleFor(sandbox, 'a1')
+    const h2 = { ...h1, agentId: 'a2' }
+    const team = (label: string, mate: string) => ({ label, teammates: [mate], postCommand: 'node post.mjs' })
+    const r1 = runner.run(h1, { ...ctx('a1'), team: team('agent-01', 'agent-02') })
+    const r2 = runner.run(h2, { ...ctx('a2'), team: team('agent-02', 'agent-01') })
+    await new Promise((r) => setTimeout(r, 40))
+    expect(procs).toHaveLength(2)
+    const first = (procs[0]!.written[0] as { message: { content: { text: string }[] } }).message.content[0]!.text
+    expect(first).toContain('You are agent-01, one of a team of 2 agents')
+    expect(first).toContain('Web access: arena tools.')
+    expect(requests[0]!.args).toContain('--allowedTools=mcp__arena')
+    for (const p of procs) p.stdout.write(fixture('genuine-haiku-ok.jsonl'))
+    await Promise.all([r1, r2])
   })
 
   test('a timeout kills the process group and reports what was observed', async () => {

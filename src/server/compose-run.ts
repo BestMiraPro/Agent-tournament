@@ -727,6 +727,10 @@ export async function composeRun(
     const connectorConfig = (base: string) => connectorPlan
       ? (handle: { agentId: string }) => opencodeMcpConfig(connectorPlan!.grant.endpointsFor(team ? TEAM_AGENT_ID : handle.agentId, base))
       : undefined
+    /** The same servers for a Claude Code agent's `--mcp-config`, as `base` reaches the bridge. */
+    const claudeMcp = (base: string) => connectorPlan
+      ? { mcpServers: (handle: { agentId: string }) => connectorPlan!.grant.endpointsFor(team ? TEAM_AGENT_ID : handle.agentId, base) }
+      : {}
     const webToolsNote = withWeb ? webToolsPrompt(team ? { ...DEFAULT_WEB_LIMITS, searchesPerAgent: DEFAULT_WEB_LIMITS.searchesPerRun, fetchesPerAgent: DEFAULT_WEB_LIMITS.fetchesPerRun } : DEFAULT_WEB_LIMITS) : null
 
     if (spec.sandbox === 'docker') {
@@ -1018,6 +1022,11 @@ export async function composeRun(
         readableDirs: [...(spec.contextDir ? [CONTAINER_CONTEXT_PATH] : []), TOOLS_MOUNT],
         contextPath: spec.contextDir ? CONTAINER_CONTEXT_PATH : null,
         toolsPath: `${TOOLS_MOUNT}/TOOLS.md`,
+        ...(webToolsNote ? { webToolsNote } : {}),
+        // The bridge sits behind the gateway (NO_PROXY covers it), or at the host alias for shared workers.
+        ...(toolBridge ? claudeMcp(relayPlan
+          ? `http://${GATEWAY_ALIAS}:${GATEWAY_TOOLS_PORT}`
+          : `http://${toolBridge.gatewayHost ?? HOST_RELAY_ADDRESS}:${toolBridge.port}`) : {}),
         onSessionCreated: sessionHook,
         onActivity: activityHook,
         limitGate: s.subscriptions.claudeLimitGate,
@@ -1156,6 +1165,8 @@ export async function composeRun(
       configDirFor: (handle, credentials) => claudeConfigDir(credentials, handle.agentId),
       readableDirs: spec.contextDir ? [spec.contextDir] : [],
       contextPath: spec.contextDir,
+      ...(webToolsNote ? { webToolsNote } : {}),
+      ...(toolBridge ? claudeMcp(`http://${toolBridge.host}:${toolBridge.port}`) : {}),
       onSessionCreated: sessionHook,
       onActivity: activityHook,
       limitGate: s.subscriptions.claudeLimitGate,

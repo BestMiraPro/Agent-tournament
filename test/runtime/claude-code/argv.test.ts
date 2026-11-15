@@ -65,8 +65,11 @@ describe('competitor argv', () => {
     expect(() => competitorArgs({ ...base, sessionId: '--resume' })).toThrow(/invalid session id/)
   })
 
-  test('leaves a connectors seam that is off by default', () => {
-    expect(competitorArgs({ ...base, mcpConfig: '/run/arena-config/mcp.json' })).toContain('--mcp-config=/run/arena-config/mcp.json')
+  test('loads the bridge servers inline and allows their tools, refusing an id that could become a flag', () => {
+    const withMcp = competitorArgs({ ...base, mcpServers: [{ id: 'arena', url: 'http://gateway:8788/mcp/arena', headers: { Authorization: 'Bearer t' } }] })
+    expect(withMcp).toContain('--mcp-config={"mcpServers":{"arena":{"type":"http","url":"http://gateway:8788/mcp/arena","headers":{"Authorization":"Bearer t"}}}}')
+    expect(withMcp).toContain('--allowedTools=mcp__arena')
+    expect(() => competitorArgs({ ...base, mcpServers: [{ id: '--evil', url: 'http://x', headers: {} }] })).toThrow(/invalid MCP server id/)
   })
 
   test('refuses a read-only folder a permission rule cannot hold', () => {

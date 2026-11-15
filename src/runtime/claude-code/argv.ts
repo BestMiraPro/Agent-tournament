@@ -63,8 +63,18 @@ export interface CompetitorArgsInput {
   /** Folders the agent may read but not change: the context folder, the tool inventory. */
   readableDirs: readonly string[]
   sessionId: string
-  /** Connectors seam: an MCP config (file or JSON) to load; none by default. */
-  mcpConfig?: string | null
+  /** MCP servers at the host tool bridge (connectors, web tools), each with the agent's own token; none by default. */
+  mcpServers?: readonly { id: string; url: string; headers: Record<string, string> }[]
+}
+
+const MCP_SERVER_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/
+
+/** Claude Code's `--mcp-config` JSON for the bridge's servers, and the rule that lets each server's tools run unattended. */
+function mcpArgs(servers: CompetitorArgsInput['mcpServers']): string[] {
+  if (!servers || servers.length === 0) return []
+  for (const s of servers) if (!MCP_SERVER_ID.test(s.id)) throw new Error(`invalid MCP server id ${JSON.stringify(s.id)}`)
+  const config = { mcpServers: Object.fromEntries(servers.map((s) => [s.id, { type: 'http', url: s.url, headers: s.headers }])) }
+  return [`--mcp-config=${JSON.stringify(config)}`, ...servers.map((s) => `--allowedTools=mcp__${s.id}`)]
 }
 
 /**
@@ -91,7 +101,7 @@ export function competitorArgs(input: CompetitorArgsInput): string[] {
     ...ENV_FILE_DENIALS.map((rule) => `--disallowedTools=${rule}`),
     ...readableFolderArgs(input.readableDirs),
     '--strict-mcp-config',
-    ...(input.mcpConfig ? [`--mcp-config=${input.mcpConfig}`] : []),
+    ...mcpArgs(input.mcpServers),
     ...ISOLATION_FLAGS,
     `--session-id=${input.sessionId}`,
   ]

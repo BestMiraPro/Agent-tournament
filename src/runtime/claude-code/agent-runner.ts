@@ -4,6 +4,7 @@ import { describeFailure, errorTextFor, failureFromText, type AgentFailure } fro
 import type { QuiesceStatus } from '../../engine/capture.js'
 import type { ActivityItemInput, ActivityKind } from '../../engine/events.js'
 import { deadlineTimer, type AgentRunContext, type AgentRunner, type AgentRunResult } from '../agent-runner.js'
+import { buildTeamPrompt, buildTeamSteeringPrompt } from '../team-prompt.js'
 import { buildAgentPrompt, buildSteeringPrompt, QUIESCE_GRACE_MS, STOP_POLL_MS, STOP_WATCH_MS, SUBMISSION_FILE } from '../opencode/agent-runner.js'
 import type { AgentHandle, Sandbox } from '../sandbox.js'
 import { competitorArgs } from './argv.js'
@@ -35,6 +36,10 @@ export interface ClaudeCodeRunnerOptions {
   /** As `AgentRunnerOptions.contextPath` / `toolsPath`: named in the GOAL prompt. */
   contextPath?: string | null
   toolsPath?: string | null
+  /** What the prompt says about the run's web tools; null or absent when it has none. */
+  webToolsNote?: string | null
+  /** The bridge's MCP servers for this agent (connectors, web tools), as the CLI reaches them; none when absent. */
+  mcpServers?: (handle: AgentHandle) => readonly { id: string; url: string; headers: Record<string, string> }[]
   /** The CLI's session id, the instant it is known, so live activity keys like OpenCode's. */
   onSessionCreated?: (agentId: string, sessionId: string) => void
   onActivity?: (agentId: string, activity: ClaudeActivity) => void
@@ -55,6 +60,8 @@ interface LiveAttempt {
   agentId: string
   handle: AgentHandle
   directory: string
+  /** A collaboration member: teammates share this folder by design. */
+  shared: boolean
   proc: ClaudeProcess | null
   /** Stdin is open: the CLI still takes messages. */
   accepting: boolean
@@ -135,7 +142,7 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
 
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
     if (ctx.agentId !== handle.agentId) throw new Error('agent context does not match handle')
-    this.assertAvailable(handle.agentId, handle.workspacePath)
+    this.assertAvailable(handle.agentId, handle.workspacePath, ctx.team !== undefined)
     const started = Date.now()
     // Nothing was dispatched in these early returns, so their zero usage is observed, not assumed.
     const refuse = (failure: AgentFailure): AgentRunResult => ({
@@ -154,6 +161,7 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
       agentId: handle.agentId,
       handle: { ...handle },
       directory: handle.workspacePath,
+      shared: ctx.team !== undefined,
       proc: null,
       accepting: false,
       stopRequested: false,
@@ -187,7 +195,10 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
       }
 
       const sessionId = (this.options.newSessionId ?? randomUUID)()
-      const args = competitorArgs({ model, strategy: ctx.genome.strategyMd, readableDirs: this.options.readableDirs ?? [], sessionId })
+      const args = competitorArgs({
+        model, strategy: ctx.genome.strategyMd, readableDirs: this.options.readableDirs ?? [], sessionId,
+        mcpServers: this.options.mcpServers?.(handle) ?? [],
+      })
       const { settings, secrets } = claudeEnvVars({
         credentials, tokenTransport: this.options.tokenTransport, configDir,
         ...(this.options.proxy ? { proxy: this.options.proxy } : {}),
@@ -226,11 +237,17 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
       proc.stdout.once('end', () => reader.end())
 
       if (tracked.stopRequested) this.requestKill(tracked)
-      else void this.write(tracked, buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null, this.options.toolsPath ?? null)).catch(() => {})
+      else {
+        const { contextPath = null, toolsPath = null, webToolsNote = null } = this.options
+        const prompt = ctx.team
+          ? buildTeamPrompt(ctx.goalMd, ctx.team, contextPath, toolsPath, webToolsNote)
+          : buildAgentPrompt(ctx.goalMd, contextPath, toolsPath, webToolsNote)
+        void this.write(tracked, prompt).catch(() => {})
+      }
       // Sent once, as on the OpenCode path; a failed send is not retried.
       steerTimer = deadlineTimer(ctx.steerAfterMs ?? Infinity, () => {
         if (!tracked.accepting || tracked.stopRequested) return
-        void this.write(tracked, buildSteeringPrompt(ctx.steerAfterMs!)).catch(() => {})
+        void this.write(tracked, ctx.team ? buildTeamSteeringPrompt(ctx.steerAfterMs!, ctx.team) : buildSteeringPrompt(ctx.steerAfterMs!)).catch(() => {})
       })
 
       const outcome = await Promise.race([
@@ -405,9 +422,10 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
     return `${who}: the previous Claude Code process could not be confirmed stopped`
   }
 
-  private assertAvailable(agentId: string, workspacePath: string): void {
+  private assertAvailable(agentId: string, workspacePath: string, shared: boolean): void {
     for (const run of this.live.values()) {
-      if (run.agentId === agentId || workspaceKey(run.directory) === workspaceKey(workspacePath)) {
+      const sameFolder = workspaceKey(run.directory) === workspaceKey(workspacePath)
+      if (run.agentId === agentId || (sameFolder && !(shared && run.shared))) {
         throw new Error(`agent ${run.agentId} is still active or remote termination is unconfirmed`)
       }
     }
