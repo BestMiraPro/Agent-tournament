@@ -27,6 +27,7 @@ import type { HostCapacity } from '../runtime/docker/capacity.js'
 import { OUTPUT_README } from '../runtime/team-prompt.js'
 import { teamOutputView, teamScoreView } from './team-views.js'
 import { registerConnectorRoutes, type ConnectorRouteDeps } from './connectors-api.js'
+import { allowedHostsFor, registerLocalOriginGuard } from './local-origin.js'
 
 export interface SpecDefaults {
   workspaceRoot?: string | null
@@ -35,6 +36,8 @@ export interface SpecDefaults {
 }
 
 export interface ApiDeps {
+  /** Host names requests may use (see local-origin.ts); loopback only when absent. */
+  allowedHosts?: ReadonlySet<string>
   repos: Repos
   manager: RunManager
   createRun: (name: string, goal: string, criteria?: string | null) => string
@@ -419,6 +422,7 @@ function roundDetail(repos: Repos, round: RoundRow) {
 
 export function buildApi(deps: ApiDeps): FastifyInstance {
   const app = Fastify({ logger: false })
+  registerLocalOriginGuard(app, deps.allowedHosts ?? allowedHostsFor(null))
   if (deps.connectors) registerConnectorRoutes(app, deps.connectors)
 
   /**

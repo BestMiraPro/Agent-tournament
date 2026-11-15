@@ -219,7 +219,7 @@ Nothing needs configuring first. The defaults, each overridable with a flag afte
 | Flag | Default |
 |------|---------|
 | `--port` | `4300` |
-| `--host` | `127.0.0.1` — the dashboard has no authentication; the container image binds `0.0.0.0` inside its own network and is published on host loopback only |
+| `--host` | `127.0.0.1` — the dashboard has no authentication, so it answers only requests whose Host is loopback or this address and whose Origin (if any) is too; the container image binds `0.0.0.0` inside its own network and is published on host loopback only |
 | `--db` | `runs/dashboard.db` — runs survive restarts; `:memory:` for a throwaway session |
 | `--workspace-root` | `runs/workspaces` |
 | `--auth-file` | `~/.local/share/opencode/auth.json` if it exists — docker runs are refused without credentials |

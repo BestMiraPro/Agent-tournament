@@ -46,6 +46,7 @@ async function start(o: StartOptions): Promise<void> {
 
   const dashboard = createDashboard({
     dbPath: o.dbPath,
+    host: o.host,
     population: o.population,
     workspaceRoot: o.workspaceRoot,
     authFile: o.authFile,

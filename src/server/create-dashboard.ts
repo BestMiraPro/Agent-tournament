@@ -1,5 +1,7 @@
 import { homedir } from 'node:os'
+import type { IncomingMessage } from 'node:http'
 import { WebSocketServer } from 'ws'
+import { allowedHostsFor, isLocalRequest } from './local-origin.js'
 import type { FastifyInstance } from 'fastify'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import { openDb } from '../db/open.js'
@@ -32,6 +34,8 @@ import { connectorResolver } from '../connectors/resolve.js'
 
 export interface DashboardOptions {
   dbPath?: string
+  /** The address the server binds; requests must name it or a loopback host (see local-origin.ts). */
+  host?: string
   /** Size of the default mock run used before a spec-driven run is created. */
   population?: number
   workspaceRoot?: string | null
@@ -153,7 +157,9 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
         o ?? {},
       )
 
+  const allowedHosts = allowedHostsFor(opts.host)
   const app = buildApi({
+    allowedHosts,
     repos,
     manager,
     createRun: (name, goal, criteria) => engine.createRun(name, goal, criteria ?? null).id,
@@ -224,7 +230,11 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     connectorStore,
     recovered,
     attachWebSocket() {
-      wss ??= new WebSocketServer({ server: app.server, path: '/ws' })
+      wss ??= new WebSocketServer({
+        server: app.server,
+        path: '/ws',
+        verifyClient: (info: { origin: string; req: IncomingMessage }) => isLocalRequest({ host: info.req.headers.host, origin: info.origin }, allowedHosts),
+      })
       broadcaster.attach(wss)
       return wss
     },

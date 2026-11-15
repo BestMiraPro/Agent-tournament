@@ -158,7 +158,7 @@ Most multi-agent demos stop at orchestration: start several agents, collect the 
 
 This is an active personal research and engineering project, not a hosted product.
 
-- **Single host, local-first.** The dashboard binds to `127.0.0.1` and has no authentication. It is not meant to be exposed on a network.
+- **Single host, local-first.** The dashboard binds to `127.0.0.1` and has no authentication. It is not meant to be exposed on a network. It refuses any request whose Host is not loopback or its bind address (DNS rebinding) and any request carrying a foreign Origin (a web page in your browser), including the websocket.
 - **Cost accounting covers worker agents.** Judge, reflection and recombination calls are not yet counted in the per-run budget, because the provider interface returns text rather than a usage envelope.
 - **`local` mode has no isolation**, and `shared` Docker mode trades isolation for compatibility (see the table above).
 - **Mock scores are synthetic.** They come from a keyword-based mock judge and exist to exercise the pipeline. No real-model benchmark results are published here.

@@ -193,7 +193,7 @@ describe('Gmail sign-in', () => {
   test('sign-in can only start from a loopback dashboard, and an unknown state is refused', async () => {
     const { app } = setup()
     await post(app, '/api/connectors', { preset: 'gmail', clientId: 'cid', clientSecret: 'csecret' })
-    expect((await post(app, '/api/connectors/gmail/oauth/start', {}, 'evil.example:4300')).statusCode).toBe(400)
+    expect((await post(app, '/api/connectors/gmail/oauth/start', {}, 'evil.example:4300')).statusCode).toBe(403)
     expect((await app.inject({ method: 'GET', url: '/api/connectors/oauth/callback?code=x&state=guessed' })).statusCode).toBe(400)
   })
 })
