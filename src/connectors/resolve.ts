@@ -92,7 +92,9 @@ export async function openStoredUpstream(
     const tokenEnv = record.kind === 'github' ? GITHUB_TOKEN_ENV : record.auth.type === 'token' ? record.auth.env : undefined
     if (token && tokenEnv) childEnv[tokenEnv] = token
     if (readOnlyGitHub) childEnv.GITHUB_READ_ONLY = '1'
-    return connectStdio({ command: expandEnvRefs(t.command, env), args: t.args.map((a) => expandEnvRefs(a, env)), env: childEnv })
+    // Secret arguments first (placeholders the import put there), then the host environment.
+    const argEnv = { ...env, ...(secrets.args ?? {}) }
+    return connectStdio({ command: expandEnvRefs(t.command, env), args: t.args.map((a) => expandEnvRefs(a, argEnv)), env: childEnv })
   }
   const url = t.url ?? secrets.url
   if (!url) throw new Error(`${record.title} has no URL`)

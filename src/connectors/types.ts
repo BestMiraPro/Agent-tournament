@@ -90,6 +90,8 @@ export interface ConnectorRecord {
 export interface ConnectorSecrets {
   token?: string
   env?: Record<string, string>
+  /** Values for `${ARENA_SECRET_ARG_<n>}` placeholders in a stdio command's arguments. */
+  args?: Record<string, string>
   headers?: Record<string, string>
   url?: string
   google?: { clientId: string; clientSecret: string; refreshToken?: string; scope?: string }

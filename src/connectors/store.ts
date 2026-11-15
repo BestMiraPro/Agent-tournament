@@ -47,6 +47,7 @@ const secretsSchema = z.object({
   connectors: z.record(z.string(), z.object({
     token: z.string().optional(),
     env: stringMap.optional(),
+    args: stringMap.optional(),
     headers: stringMap.optional(),
     url: z.string().optional(),
     google: z.object({ clientId: z.string(), clientSecret: z.string(), refreshToken: z.string().optional(), scope: z.string().optional() }).optional(),
