@@ -12,6 +12,10 @@ import { createShardNetwork, removeShardNetwork } from '../../src/runtime/docker
 import { agentImageTag, readToolchainId } from '../../src/runtime/tool-manifest.js'
 import { hostModelsCatalog } from '../../src/runtime/opencode/discovery.js'
 import { relayProviderConfig } from '../../src/runtime/opencode/relay-config.js'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { ToolBridge } from '../../src/connectors/bridge.js'
+import { startToolBridgeServer, type ToolBridgeServer } from '../../src/connectors/bridge-server.js'
+import { connectInProcess } from '../../src/connectors/upstream.js'
 
 /**
  * The protected runtime's boundaries, exercised against real Docker with harmless fixtures:
@@ -44,8 +48,11 @@ const fakeUpstream: UpstreamCall = async (url, init) => {
 }
 
 let relay: ProviderRelay
+let tools: ToolBridgeServer
+const toolCalls: string[] = []
 let root = ''
 const shards: ShardContainer[] = []
+let toolToken = ''
 const networks: string[] = []
 
 /** Runs a command in a worker as its own unprivileged user, never failing the call itself. */
@@ -72,6 +79,25 @@ d('protected container policy (ARENA_DOCKER_E2E=1)', () => {
     })
     relay = await startProviderRelay({ policy, upstream: fakeUpstream, ...(REACH === 'bridge' ? { host: await ownBridgeAddress() } : {}) })
 
+    // A fake connector behind the host tool bridge: one read tool, one write tool it must never expose.
+    const fake = new McpServer({ name: 'fake-connector', version: '1' })
+    for (const [name, readOnlyHint] of [['search_things', true], ['send_things', false]] as const) {
+      fake.registerTool(name, { inputSchema: {}, annotations: { readOnlyHint } }, async () => {
+        toolCalls.push(name)
+        return { content: [{ type: 'text', text: `${name} ok` }] }
+      })
+    }
+    const upstream = await connectInProcess(fake)
+    const bridge = new ToolBridge()
+    tools = await startToolBridgeServer({ bridge, ...(REACH === 'bridge' ? { host: relay.host } : {}) })
+    toolToken = bridge.grant(RUN, {
+      runId: () => RUN, maxCallsPerAgent: 10, onEvent: () => {}, close: () => upstream.close(),
+      connectors: [{
+        id: 'fake', title: 'Fake', kind: 'custom', policy: { disabledTools: [], writeTools: [] }, runWriteOptIns: [],
+        upstreamTools: await upstream.listTools(), upstream: async () => upstream,
+      }],
+    }).tokenFor('agent-0')
+
     if (REACH === 'bridge') {
       // Not mkdtemp, which makes the folder owner-only: like the dashboard image's workspaces, it
       // must admit the workers' uid 1000 (run this with the image's umask and group).
@@ -95,7 +121,7 @@ d('protected container policy (ARENA_DOCKER_E2E=1)', () => {
       networks.push(network)
       shards.push(await startShardContainer({
         runId: RUN, shardIndex, image, hostDir, memory: '1g', cpus: 1, authFile: null, toolsDir, reach: REACH,
-        protectedRuntime: { network, configDir, relayPort: relay.port, ...(REACH === 'bridge' ? { relayHost: relay.host } : {}) },
+        protectedRuntime: { network, configDir, relayPort: relay.port, toolsPort: tools.port, ...(REACH === 'bridge' ? { relayHost: relay.host } : {}) },
       }, docker, // Bounded per probe, as the app does: one connection held open through the gateway
       // otherwise stalls the whole wait.
       async (baseUrl) => fetch(`${baseUrl}/global/health`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false)))
@@ -109,6 +135,7 @@ d('protected container policy (ARENA_DOCKER_E2E=1)', () => {
     }
     for (const n of networks) await removeShardNetwork(n)
     await relay?.close()
+    await tools?.close()
     if (root) await rm(root, { recursive: true, force: true })
   }, 120_000)
 
@@ -142,8 +169,9 @@ d('protected container policy (ARENA_DOCKER_E2E=1)', () => {
     const probes = await inWorker(a!, [
       'getent hosts example.com >/dev/null && echo dns-resolves || echo dns-blocked',
       connectProbe('1.1.1.1', 443),
-      // The relay's own address: reachable only through the gateway's fixed route.
+      // The relay's and the tool bridge's own addresses: reachable only through the gateway's fixed routes.
       connectProbe(REACH === 'bridge' ? relay.host : 'host.docker.internal', relay.port),
+      connectProbe(REACH === 'bridge' ? tools.host : 'host.docker.internal', tools.port),
       connectProbe(siblingIp, 4096),
       `python3 -c "import urllib.request\ntry:\n urllib.request.urlopen('https://pypi.org/simple/requests/', timeout=5);print('downloaded')\nexcept Exception as e:\n print('download-blocked')"`,
       `node -e "fetch('https://registry.npmjs.org/').then(()=>console.log('downloaded'),()=>console.log('download-blocked'))"`,
@@ -152,8 +180,8 @@ d('protected container policy (ARENA_DOCKER_E2E=1)', () => {
     ].join('; '), 120_000)
     const lines = probes.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
     expect(lines[0]).toBe('dns-blocked')
-    expect(lines.slice(1, 4)).not.toContain('open')
-    expect(lines.slice(4)).toEqual(['download-blocked', 'download-blocked', 'pip-blocked', 'sibling-file-absent'])
+    expect(lines.slice(1, 5)).not.toContain('open')
+    expect(lines.slice(5)).toEqual(['download-blocked', 'download-blocked', 'pip-blocked', 'sibling-file-absent'])
   }, 180_000)
 
   test('the approved route works: a model call through the gateway reaches the upstream with the real key only', async () => {
@@ -191,6 +219,24 @@ except urllib.error.HTTPError as e:
     ].join('; '), 120_000)
     expect(r.stdout.split('\n').map((l) => l.trim()).filter(Boolean)).toEqual(['401', '403', '404', '405', '200', '200', '429'])
     expect(upstreamCalls).toHaveLength(2)
+  }, 180_000)
+
+  test('connector tools work through the gateway\'s tools route, read tools only, and only with the agent\'s token', async () => {
+    const [a] = shards
+    toolCalls.length = 0
+    const call = (token: string, tool: string) =>
+      `python3 -c "import urllib.request,urllib.error,json
+req=urllib.request.Request('http://gateway:8788/mcp/fake',data=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'${tool}','arguments':{}}}).encode(),headers={'Authorization':'Bearer ${token}','Content-Type':'application/json','Accept':'application/json, text/event-stream'})
+try:
+ print(urllib.request.urlopen(req,timeout=20).read().decode())
+except urllib.error.HTTPError as e:
+ print(e.code)"`
+    const r = await inWorker(a!, [call(toolToken, 'search_things'), call(toolToken, 'send_things'), call('stolen-or-guessed', 'search_things')].join('; '), 120_000)
+    const lines = r.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+    expect(lines[0]).toContain('search_things ok')
+    expect(lines[1]).toContain('not available')
+    expect(lines[2]).toBe('401')
+    expect(toolCalls).toEqual(['search_things'])
   }, 180_000)
 
   test('permitted research computation runs offline in the workspace', async () => {

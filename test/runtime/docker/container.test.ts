@@ -7,7 +7,7 @@ describe('startShardContainer with the protected runtime', () => {
   const spec = {
     runId: 'run1', shardIndex: 0, image: 'agent-arena:tc-x', hostDir: '/host/shard-0', memory: '1g', cpus: 1,
     authFile: '/host/auth.json', toolsDir: '/host/tools',
-    protectedRuntime: { network: 'arena-run1-net-0', configDir: '/host/config', relayPort: 41234 },
+    protectedRuntime: { network: 'arena-run1-net-0', configDir: '/host/config', relayPort: 41234, toolsPort: 41300 },
   }
   type Exec = { stdout: string; stderr: string; code: number }
   const fakeDocker = (over: (args: string[]) => Exec | undefined = () => undefined) => {
@@ -28,7 +28,7 @@ describe('startShardContainer with the protected runtime', () => {
       name: 'arena-run1-0', image: 'agent-arena:tc-x', hostDir: '/host/shard-0', memory: '1g', cpus: 1,
       network: 'arena-run1-net-0', configDir: '/host/config', toolsDir: '/host/tools', contextDir: null,
     }))
-    expect(runs[1]).toEqual(buildGatewayRunArgs({ runId: 'run1', shardIndex: 0, image: 'agent-arena:tc-x', relayPort: 41234 }))
+    expect(runs[1]).toEqual(buildGatewayRunArgs({ runId: 'run1', shardIndex: 0, image: 'agent-arena:tc-x', relayPort: 41234, toolsPort: 41300 }))
     expect(d.calls).toContainEqual(['network', 'connect', '--alias', 'gateway', 'arena-run1-net-0', 'arena-run1-gw-0'])
     expect(d.calls).toContainEqual(['port', 'arena-run1-gw-0', '14096/tcp'])
     expect(d.calls.some((c) => c[0] === 'port' && c[1] === 'arena-run1-0')).toBe(false)
@@ -84,11 +84,11 @@ describe('startShardContainer from a container on Docker\'s bridge', () => {
     const d = fakeDocker({ 'arena-run1-gw-0': '172.17.0.6' })
     const r = await startShardContainer({
       ...base, toolsDir: '/host/tools',
-      protectedRuntime: { network: 'arena-run1-net-0', configDir: '/host/config', relayPort: 41234, relayHost: '172.17.0.2' },
+      protectedRuntime: { network: 'arena-run1-net-0', configDir: '/host/config', relayPort: 41234, toolsPort: 41300, relayHost: '172.17.0.2' },
     }, d.fn, async () => true)
     expect(r.baseUrl).toBe('http://172.17.0.6:14096')
     const gatewayRun = d.calls.filter((c) => c[0] === 'run')[1]
-    expect(gatewayRun).toEqual(buildGatewayRunArgs({ runId: 'run1', shardIndex: 0, image: 'agent-arena:tc-x', relayPort: 41234, relayHost: '172.17.0.2' }))
+    expect(gatewayRun).toEqual(buildGatewayRunArgs({ runId: 'run1', shardIndex: 0, image: 'agent-arena:tc-x', relayPort: 41234, toolsPort: 41300, relayHost: '172.17.0.2' }))
     expect(d.calls.some((c) => c[0] === 'port')).toBe(false)
   })
 

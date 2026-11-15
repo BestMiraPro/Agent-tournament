@@ -5,6 +5,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { bridgeSeams, composeRun, pathKind, runConfigFor, type ComposeSeams } from '../../src/server/compose-run.js'
 import { CapacityLedger } from '../../src/runtime/docker/capacity.js'
 import { RelayPolicy } from '../../src/runtime/provider-relay.js'
+import { ToolBridge } from '../../src/connectors/bridge.js'
 
 // Fake keys and a trimmed catalogue: fixtures, not anyone's credentials.
 const catalogJson = JSON.stringify({
@@ -41,6 +42,7 @@ const mockSeams = () => ({
   hostModelsFile: vi.fn(() => '/host/models.json'),
   readTextFile: vi.fn(async (path: string) => (path.endsWith('models.json') ? catalogJson : authJson)),
   relay: vi.fn(async () => ({ policy: new RelayPolicy(), port: 45678 })),
+  toolBridge: vi.fn(async () => ({ bridge: new ToolBridge(), port: 45679, host: '127.0.0.1' })),
   createShardNetworkFn: vi.fn(async (runId: string, shardIndex: number) => `arena-${runId}-net-${shardIndex}`),
   removeShardNetworkFn: vi.fn(async (_name: string, _onWarning?: (message: string) => void) => true),
   // Strict removal confirmation reads the fake daemon, never a real one.
@@ -179,6 +181,7 @@ describe('composeRun', () => {
             network: `arena-run-9-net-${s.shardIndex}`,
             configDir: join(root, '.arena-runtime', 'run-9', `shard-${s.shardIndex}-config`),
             relayPort: 45678,
+            toolsPort: 45679,
           })
           const opencodeJson = readFileSync(join(s.protectedRuntime.configDir, 'opencode.json'), 'utf8')
           expect(JSON.parse(opencodeJson).provider).toEqual({ wandb: { options: { baseURL: 'http://gateway:8787/wandb', apiKey: g.token } } })
@@ -209,17 +212,19 @@ describe('composeRun', () => {
         startShardContainerFn,
         removeContainerFn: vi.fn(async (_name: string) => {}),
       }
-      const seams = bridgeSeams(base as never, { selfAddress: async () => '172.17.0.2', startRelay })
+      const startToolBridge = vi.fn(async (_host: string) => ({ bridge: new ToolBridge(), port: 45679 }))
+      const seams = bridgeSeams(base as never, { selfAddress: async () => '172.17.0.2', startRelay, startToolBridge })
       try {
         const c = await composeRun(spec(root), seams, { runIdHolder: { value: 'run-9' } })
         expect(startRelay).toHaveBeenCalledWith('172.17.0.2')
+        expect(startToolBridge).toHaveBeenCalledWith('172.17.0.2')
         await c.planFor!(['a1', 'a2'])
         await Promise.all([c.sandbox.provision('a1', {}), c.sandbox.provision('a2', {})])
         const specs = startShardContainerFn.mock.calls.map((call) => (call as unknown as [{ reach: string; protectedRuntime: { relayPort: number; relayHost: string } }])[0])
         expect(specs).toHaveLength(2)
         for (const s of specs) {
           expect(s.reach).toBe('bridge')
-          expect(s.protectedRuntime).toMatchObject({ relayPort: 45678, relayHost: '172.17.0.2' })
+          expect(s.protectedRuntime).toMatchObject({ relayPort: 45678, toolsPort: 45679, relayHost: '172.17.0.2' })
         }
         await c.cleanup()
       } finally {

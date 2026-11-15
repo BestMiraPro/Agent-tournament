@@ -42,6 +42,8 @@ import { relayProviderConfig } from '../runtime/opencode/relay-config.js'
 import type { RelayPolicy, RelayUpstream } from '../runtime/provider-relay.js'
 import { relayUpstreamsFromAuth, type CatalogProvider } from '../runtime/relay-credentials.js'
 import { processRelay } from '../runtime/relay-process.js'
+import type { ToolBridge } from '../connectors/bridge.js'
+import { processToolBridge } from '../connectors/bridge-process.js'
 import { RUNTIME_DIR } from '../runtime/runtime-dirs.js'
 import type { Placement } from '../runtime/docker/shard.js'
 import {
@@ -98,6 +100,11 @@ export interface ComposeSeams {
    * they forward to when it is not the host's loopback (the app runs in a container).
    */
   relay: () => Promise<{ policy: RelayPolicy; port: number; gatewayHost?: string }>
+  /**
+   * The process's host tool bridge: where every mode's agents reach connector tools, and where a protected gateway's
+   * third route forwards. `host` is its listening address; `gatewayHost` as for the relay.
+   */
+  toolBridge: () => Promise<{ bridge: ToolBridge; port: number; host: string; gatewayHost?: string }>
   /** Reads a host file the protected runtime needs (credentials, catalogue) as text. */
   readTextFile: (path: string) => Promise<string>
   createShardNetworkFn: (runId: string, shardIndex: number) => Promise<string>
@@ -141,6 +148,7 @@ export const defaultSeams: ComposeSeams = {
   inspectContainer: (name) => inspectContainerState(name),
   runtimeStateOf: (id) => inspectRuntimeState(id),
   relay: () => processRelay(),
+  toolBridge: () => processToolBridge(),
   readTextFile: (path) => readFile(path, 'utf8'),
   createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
   removeShardNetworkFn: (name, onWarning) => removeShardNetwork(name, onWarning),
@@ -157,8 +165,10 @@ export function bridgeSeams(
   deps: {
     selfAddress: () => Promise<string>
     startRelay: (host: string) => Promise<{ policy: RelayPolicy; port: number }>
+    startToolBridge?: (host: string) => Promise<{ bridge: ToolBridge; port: number }>
   } = { selfAddress: () => ownBridgeAddress(), startRelay: (host) => processRelay({ host }) },
 ): ComposeSeams {
+  const startToolBridge = deps.startToolBridge ?? ((host: string) => processToolBridge({ host }))
   return {
     ...base,
     startShardContainerFn: (spec, run, healthProbe, onWarning) =>
@@ -167,6 +177,11 @@ export function bridgeSeams(
       const host = await deps.selfAddress()
       const { policy, port } = await deps.startRelay(host)
       return { policy, port, gatewayHost: host }
+    },
+    toolBridge: async () => {
+      const host = await deps.selfAddress()
+      const { bridge, port } = await startToolBridge(host)
+      return { bridge, port, host, gatewayHost: host }
     },
   }
 }
@@ -494,7 +509,10 @@ export async function composeRun(
       let relayToken: string | null = null
       let relayPort = 0
       let relayHost: string | undefined
+      let toolsPort = 0
       if (relayPlan) {
+        // The gateway's third route always exists, so its port is needed whether or not the run enables connectors.
+        toolsPort = (await s.toolBridge()).port
         const relay = await s.relay()
         relayToken = randomBytes(24).toString('hex')
         relayPort = relay.port
@@ -680,6 +698,7 @@ export async function composeRun(
               network,
               configDir: await writeRelayConfig(runId, shardIndex),
               relayPort,
+              toolsPort,
               ...(relayHost ? { relayHost } : {}),
             }
           }
