@@ -231,6 +231,18 @@ describe('ClaudeCodeAgentRunner', () => {
     await expect(runner.assertReadyForRound()).resolves.toBeUndefined()
   })
 
+  test('a stop while credentials are still being read starts nothing', async () => {
+    let release!: () => void
+    const pending = new Promise<void>((r) => { release = r })
+    const { sandbox, runner, requests } = setup({ credentials: async () => { await pending; return { mode: 'host' } } })
+    const handle = await handleFor(sandbox)
+    const running = runner.run(handle, ctx())
+    expect(await runner.quiesce(handle)).toBe('stopped')
+    release()
+    expect(await running).toMatchObject({ status: 'error', failure: { code: 'AGENT_STOPPED' } })
+    expect(requests).toHaveLength(0)
+  })
+
   test('abortAll stops every live attempt', async () => {
     const { sandbox, runner, procs } = setup({ proc: () => new FakeProc({ exitOnStdinEnd: false }) })
     const h1 = await handleFor(sandbox, 'a1')

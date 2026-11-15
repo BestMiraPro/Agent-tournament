@@ -140,23 +140,7 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
     }
     const blocked = this.gate.blocked()
     if (blocked) return refuse(blocked)
-    let credentials: ClaudeCredentials
-    let configDir: string | null
-    try {
-      credentials = await this.options.credentials(handle)
-    } catch (e) {
-      return refuse({ code: CLAUDE_FAILURE_CODES.authExpired, message: (e as Error).message.slice(0, 300) })
-    }
-    try {
-      configDir = (await this.options.configDirFor?.(handle, credentials)) ?? null
-    } catch (e) {
-      return refuse(failureFromText(`Could not prepare the Claude config folder: ${(e as Error).message}`, CLAUDE_FAILURE_CODES.error))
-    }
-
-    const sessionId = (this.options.newSessionId ?? randomUUID)()
-    const args = competitorArgs({ model, strategy: ctx.genome.strategyMd, readableDirs: this.options.readableDirs ?? [], sessionId })
-    const { settings, secrets } = claudeEnvVars({ credentials, tokenTransport: this.options.tokenTransport, configDir, model })
-
+    // Registered before any await, so a stop that arrives while credentials are read is seen.
     let settle = (): void => {}
     const tracked: LiveAttempt = {
       agentId: handle.agentId,
@@ -181,6 +165,26 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
     let timer: ReturnType<typeof setTimeout> | undefined
     let steerTimer: ReturnType<typeof setTimeout> | undefined
     try {
+      let credentials: ClaudeCredentials
+      let configDir: string | null
+      try {
+        credentials = await this.options.credentials(handle)
+      } catch (e) {
+        return refuse({ code: CLAUDE_FAILURE_CODES.authExpired, message: (e as Error).message.slice(0, 300) })
+      }
+      try {
+        configDir = (await this.options.configDirFor?.(handle, credentials)) ?? null
+      } catch (e) {
+        return refuse(failureFromText(`Could not prepare the Claude config folder: ${(e as Error).message}`, CLAUDE_FAILURE_CODES.error))
+      }
+
+      const sessionId = (this.options.newSessionId ?? randomUUID)()
+      const args = competitorArgs({ model, strategy: ctx.genome.strategyMd, readableDirs: this.options.readableDirs ?? [], sessionId })
+      const { settings, secrets } = claudeEnvVars({ credentials, tokenTransport: this.options.tokenTransport, configDir, model })
+
+      // A stop requested while credentials were read closes admission: nothing is started.
+      if (tracked.stopRequested) return refuse(failureFromText('Agent stopped before Claude Code started', 'AGENT_STOPPED'))
+
       let proc: ClaudeProcess
       try {
         proc = this.options.launcher.launch(handle, {
