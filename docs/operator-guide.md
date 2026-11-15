@@ -68,7 +68,7 @@ Docker mode runs agents in resource-capped containers built from the research to
 
 **Protected** gives every agent its own container and changes what that container can do:
 
-- **No credentials inside.** The container has no `auth.json` and no API key. Its OpenCode points each provider at a small gateway, which forwards to a relay inside the app. The relay holds the real keys, accepts only model calls for models in the run's roster, allows 2,000 requests per agent, and stops working for the run the moment it is stopped.
+- **No credentials inside.** The container has no `auth.json`, API key or connector credential. Its OpenCode points each provider at a small gateway, which forwards to a relay inside the app; connector tools go through the same gateway to the app's tool bridge (see Connectors). The relay holds the real keys, accepts only model calls for models in the run's roster, allows 2,000 requests per agent, and stops working for the run the moment it is stopped.
 - **No other network.** No internet, no DNS, no access to the host's services or to other agents' containers. Scripts cannot download anything and `pip install` fails.
 - **Read-only system.** Agents run as an unprivileged user; only their workspace `/work` is writable. The reference folder is at `/context` and the tool inventory at `/run/arena/TOOLS.md`, both read-only.
 - **One agent per container.** A run with more agents than **Containers** is refused before anything starts, with the numbers to change.
@@ -96,6 +96,65 @@ A seed folder (`seedDir`, API only) is copied into every agent's workspace befor
 ### Markdown report
 
 **Export → Markdown report** (or `GET /api/runs/:runId/export?format=md`, or `--report <path>` on the CLI) writes one file with the goal, a leaderboard row per round, the winner of the last scored round, the lineage of its strategy back to a seed, the strategy itself, the judge's rationale and the winning submission. It is meant to be read without the dashboard, by a person or by another agent.
+
+## Connectors
+
+Connectors give agents tools from GitHub, Slack, Gmail and other MCP servers. Open **Connectors** from the run browser or the setup form, add or import a connector, test it, then tick it under **Connectors** when you create a local or docker run.
+
+### How they work
+
+- **The dashboard holds every credential.** Tokens, OAuth clients and refresh tokens live in `runs/connectors/secrets.json` (owner-only, mode `0600`), beside the workspaces and never under them. Connector settings without credentials live in `runs/connectors/connectors.json`. Neither is in the database, an export, a log, an event, a worker's config, mount, environment or command line. Change the folder with `--connectors-dir`. A run whose workspace root, context folder or seed folder overlaps it is refused.
+- **Agents reach a connector only through the tool bridge**, a small MCP endpoint inside the dashboard at `/mcp/<connector>`. Each agent gets its own token for the run, written to `.opencode/opencode.json` in its workspace; the bridge holds the real credentials and the connection to the real server. Local agents reach it on `127.0.0.1`, shared Docker containers through `host.docker.internal`, and protected containers through their gateway's third fixed route (`http://gateway:8788`). Under `--docker-reach bridge` the dashboard's own bridge address replaces the first two.
+- **Read-only by default.** Slack and Gmail are read-only and locked: search, read and list tools only, from a list fixed in code. Sending, posting, replying, reacting, scheduling, drafting, labelling and deleting are never offered, and no setting enables them. Every other connector exposes the tools its server marks read-only. A write tool (GitHub's `create_issue`, say) must be permitted on the Connectors page **and** ticked for each run that may use it.
+- **Bounded and recorded.** Each agent may make 500 connector calls per run; each call has 60 seconds and a 256 KiB result. Every call — allowed, refused, failed or cut off — is saved with the round's evidence (connector, tool, agent, outcome, sizes, time, argument names; never argument values or results) and shows on the agent's card. When a run stops, its tokens stop working at once.
+- **TOOLS.md** in docker runs lists each connector and the tools agents can call, named as they see them (`github_search_code`).
+
+Shared containers: agents sharing one container can read each other's workspaces, so they can read each other's bridge token. Calls are still attributed by token. Local runs have no isolation at all: a local agent runs as you.
+
+The OpenCode activity stream reports connector calls too, like any tool call, with its usual bounded and redacted output. What a connector returns to an agent can therefore appear in that agent's activity, as a shell command's output can.
+
+### GitHub
+
+Uses GitHub's official MCP server. Agents get its read-only tools; the dashboard also asks GitHub for read-only mode until you permit a write tool.
+
+1. Create a **fine-grained personal access token**: github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token. Choose the resource owner and **Only select repositories** (the ones agents may read). Repository permissions, all **Read-only**: Contents, Issues, Pull requests, Metadata (added automatically); add Actions or Discussions read access if a task needs them. Grant write permissions only if you will permit write tools.
+2. Connectors → Add a connector → GitHub → paste the token → Add connector → Test connection.
+
+Alternatively choose **Read `gh auth token` each time a run starts** to use the GitHub CLI's login (`gh auth login` first). That token carries every scope `gh` was granted, so a fine-grained token is the narrower choice. Server: **GitHub's remote server** (`https://api.githubcopilot.com/mcp/`) needs nothing installed. If your account cannot use it, choose **Local github-mcp-server binary** and put `github-mcp-server` (from github.com/github/github-mcp-server/releases) on the dashboard's PATH.
+
+### Slack
+
+An in-house read-only server inside the dashboard: `search_messages`, `list_channels`, `read_channel`, `read_thread`, `get_user`, `list_users`. It can only call Slack's `search.messages`, `conversations.list/history/replies` and `users.info/list`.
+
+1. api.slack.com/apps → Create New App → From scratch → name it, pick the workspace.
+2. OAuth & Permissions → **User Token Scopes**: `search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`, `im:read`, `mpim:read`, `users:read`. Add no write scope.
+3. Install to Workspace (an admin may need to approve), then copy the **User OAuth Token** (`xoxp-…`).
+4. Connectors → Add a connector → Slack → paste it → Add connector → Test connection.
+
+Agents see what your account sees. A bot token (`xoxb-…`) with the same scopes as bot scopes also works, except for search, which Slack allows only with a user token.
+
+### Gmail
+
+An in-house read-only server inside the dashboard: `search_messages`, `get_message`, `get_thread`, `list_labels`, GET requests only. It signs in with your own Google OAuth client, scope `https://www.googleapis.com/auth/gmail.readonly` only; a sign-in that grants anything more is refused and nothing is stored.
+
+1. console.cloud.google.com → create or pick a project → APIs & Services → Library → enable the **Gmail API**.
+2. OAuth consent screen: user type External (or Internal for a Workspace domain), add yourself as a test user, add the scope `.../auth/gmail.readonly`.
+3. Credentials → Create credentials → OAuth client ID → application type **Desktop app**. Copy the client ID and client secret.
+4. Connectors → Add a connector → Gmail → paste both → Add connector → **Connect (sign in)**. Google's page opens in a new tab; approve read-only access. The tab says the connector is connected; the dashboard refreshes the access token itself from then on.
+
+Start the sign-in from the dashboard at `http://127.0.0.1:<port>` or `http://localhost:<port>`: the callback comes back to the dashboard's own address, and any other host is refused. While the consent screen is in **Testing**, Google expires refresh tokens after 7 days: connect again when **Test connection** reports `invalid_grant`.
+
+### Other MCP servers
+
+- **Remote (URL)**: give the server URL and, if it uses one, a bearer token. Leave the token blank for a server that signs in with MCP OAuth, then choose **Connect (sign in)**: the dashboard registers itself with the server, opens its sign-in page, and keeps the tokens.
+- **Local (command)**: the dashboard starts the command on this machine with a minimal environment (PATH, HOME and the variables you set), never its own.
+- **Import from Claude Code**: **Find Claude Code servers** lists what `~/.claude.json` (user and per-project servers), `~/.claude/settings.json`, project `.mcp.json` files and plugin `.mcp.json` files configure, with credentials masked. Import copies one; values that look like credentials go to the secrets file. These files are only read. Connectors hosted by claude.ai (its Gmail, Slack, GitHub, Google Drive, Todoist …) are not in them and cannot be imported: their sign-ins belong to claude.ai. Use the presets above.
+
+Imported and custom servers expose only the tools they mark read-only until you permit others.
+
+### Built-in connectors
+
+Connectors the app provides itself (such as web search, when it is installed) are listed under **Built in**. They are read-only and need no credentials; enable them per run like any other.
 
 ## CLI flags
 
@@ -140,7 +199,8 @@ Nothing needs configuring first. The defaults, each overridable with a flag afte
 | `--population` | `8` — size of the default mock run |
 | `--no-open` | the browser opens by default |
 | `--no-docker-sandbox` | docker runs are accepted; the container image sets this only when Docker's socket is not mounted |
-| `--docker-reach` | `loopback`: the app runs on the Docker host and reaches containers through ports published on `127.0.0.1`. The container image uses `bridge`: it reaches them at their addresses on Docker's default bridge, and its provider relay listens there for the gateways |
+| `--docker-reach` | `loopback`: the app runs on the Docker host and reaches containers through ports published on `127.0.0.1`. The container image uses `bridge`: it reaches them at their addresses on Docker's default bridge, and its provider relay and tool bridge listen there for the gateways |
+| `--connectors-dir` | `runs/connectors` — connectors and their credentials (owner-only files); see Connectors |
 
 To run the dashboard itself in Docker, see [Run in Docker](../README.md#run-in-docker) in the README.
 
@@ -161,7 +221,7 @@ For UI development with hot reload, run `npm run dashboard -- --no-open` and `np
 ### The dashboard workflow
 
 1. **Browse runs** — the landing page lists all runs with summary stats (rounds, best score, cost). Click a row to open it.
-2. **Create a run** — "Create run" takes you to the setup form: name, workflow (collaboration preselected), goal, sandbox mode, roster (model + count + temperature per row), judge/reflect model pickers, selection knobs and concurrency (tournament only), pricing, budget.
+2. **Create a run** — "Create run" takes you to the setup form: name, workflow (collaboration preselected), goal, sandbox mode, roster (model + count + temperature per row), judge/reflect model pickers, connectors, selection knobs and concurrency (tournament only), pricing, budget.
    - In a collaboration run the side panel shows the team score and the team channel instead of the leaderboard, and **Team output** below the grid lists each round's sealed output folder: pick a round, pick a file, read it as captured, and see which agents wrote it.
 3. **Run a round** — in the run view, the between-rounds controls let you start the next round, override criteria, add/retire agents, abort, or reconfigure (PATCH) the config for the next round.
 4. **Review** — the agent grid shows live status; click an agent for its drawer (lineage, genomes, submission, diffs). The analytics panel has the fitness chart, model share, lineage tree. The round-detail panel shows the ranked entries with judge rationales.

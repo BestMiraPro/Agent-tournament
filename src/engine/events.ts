@@ -30,6 +30,37 @@ export interface ActivityItem extends Omit<ActivityItemInput, 'append'> {
 }
 
 /**
+ * How one connector tool call ended at the host tool bridge:
+ * - `ok` / `error`: it reached the upstream, which answered with a result or a tool error;
+ * - `refused`: the tool is not exposed to this agent (never reached the upstream);
+ * - `limit`: the agent used its call allowance;
+ * - `timeout`, `too_large`, `upstream_error`: the bridge cut it off or the upstream failed.
+ */
+export type ConnectorCallStatus = 'ok' | 'error' | 'refused' | 'limit' | 'timeout' | 'too_large' | 'upstream_error'
+
+/** One connector tool call, as the bridge recorded it: metadata only, never argument values or results. */
+export interface ConnectorCall {
+  id: string
+  tool: string
+  outcome: 'completed' | 'failed' | 'denied'
+  status: ConnectorCallStatus
+  /** Argument names only. */
+  argKeys: string[]
+  requestBytes: number
+  responseBytes: number
+  durationMs: number
+  /** A fixed description, never upstream error text: that can echo the request. */
+  error?: string
+}
+
+/** Extra evidence a built-in connector recorded under the calling agent, such as a URL it fetched. */
+export interface ConnectorNote {
+  kind: 'tool' | 'network'
+  summary: string
+  detail?: string
+}
+
+/**
  * Progress the engine itself knows about. Always available, including in mock mode.
  * Distinct from OpenCode activity events, which are best-effort detail and absent
  * entirely when there is no OpenCode server.
@@ -89,6 +120,17 @@ export type EngineEvent =
       /** When the bridge saw it, so a wait can show its age. */
       at: number
     }
+  | ({
+      /**
+       * A connector tool call, or a built-in's note about one, observed by the host tool bridge. The agent is the
+       * one its bridge token was minted for, not anything the worker said.
+       */
+      type: 'agent.connector'
+      runId: string
+      agentId: string
+      connectorId: string
+      at: number
+    } & ({ call: ConnectorCall; note?: undefined } | { note: ConnectorNote; call?: undefined }))
   | {
       /**
        * The agent's terminal usage totals, sent at most once per attempt and only when

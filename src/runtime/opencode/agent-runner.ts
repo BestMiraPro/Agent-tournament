@@ -7,6 +7,7 @@ import type { AgentHandle, Sandbox } from '../sandbox.js'
 import { buildTeamPrompt, buildTeamSteeringPrompt } from '../team-prompt.js'
 import { OpenCodeTimeoutError, type OpenCodeClient } from './client.js'
 import { splitModelId } from './model-id.js'
+import { PROJECT_CONFIG_FILE } from './mcp-config.js'
 
 export const SUBMISSION_FILE = 'SUBMISSION.md'
 
@@ -52,6 +53,12 @@ export interface AgentRunnerOptions {
    * otherwise unconfirmed; a `stopped` answer confirms it.
    */
   runtimeState?: (handle: AgentHandle) => Promise<'running' | 'stopped' | 'unknown'>
+  /**
+   * The agent's own OpenCode project config (`.opencode/opencode.json`), written into its workspace right before its
+   * session starts, or null for none. Connectors use it: each agent gets its own bridge token. Written every run,
+   * because a workspace reset at round start removes it.
+   */
+  projectConfig?: (handle: AgentHandle) => string | null
 }
 
 /** How long a failed run waits for resource evidence before keeping its own failure. */
@@ -327,6 +334,15 @@ export class OpenCodeAgentRunner implements AgentRunner {
     if (unavailable !== null) {
       // Nothing is tracked or dispatched, so the zero usage below is observed, not assumed.
       const failure = failureFromText(unavailable, 'MODEL_UNAVAILABLE')
+      return { status: 'error', errorText: failure.message, failure, ...zero, durationMs: Date.now() - started }
+    }
+
+    try {
+      const projectConfig = this.options.projectConfig?.(handle) ?? null
+      if (projectConfig !== null) await this.sandbox.writeFile(handle, PROJECT_CONFIG_FILE, projectConfig)
+    } catch (e) {
+      // Nothing is dispatched yet, so the zero usage below is observed, not assumed.
+      const failure = failureFromText(`Could not prepare this agent's connectors: ${(e as Error).message}`, 'CONNECTOR_SETUP')
       return { status: 'error', errorText: failure.message, failure, ...zero, durationMs: Date.now() - started }
     }
 

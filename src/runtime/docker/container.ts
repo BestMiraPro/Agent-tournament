@@ -21,7 +21,9 @@ export interface ProtectedRuntimeSpec {
   configDir: string
   /** The relay's port, which the shard gateway forwards to. */
   relayPort: number
-  /** The relay's address as the gateway reaches it; the host's loopback when unset. */
+  /** The host tool bridge's port, the gateway's third route. */
+  toolsPort: number
+  /** The relay's (and tool bridge's) address as the gateway reaches it; the host's loopback when unset. */
   relayHost?: string
 }
 
@@ -312,6 +314,7 @@ async function startProtectedShard(
         shardIndex: spec.shardIndex,
         image: spec.image,
         relayPort: runtime.relayPort,
+        toolsPort: runtime.toolsPort,
         ...(runtime.relayHost ? { relayHost: runtime.relayHost } : {}),
       }),
       120_000,

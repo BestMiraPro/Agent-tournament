@@ -23,7 +23,7 @@ export const AUDIT_EVIDENCE_EVENT = 'audit.evidence'
 export const AUDIT_LATE_EVENT = 'audit.late'
 export const AUDIT_FROZEN_EVENT = 'audit.frozen'
 
-export type AuditSource = 'runtime' | 'policy' | 'provider_stream' | 'capture'
+export type AuditSource = 'runtime' | 'policy' | 'provider_stream' | 'capture' | 'tool_bridge'
 export type AuditKind = 'tool' | 'file' | 'permission' | 'network' | 'integrity' | 'failure' | 'gap'
 export type AuditOutcome = 'allowed' | 'denied' | 'completed' | 'failed' | 'unknown'
 
@@ -106,6 +106,7 @@ export const AUDIT_SENSORS: Record<string, string> = {
   failure: 'Attempt failures recorded by the engine and provider errors reported by the stream.',
   integrity: 'Submission capture: whether it was sealed, verified unchanged, or tampered with.',
   network: 'Not observed directly: programs started inside a command can use whatever network the sandbox allows.',
+  connector: 'Connector tool calls as the host tool bridge recorded them: connector, tool, outcome, sizes and timing, attributed by each agent\'s own token. Argument values and results are not kept.',
   filesystem: 'Only the captured workspace manifest; file operations inside commands are not observed one by one.',
 }
 
@@ -337,6 +338,24 @@ export class AuditCollector {
             ? 'The attempt failed.'
             : event.failure.code ? `${event.failure.code}: ${event.failure.message}` : event.failure.message,
         })
+        return
+      }
+      case 'agent.connector': {
+        if (event.call) {
+          const c = event.call
+          const args = c.argKeys.length > 0 ? `; arguments: ${c.argKeys.join(', ')}` : ''
+          this.persist(state, event.agentId, {
+            sessionId: null, observedAt: event.at, source: 'tool_bridge', kind: 'tool',
+            summary: `${event.connectorId}: ${c.tool}`, outcome: c.outcome,
+            detail: `status ${c.status}; ${c.requestBytes} B in, ${c.responseBytes} B out; ${c.durationMs} ms${args}${c.error ? `; ${c.error}` : ''}`,
+          })
+        } else if (event.note) {
+          this.persist(state, event.agentId, {
+            sessionId: null, observedAt: event.at, source: 'tool_bridge', kind: event.note.kind === 'network' ? 'network' : 'tool',
+            summary: `${event.connectorId}: ${event.note.summary}`,
+            ...(event.note.detail !== undefined ? { detail: event.note.detail } : {}),
+          })
+        }
         return
       }
       case 'bridge.status': {

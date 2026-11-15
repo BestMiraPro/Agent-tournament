@@ -61,6 +61,13 @@ export interface DataMount {
  */
 export type PackageInstallPolicy = 'denied' | 'not_enforced'
 
+/** A connector enabled for the run, with the tools the bridge exposes, named as the agent calls them. */
+export interface ManifestConnector {
+  id: string
+  title: string
+  tools: { name: string; description: string; write: boolean }[]
+}
+
 export interface ToolManifest {
   schemaVersion: 1
   runId: string
@@ -70,6 +77,8 @@ export interface ToolManifest {
   pythonPackages: { name: string; version: string }[]
   data: DataMount[]
   policy: { packageInstall: PackageInstallPolicy; dataAccess: 'preapproved' }
+  /** Absent when the run enables none. */
+  connectors?: ManifestConnector[]
 }
 
 /**
@@ -145,6 +154,7 @@ export function buildToolManifest(input: {
   inventory: ImageInventory
   data: DataMount[]
   packageInstall: PackageInstallPolicy
+  connectors?: ManifestConnector[]
 }): ToolManifest {
   for (const tool of input.inventory.tools) assertContainerPath(`tool ${tool.name}`, tool.executable)
   for (const mount of input.data) assertContainerPath(`data mount ${mount.name}`, mount.mountPath)
@@ -157,6 +167,7 @@ export function buildToolManifest(input: {
     pythonPackages: input.inventory.pythonPackages,
     data: input.data,
     policy: { packageInstall: input.packageInstall, dataAccess: 'preapproved' },
+    ...(input.connectors && input.connectors.length > 0 ? { connectors: input.connectors } : {}),
   }
 }
 
@@ -178,6 +189,20 @@ export function renderToolsMarkdown(m: ToolManifest): string {
       ? m.data.map((d) => `- ${d.name} — \`${d.mountPath}\`${d.digest ? ` (${d.digest})` : d.note ? ` (${d.note})` : ''}`)
       : ['- none for this run']),
     '',
+    ...(m.connectors && m.connectors.length > 0
+      ? [
+          '## Connectors',
+          'These are tools you can call directly. They reach outside sources through the tournament host, which holds the credentials and records every call. Each is read-only unless a tool is marked "(changes data)".',
+          ...m.connectors.flatMap((c) => [
+            '',
+            `### ${c.title} (\`${c.id}\`)`,
+            ...(c.tools.length > 0
+              ? c.tools.map((t) => `- \`${t.name}\`${t.write ? ' (changes data)' : ''}${t.description ? ` — ${t.description}` : ''}`)
+              : ['- no tools are exposed for this run']),
+          ]),
+          '',
+        ]
+      : []),
     '## Rules',
     '- Do not install packages or download tools. Use what is listed above.',
     '- If something you need is missing, say so in SUBMISSION.md: the package, the version, and why. That request is reviewed outside the tournament.',

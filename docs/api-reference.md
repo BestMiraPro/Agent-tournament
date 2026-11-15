@@ -19,7 +19,8 @@ Body (the full run spec; all fields except `name`+`goal`+`roster` are optional w
   "budget": { "maxRunTokens": 1000000, "maxRoundTokens": 200000, "maxAgentTokens": 50000 },
   "selection": { "crossoverPct": 0.2, "eliteCount": 2, "topPct": 0.3, "bottomPct": 0.2, "diversityFloor": true },
   "concurrency": 8,
-  "pricing": { "model/id": { "inPerM": 1, "outPerM": 2, "cacheReadPerM": 0.1, "cacheWritePerM": 0.2 } }
+  "pricing": { "model/id": { "inPerM": 1, "outPerM": 2, "cacheReadPerM": 0.1, "cacheWritePerM": 0.2 } },
+  "connectors": [{ "id": "github", "writeTools": [] }]  // local/docker only; see Connectors
 }
 ```
 - `201` `{ runId: string, warnings?: string[] }` — roster counts must sum to `populationSize` (derived from roster).
@@ -47,6 +48,49 @@ Body: a partial of `{ roster, budget, judge, selection, concurrency, pricing }` 
 
 - `202` `{ stopped: true }` — cooperative: queued agents stop, in-flight sessions finish.
 - `404` / `409` (already stopped).
+
+## Connectors
+
+Connectors and their credentials live in the dashboard's connector store (`--connectors-dir`). No response ever contains a credential value: views list which secrets are set (`secretsSet`), never what they are.
+
+### `GET /api/connectors` — list
+
+- `200` `{ store: boolean, connectors: ConnectorView[], builtins: [{ id, title, description, builtin: true, readOnly: true }] }`.
+- `ConnectorView`: `{ id, title, kind: github|slack|gmail|custom, origin, transport (command/args/env names or URL/header names), auth, secretsSet, connected, locked, readAllowlist, policy: { disabledTools, writeTools }, tools: [{ name, description, readOnlyHint, classification: read|write|locked }] | null, toolsCheckedAt }`.
+
+### `POST /api/connectors` — add from a preset
+
+Body, one of:
+```json
+{ "preset": "github", "id": "github", "mode": "remote", "tokenSource": "manual", "token": "github_pat_…" }   // mode: remote|local; tokenSource: manual|gh-cli
+{ "preset": "slack", "token": "xoxp-…" }
+{ "preset": "gmail", "clientId": "….apps.googleusercontent.com", "clientSecret": "…" }
+{ "preset": "remote", "id": "my-server", "url": "https://…/mcp", "headers": {}, "bearerToken": "…" }   // no token: MCP OAuth
+{ "preset": "local", "id": "my-tool", "command": "npx", "args": ["-y", "some-mcp-server"], "env": {} }
+```
+- `201` `{ connector: ConnectorView }` · `400` invalid, duplicate or reserved id (a built-in's id, `external`, `doom`, `apply`) · `409` no store.
+
+### `PATCH /api/connectors/:id` — change
+
+Body: `{ title?, policy?: { disabledTools?, writeTools? }, token?, clientId?, clientSecret? }`. `writeTools` on Slack or Gmail is refused (`400`): they are read-only.
+
+### `DELETE /api/connectors/:id` — remove it and its credentials
+
+### `POST /api/connectors/:id/test` — connect and list tools
+
+Opens the server with its credentials, lists its tools, stores the list (names, descriptions, read-only hints) and returns `{ connector }` (built-ins: `{ tools }`). `409` when it needs a sign-in, `502` when it cannot connect (redacted message).
+
+### `GET /api/connectors/import` · `POST /api/connectors/import`
+
+`GET` lists the MCP servers configured for Claude Code on this machine, read-only, credentials masked: `{ servers: [{ key, name, source, from, transport, suggestedId, imported }] }`. `POST { key, id? }` imports one (`201 { connector }`).
+
+### `POST /api/connectors/:id/oauth/start` — begin a sign-in
+
+Gmail (Google, PKCE, `gmail.readonly`) or a remote server using MCP OAuth (discovery, dynamic client registration, PKCE). Returns `{ authorizationUrl }` to open in the browser, or `{ connected: true }`. The request's `Host` must be a loopback name (`400` otherwise).
+
+### `GET /api/connectors/oauth/callback` — where the provider sends the browser back
+
+Completes the sign-in for a pending `state` (single use, 10 minutes) and answers with a short HTML page.
 
 ## Models
 
@@ -143,7 +187,7 @@ Retires (does not delete — lineage is preserved). Fails if it would empty the 
 Live events pushed to the dashboard (one JSON message per event):
 - `round.status` `{ runId, roundIdx, status }` — `preparing`/`running`/`judging`/`scoring`/`complete`.
 - `agent.status` `{ runId, agentId, status }` — `pending`/`running`/`done`/`failed`.
-- `agent.activity` `{ runId, agentId, detail }` — current activity text.
+- `agent.activity` `{ runId, agentId, detail }` — current activity text. Connector calls arrive here too, as tool items with ids `connector:<callId>`.
 - `agent.usage` `{ runId, agentId, tokensIn, tokensOut, costUsd }` — incremental usage.
 - `round.scored` `{ runId, roundIdx, scores: [...], team? }` — rank-ordered scores; collaboration rounds add `team: { score, status }`.
 - `channel.message` `{ runId, roundIdx, seq, author, agentId, target, postedAt, body }` — a new team-channel entry the moment the engine reads it (body cut at 4,000 characters; the channel endpoint has it whole).

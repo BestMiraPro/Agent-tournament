@@ -25,6 +25,7 @@ import { buildJudgingEnvelope, evidenceFromAudit, type JudgeCallRecord } from '.
 import type { HostCapacity } from '../runtime/docker/capacity.js'
 import { OUTPUT_README } from '../runtime/team-prompt.js'
 import { teamOutputView, teamScoreView } from './team-views.js'
+import { registerConnectorRoutes, type ConnectorRouteDeps } from './connectors-api.js'
 
 export interface SpecDefaults {
   workspaceRoot?: string | null
@@ -63,6 +64,8 @@ export interface ApiDeps {
   hasLiveBudget?: (runId: string) => boolean
   /** Docker's capacity reading and what this process has reserved, for setup estimates. */
   capacity?: () => Promise<{ host: HostCapacity; reserved: { memoryBytes: number; cpus: number } }>
+  /** The Connectors page's routes; absent in harnesses that do not need them. */
+  connectors?: ConnectorRouteDeps
 }
 
 /** Bridge callbacks that report upstream stream health as its own event, never as agent state. */
@@ -209,6 +212,7 @@ export function specForResume(run: RunRow, defaults?: SpecDefaults): RunSpec {
     seedStrategiesDir: null,
     serverUrl: defaults?.serverUrl ?? null,
     criteria: run.initialCriteria,
+    connectors: (cfg.connectors ?? []).map((c) => ({ id: c.id, writeTools: [...c.writeTools] })),
   }
 }
 
@@ -410,6 +414,7 @@ function roundDetail(repos: Repos, round: RoundRow) {
 
 export function buildApi(deps: ApiDeps): FastifyInstance {
   const app = Fastify({ logger: false })
+  if (deps.connectors) registerConnectorRoutes(app, deps.connectors)
 
   /**
    * Model discovery, cached 60s on success only.
@@ -553,6 +558,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           })
         }
       }
+      // Connector calls are host-side evidence: the durable audit first, then the live cache.
+      if (composed.onConnectorEvent) record.bridges.push({ stop: composed.onConnectorEvent(bridgeEmit) })
       return reply.code(201).send({ runId, warnings: composed.warnings })
     }
     let legacy: { name: string; goal: string; criteria?: string | null }
@@ -1133,6 +1140,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           })
         }
       }
+      // Connector calls are host-side evidence: the durable audit first, then the live cache.
+      if (composed.onConnectorEvent) record.bridges.push({ stop: composed.onConnectorEvent(bridgeEmit) })
       return record
     } catch (e) {
       await composed.cleanup().catch(() => {})

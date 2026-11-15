@@ -120,6 +120,18 @@ export class ActivityCache {
         }
         return event
       }
+      case 'agent.connector': {
+        // Shown as a tool item on the agent's card; the browser receives it as ordinary activity.
+        if (!event.call) return null
+        const c = event.call
+        const label = c.status === 'ok' ? 'ok' : c.status.replace('_', ' ')
+        const stored = this.upsert(event.runId, event.agentId, {
+          id: `connector:${c.id}`, sessionId: '', kind: 'tool', status: c.outcome === 'completed' ? 'completed' : 'error',
+          summary: `connector ${event.connectorId}: ${c.tool} — ${label} (${c.responseBytes} B, ${c.durationMs} ms)`,
+          observedAt: event.at,
+        })
+        return { type: 'agent.activity', runId: event.runId, agentId: event.agentId, kind: 'tool', detail: stored.summary, item: { ...stored } }
+      }
       case 'agent.activity': {
         const input = event.item
         if (!input) {

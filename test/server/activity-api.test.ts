@@ -72,6 +72,44 @@ describe('live activity in the run snapshot', () => {
     await disposeRunRecord(registry.get(runId)!)
   })
 
+  test('connector calls reach the live feed as tool activity, and stop with the run', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: sse([]) })))
+    const emitted: EngineEvent[] = []
+    const registry = new RunRegistry()
+    let sink: ((e: Extract<EngineEvent, { type: 'agent.connector' }>) => void) | null = null
+    const repos = makeRepos(openDb(':memory:'))
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('must not be called for specs') }) as never,
+      registry,
+      emit: (e: EngineEvent) => emitted.push(e),
+      composeWith: (async () => ({
+        config: { ...DEFAULT_CONFIG, populationSize: 1, sandbox: 'local', roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }] },
+        sandbox: {}, provider: {}, runner: {}, planFor: null,
+        serverHandle: { baseUrl: 'http://127.0.0.1:4096' }, shardServers: [],
+        sessionMap: new Map(), sessionHook: () => {}, warnings: [], capacity: null, cleanup: async () => {},
+        onConnectorEvent: (s: typeof sink) => { sink = s; return () => { sink = null } },
+      })) as never,
+    } as never)
+    const res = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: { name: 'l', goal: 'g', sandbox: 'local', workspaceRoot: '/tmp/w', roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }] },
+    })
+    const { runId } = JSON.parse(res.body) as { runId: string }
+    expect(sink).not.toBeNull()
+    sink!({
+      type: 'agent.connector', runId, agentId: 'agent-1', connectorId: 'slack', at: 5,
+      call: { id: 'c1', tool: 'search_messages', outcome: 'completed', status: 'ok', argKeys: ['query'], requestBytes: 10, responseBytes: 99, durationMs: 3 },
+    })
+    const live = emitted.find((e) => e.type === 'agent.activity') as Extract<EngineEvent, { type: 'agent.activity' }>
+    expect(live.item).toMatchObject({ id: 'connector:c1', agentId: 'agent-1', kind: 'tool', status: 'completed' })
+    const snap = JSON.parse((await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).body)
+    expect(snap.activity.agents['agent-1'].items[0].summary).toBe('connector slack: search_messages — ok (99 B, 3 ms)')
+    await disposeRunRecord(registry.get(runId)!)
+    expect(sink).toBeNull()
+  })
+
   test('a lost upstream stream is reported as telemetry, not as an agent failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401, body: sse([]) })))
     const emitted: EngineEvent[] = []

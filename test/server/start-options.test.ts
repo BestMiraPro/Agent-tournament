@@ -33,6 +33,8 @@ describe('resolveStartOptions', () => {
       dockerSandbox: true,
       // The app on the Docker host, reaching containers through ports published on loopback.
       dockerReach: 'loopback',
+      // Beside the workspaces, never under them.
+      connectorsDir: join(root, 'runs', 'connectors'),
     })
   })
 
@@ -41,10 +43,12 @@ describe('resolveStartOptions', () => {
       '--port', '5000', '--host', '0.0.0.0', '--db', ':memory:', '--population', '3',
       '--workspace-root', '/elsewhere', '--auth-file', '/creds.json',
       '--server-url', 'http://127.0.0.1:4096', '--no-open', '--no-docker-sandbox', '--docker-reach', 'bridge',
+      '--connectors-dir', '/secure/connectors',
     ], { files: [opencodeAuth] })
     expect(o).toMatchObject({
       port: 5000, host: '0.0.0.0', dbPath: ':memory:', population: 3, workspaceRoot: '/elsewhere',
       authFile: '/creds.json', serverUrl: 'http://127.0.0.1:4096', open: false, dockerSandbox: false, dockerReach: 'bridge',
+      connectorsDir: '/secure/connectors',
     })
   })
 

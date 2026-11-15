@@ -559,3 +559,12 @@ circle.chart-line--min { fill: var(--failed); }
 @media (max-width: 760px) {
   .teamoutput__body { grid-template-columns: 1fr; }
 }
+/* Connectors */
+.connectors { display: grid; gap: 1rem; max-width: 60rem; }
+.connector { display: grid; gap: .5rem; padding: .75rem; border: 1px solid var(--line); border-radius: var(--r); background: var(--panel); }
+.connector h2 { margin: 0; font-size: .95rem; }
+.connector .help { font-size: .74rem; color: var(--text-faint); margin: 0; }
+.connector__actions, .connector__token { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.connector-tools__locked td { color: var(--text-faint); }
+.connector-picker { display: grid; gap: .35rem; }
+.connector-picker__write { display: block; margin-left: 1.5rem; font-weight: 400; }

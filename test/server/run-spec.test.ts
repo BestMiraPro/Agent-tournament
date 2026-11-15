@@ -38,6 +38,24 @@ describe('seedStrategiesDir', () => {
   })
 })
 
+describe('connectors', () => {
+  const local = { ...base, sandbox: 'local', workspaceRoot: process.platform === 'win32' ? 'C:\\ws' : '/ws' }
+
+  test('default to none, and land in the run config as ids and write opt-ins only', () => {
+    expect(parseRunSpec(base).connectors).toEqual([])
+    const spec = parseRunSpec({ ...local, connectors: [{ id: 'gh', writeTools: ['create_issue', 'create_issue'] }, { id: 'slack' }] })
+    expect(spec.connectors).toEqual([{ id: 'gh', writeTools: ['create_issue'] }, { id: 'slack', writeTools: [] }])
+    expect(runConfigFor(spec).connectors).toEqual(spec.connectors)
+  })
+
+  test('are refused for mock runs, twice, or under an id that is not a plain connector id', () => {
+    expect(() => parseRunSpec({ ...base, connectors: [{ id: 'gh' }] })).toThrow(/local or docker/)
+    expect(() => parseRunSpec({ ...local, connectors: [{ id: 'gh' }, { id: 'gh' }] })).toThrow(/listed twice/)
+    expect(() => parseRunSpec({ ...local, connectors: [{ id: 'external' }] })).toThrow(/reserved/)
+    expect(() => parseRunSpec({ ...local, connectors: [{ id: 'Git_Hub' }] })).toThrow(/connector id/)
+  })
+})
+
 describe('isolation', () => {
   const abs = process.platform === 'win32' ? 'C:\\ws' : '/ws'
   // Container placement and isolation choices are the tournament's; a team has one protected container.

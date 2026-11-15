@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { z } from 'zod'
-import { DEFAULT_CONFIG } from '../core/types.js'
+import { DEFAULT_CONFIG, type RunConnector } from '../core/types.js'
+import { assertConnectorId } from '../connectors/types.js'
 import { MIN_CONTAINER_MEMORY, MIN_CONTAINER_MEMORY_BYTES, parseMemoryLimit } from '../core/memory.js'
 
 const rosterEntry = z.object({
@@ -64,6 +65,14 @@ const schema = z.object({
   seedStrategiesDir: z.string().nullable().default(null),
   serverUrl: z.string().nullable().default(null),
   criteria: z.string().nullable().default(null),
+  // Ids and tool names only; whether each exists, connects and permits the opt-ins is checked at composition.
+  connectors: z
+    .array(z.object({
+      id: z.string().min(1).max(32),
+      writeTools: z.array(z.string().min(1).max(128)).max(100).default([]),
+    }))
+    .max(16)
+    .default([]),
 })
 
 export type RunSpecInput = z.input<typeof schema>
@@ -96,6 +105,8 @@ export interface RunSpec {
   seedStrategiesDir: string | null
   serverUrl: string | null
   criteria: string | null
+  /** Connectors enabled for the run; absent means none. */
+  connectors?: RunConnector[]
 }
 
 /**
@@ -127,6 +138,15 @@ export function parseRunSpec(input: unknown): RunSpec {
   const seedStrategiesDir = p.seedStrategiesDir && p.seedStrategiesDir.trim() !== '' ? p.seedStrategiesDir.trim() : null
   if (seedStrategiesDir && !path.isAbsolute(seedStrategiesDir)) {
     throw new Error('seedStrategiesDir must be an absolute path')
+  }
+  if (p.connectors.length > 0 && p.sandbox === 'mock') {
+    throw new Error('connectors need a local or docker run: mock agents do not call tools')
+  }
+  const seen = new Set<string>()
+  for (const c of p.connectors) {
+    assertConnectorId(c.id)
+    if (seen.has(c.id)) throw new Error(`connector "${c.id}" is listed twice`)
+    seen.add(c.id)
   }
   const containerMemory = p.containerMemory ?? DEFAULT_CONFIG.containerMemory
   let containerMemoryBytes: number
@@ -209,5 +229,6 @@ export function parseRunSpec(input: unknown): RunSpec {
     seedStrategiesDir,
     serverUrl: p.serverUrl,
     criteria: p.criteria,
+    connectors: p.connectors.map((c) => ({ id: c.id, writeTools: [...new Set(c.writeTools)] })),
   }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from 'react'
 import { DEFAULT_CONFIG } from '../../../src/core/types.js'
-import { getCapacity, listModels } from '../api.js'
+import { getCapacity, listConnectors, listModels, type ConnectorList } from '../api.js'
+import { pickerChoices, runConnectorsFrom, type PickerChoice, type PickerState } from '../lib/connectors.js'
 import { setupEstimate, teamSetupEstimate, type CapacityInfo, type PlacementPlan } from '../lib/placement.js'
 import type { RosterEntry } from '../lib/roster.js'
 import { RosterBuilder } from './RosterBuilder.js'
@@ -26,6 +27,55 @@ export interface RunSetupValue {
   containerCpus: number
   isolation: 'protected' | 'shared'
   pricingText: string
+  /** Connectors the run's agents get, with the write tools it opts into; ignored for mock runs. */
+  connectors: { id: string; writeTools: string[] }[]
+}
+
+/**
+ * Which connectors this run's agents get. Write tools appear only where the connector permits them, and each is
+ * off until ticked here; read-only connectors offer none.
+ */
+export function ConnectorPicker({ choices, state, disabled, onChange }: {
+  choices: PickerChoice[]
+  state: PickerState
+  disabled: boolean
+  onChange: (next: PickerState) => void
+}) {
+  if (choices.length === 0) return <p className="help">No connectors yet. Add them on the Connectors page.</p>
+  return (
+    <div className="connector-picker">
+      {choices.map((c) => {
+        const entry = state[c.id] ?? { enabled: false, writeTools: [] }
+        return (
+          <div key={c.id}>
+            <label>
+              <input
+                type="checkbox"
+                checked={entry.enabled}
+                disabled={disabled}
+                onChange={() => onChange({ ...state, [c.id]: { ...entry, enabled: !entry.enabled } })}
+              />{' '}
+              {c.title} <code>{c.id}</code>{c.locked ? ' — read-only' : ''}{c.connected ? '' : ' — not connected yet'}
+            </label>
+            {entry.enabled && c.permittedWriteTools.map((tool) => (
+              <label key={tool} className="connector-picker__write">
+                <input
+                  type="checkbox"
+                  checked={entry.writeTools.includes(tool)}
+                  disabled={disabled}
+                  onChange={() => onChange({
+                    ...state,
+                    [c.id]: { ...entry, writeTools: entry.writeTools.includes(tool) ? entry.writeTools.filter((t) => t !== tool) : [...entry.writeTools, tool] },
+                  })}
+                />{' '}
+                allow write tool <code>{tool}</code> in this run
+              </label>
+            ))}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 /** Before Start: which agents share which container, the summed ceilings, and the estimated fit. */
@@ -102,6 +152,18 @@ export function RunSetup({ busy, error, onCreate }: {
     return () => { alive = false }
   }, [sandbox])
   const [pricingText, setPricingText] = useState('')
+  // Read once; a failure only hides the picker's choices.
+  const [connectorList, setConnectorList] = useState<ConnectorList | null>(null)
+  const [connectorState, setConnectorState] = useState<PickerState>({})
+  useEffect(() => {
+    let alive = true
+    listConnectors().then(
+      (l) => { if (alive) setConnectorList(l) },
+      () => { if (alive) setConnectorList(null) },
+    )
+    return () => { alive = false }
+  }, [])
+  const connectorChoices = pickerChoices(connectorList)
   // Known-models is a copy-paste aid only: failure or an empty list hides the
   // datalist options and free-text inputs keep working.
   const [models, setModels] = useState<string[] | null>(null)
@@ -260,6 +322,13 @@ export function RunSetup({ busy, error, onCreate }: {
           </>
         )}
       </section>
+      <section aria-labelledby="setup-h-connectors">
+        <h2 id="setup-h-connectors">Connectors</h2>
+        {sandbox === 'mock'
+          ? <p className="help">Mock agents do not call tools; connectors apply to local and docker runs.</p>
+          : <ConnectorPicker choices={connectorChoices} state={connectorState} disabled={busy} onChange={setConnectorState} />}
+        <p className="help">Agents reach connectors through the dashboard&apos;s tool bridge, which holds the credentials and records every call. Slack and Gmail are read-only and locked.</p>
+      </section>
       <details>
         <summary>Advanced</summary>
         {collaboration && <p className="help">Collaboration never selects or breeds, so elites, bands and crossover do not apply, and every agent runs at once.</p>}
@@ -310,6 +379,7 @@ export function RunSetup({ busy, error, onCreate }: {
           containerCpus: Number(containerCpus),
           isolation,
           pricingText,
+          connectors: sandbox === 'mock' ? [] : runConnectorsFrom(connectorState, connectorChoices),
         })}
       >
         {busy ? 'Creating…' : 'Create run'}

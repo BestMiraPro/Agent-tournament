@@ -361,6 +361,7 @@ export class TournamentEngine {
           serializeCompetitorProfile(p.genome, {
             label: p.agent.label,
             readableDirs: readableDirsFor(config),
+            connectorIds: (config.connectors ?? []).map((c) => c.id),
           }),
         )
         return h
