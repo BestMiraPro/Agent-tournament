@@ -75,6 +75,33 @@ A seed folder (`seedDir`, API only) is copied into every agent's workspace befor
 
 **Export → Markdown report** (or `GET /api/runs/:runId/export?format=md`, or `--report <path>` on the CLI) writes one file with the goal, a leaderboard row per round, the winner of the last scored round, the lineage of its strategy back to a seed, the strategy itself, the judge's rationale and the winning submission. It is meant to be read without the dashboard, by a person or by another agent.
 
+## Web search and page fetch for agents
+
+With **Web access** on in the setup form (the default), agents in **local** dashboard runs get two tools served by the app itself: `arena_web_search` (titles, URLs and snippets) and `arena_web_fetch` (one public page as text). OpenCode's own `webfetch` and `websearch` stay off for them, so their tool searches are the counted, recorded ones. Docker workers stay offline in this version, and CLI runs do not get the tools. In local mode an agent can still run `curl` from its shell: local runs have no isolation, so the toggle decides which tools are offered, not what the network allows.
+
+**Which search provider answers.** LangSearch, when its key is configured. Without a key, and whenever LangSearch fails (bad key, rate limit, used-up daily allowance, server error, timeout), the call goes to Exa's public search endpoint instead, without a key or with yours if `EXA_API_KEY` is set. The setup form's status line shows which applies; each result says which provider answered.
+
+**Getting a LangSearch key** (free plan, no card, as of November 15, 2026): sign up at [langsearch.com](https://langsearch.com), open the dashboard, and create an API key. The free plan has a daily token allowance, shown in the dashboard and reset at 00:00 UTC, and 5 requests per second; bursts beyond either fall back to Exa automatically.
+
+**Where to put it.** In a `.env` file in the repository folder (git ignores it):
+
+```
+LANGSEARCH_API_KEY=your-key
+EXA_API_KEY=optional-exa-key
+```
+
+With `npm start` the app reads the file on every search, so no restart is needed. `docker compose` passes both through from the same file; run `docker compose up -d` again after adding them. An environment variable of the same name takes precedence over the file. The keys stay in the app: they are not written into agent workspaces or passed to the OpenCode server the app starts, whose environment local agents' shell commands inherit, and never appear in the database, exports or events.
+
+**What is enforced:**
+
+- Per agent, per run: 200 searches and 500 page fetches. Per run in total: 2,000 searches and 5,000 fetches. A refused call is still recorded.
+- Pages: http and https only, at public addresses. Loopback, private networks, link-local and cloud metadata (`169.254.169.254` and others), CGNAT, multicast and reserved ranges are refused, in IPv4 and IPv6 spellings. The name is resolved once per hop and the connection goes to the checked address, so a DNS answer cannot change in between. At most 5 redirects, each checked again; 20 seconds per fetch; reading stops after 2 MiB; at most 64,000 characters returned. HTML becomes readable text; text, JSON and XML are returned as they are; PDFs, images and other binaries are refused.
+- When the run stops, its tokens stop working immediately.
+
+**Evidence.** Every call is a `network` record in the activity audit, from the source `host_tool`: the query, or the page's host and path (never its query string), the provider and why LangSearch did not answer if it did not, the status, bytes and duration. It is sealed with the round's evidence the grader sees, and the call shows on the agent's card as it happens. OpenCode's own event stream also lists the tool call.
+
+**OpenCode version.** Local agents reach the tools through `.opencode/opencode.json` in their workspace, in the format of OpenCode 1.18.21 (the version the agent image pins and this was checked against). Later OpenCode releases document a different MCP configuration format; if `arena_web_search` does not appear in a local agent's tool calls, check `opencode --version` on the host.
+
 ## CLI flags
 
 | Flag | Default | Notes |

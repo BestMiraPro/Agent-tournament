@@ -47,7 +47,11 @@ Live check, 2026-11-15: two keyless calls to `https://mcp.exa.ai/mcp` (`tools/li
 `tools/call web_search_exa`) answered in under 0.5 s over IPv4 with `Title:/URL:/Published:/
 Highlights:` blocks separated by `---`. Its current schema lists `query` and `objective` as required;
 OpenCode 1.18.21's own argument set (`query`, `type`, `numResults`, `livecrawl`) is still accepted.
-LangSearch was not called: that needs an account, which this work does not create.
+LangSearch was called once with an obviously invalid key (no account was created): it refused, the
+client classified it `unauthorized` and Exa answered. An end-to-end check through the loopback
+endpoint (SDK client → `web_search` via keyless Exa, `web_fetch` of an RFC page over TLS through the
+pinned lookup, `web_fetch http://localhost:4300/…` refused as `blocked_host`) produced three records
+with the right run, agent, outcome and provider.
 
 ## 2. Shape
 
@@ -83,8 +87,9 @@ src/connectors/web/
   returns only it, so no second resolution can rebind. TLS still verifies the certificate against
   the host name. A fresh agent per hop (`agent: false`), so no pooled socket or proxy is reused.
 - **Redirects:** followed manually, at most 5; every hop is re-validated, re-resolved and re-pinned.
-- **Caps:** 2 MiB of body after decompression (gzip/deflate/br decoded with the cap applied to the
-  output), 20 s for the whole call including redirects, 64,000 characters of text returned.
+- **Caps:** reading stops after 2 MiB of body, counted after decompression (gzip/deflate/br, so a
+  compression bomb stops at the cap too), and the result says it was cut; 20 s for the whole call
+  including lookups, redirects and body reads; 64,000 characters of text returned.
 - **Content:** HTML/XHTML converted to text; `text/*`, JSON and XML passed through; everything else
   (PDF, images, archives, octet-stream) refused. A missing type is sniffed: NUL bytes ⇒ refused.
 - **HTML conversion: in-house** (`html-to-text.ts`, ~150 lines, linear tokenizer). It drops
@@ -114,8 +119,8 @@ src/connectors/web/
 
 `LANGSEARCH_API_KEY` and `EXA_API_KEY`, read by the app from its environment, or else from the
 repository folder's `.env` (gitignored; the file `docker compose` already reads, and compose passes
-both through). Read at each run composition and status request, so a key added to `.env` applies to
-the next run without a restart. Keys never reach worker config, mounts, env or argv, SQLite,
+both through). Read on every search call and status request, so a key added to `.env` applies
+without a restart. Keys never reach worker config, mounts, env or argv, SQLite,
 exports, logs or events: the OpenCode server the app spawns has both names scrubbed from its
 environment (local agents' shell commands inherit that environment), provider errors are reduced to
 fixed reason codes, and tests assert the key string appears in no record, result or error.
@@ -154,7 +159,9 @@ reports the MCP tool call (as `arena_web_search: <query>`); the host record is t
   one remote MCP server named `arena` with that URL, the bearer header, `oauth: false` and a 60 s
   timeout. OpenCode loads `.opencode/opencode.json` per directory instance (verified in the 1.18.21
   source), names the tools `arena_web_search` / `arena_web_fetch`, and asks permission under those
-  names. `.opencode` is already excluded from the judged file manifest.
+  names. `.opencode` is already excluded from the judged file manifest. Later OpenCode releases
+  document a different MCP config shape (`mcp.servers`, a timeout object); local mode uses whatever
+  OpenCode the host has, so the operator guide says to check the version if the tools do not appear.
 - The competitor profile, for local runs, allows `arena_web_search` and `arena_web_fetch` when web
   access is on, and denies OpenCode's built-in `websearch` either way, so every search a local agent
   makes through tools is the audited, limited one. `webfetch: deny` is unchanged. Docker profiles are

@@ -18,7 +18,8 @@ Body (the full run spec; all fields except `name`+`goal`+`roster` are optional w
   "budget": { "maxRunTokens": 1000000, "maxRoundTokens": 200000, "maxAgentTokens": 50000 },
   "selection": { "crossoverPct": 0.2, "eliteCount": 2, "topPct": 0.3, "bottomPct": 0.2, "diversityFloor": true },
   "concurrency": 8,
-  "pricing": { "model/id": { "inPerM": 1, "outPerM": 2, "cacheReadPerM": 0.1, "cacheWritePerM": 0.2 } }
+  "pricing": { "model/id": { "inPerM": 1, "outPerM": 2, "cacheReadPerM": 0.1, "cacheWritePerM": 0.2 } },
+  "webAccess": true                        // optional, default true: local workers get the host's web tools
 }
 ```
 - `201` `{ runId: string, warnings?: string[] }` — roster counts must sum to `populationSize` (derived from roster).
@@ -53,6 +54,13 @@ Body: a partial of `{ roster, budget, judge, selection, concurrency, pricing }` 
 Spawns an opencode server (60s success-only cache) to discover models.
 - `200` `{ models: string[] }`
 - `502` — opencode server failed to start.
+
+## Web search
+
+### `GET /api/web-search` — which search provider the web tools would use
+
+Read from the app's keys (environment, else the repository `.env`) on every request; never returns a key.
+- `200` `{ primary: { id: "langsearch", name: "LangSearch", configured: boolean }, fallback: { id: "exa", name: "Exa", mode: "keyed" | "keyless" } }`
 
 ## Rounds
 
@@ -127,7 +135,7 @@ Retires (does not delete — lineage is preserved). Fails if it would empty the 
 Live events pushed to the dashboard (one JSON message per event):
 - `round.status` `{ runId, roundIdx, status }` — `preparing`/`running`/`judging`/`scoring`/`complete`.
 - `agent.status` `{ runId, agentId, status }` — `pending`/`running`/`done`/`failed`.
-- `agent.activity` `{ runId, agentId, detail }` — current activity text.
+- `agent.activity` `{ runId, agentId, detail }` — current activity text. A host web tool call (`web_search`/`web_fetch`) arrives as one of these, with an item whose id starts with `web:`.
 - `agent.usage` `{ runId, agentId, tokensIn, tokensOut, costUsd }` — incremental usage.
 - `round.scored` `{ runId, roundIdx, scores: [...] }` — rank-ordered scores.
 - `round.complete` `{ runId, roundIdx, budgetBreach }` — round finished.
