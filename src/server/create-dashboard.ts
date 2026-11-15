@@ -18,6 +18,7 @@ import { sweepOrphanRuntimeDirs } from '../runtime/runtime-dirs.js'
 import { buildApi } from './api.js'
 import { ActivityCache } from './activity.js'
 import { AuditCollector } from '../engine/audit.js'
+import { MOCK_CHANNEL_LIMITS } from '../engine/channel.js'
 import { bridgeSeams, composeRun, defaultSeams, type ComposedRun, type RunIdHolder } from './compose-run.js'
 import type { DockerReach } from '../runtime/docker/container.js'
 import type { RunSpec } from './run-spec.js'
@@ -116,6 +117,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     seedStrategy: defaultSeedStrategy,
     onEvent: emit,
     audit: new AuditCollector(repos, { provenance: { sandbox: 'mock', isolation: null, toolchainId: null } }),
+    channel: MOCK_CHANNEL_LIMITS,
   })
 
   const manager = new RunManager(engine, emit)

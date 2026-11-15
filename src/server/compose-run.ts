@@ -23,7 +23,9 @@ import {
   readRuntimeCatalog,
   type RuntimeCatalog,
 } from '../runtime/opencode/discovery.js'
-import { writeGraderProfile } from '../runtime/opencode/grader-profile.js'
+import { sealedArtifactWriter, writeGraderProfile } from '../runtime/opencode/grader-profile.js'
+import { MOCK_CHANNEL_LIMITS, type ChannelLimits } from '../engine/channel.js'
+import type { SealedArtifactWriter } from '../engine/collaboration.js'
 import { attachServer, startServer, type ServerHandle } from '../runtime/opencode/server.js'
 import { assertHostCapacity, makeClientResolver, sweepBeforeRun, validateRosterModels } from '../cli.js'
 import { ensureImage, readImageInventory } from '../runtime/docker/image.js'
@@ -285,6 +287,10 @@ export interface ComposedRun {
    * attempt. Absent for mock and local runs, which hold no such state.
    */
   releasePopulation?: (() => Promise<void>) | null
+  /** Collaboration: channel polling and bounds for this runtime (mock runs read it often). */
+  channel?: Partial<ChannelLimits>
+  /** Collaboration: where the grader opens a round's sealed output (absent: it is inlined). */
+  sealedArtifacts?: SealedArtifactWriter
   cleanup: () => Promise<void>
 }
 
@@ -411,6 +417,7 @@ export async function composeRun(
       shardServers: [],
       sessionMap, sessionHook, warnings,
       capacity: null,
+      channel: MOCK_CHANNEL_LIMITS,
       cleanup: async () => {},
     }
   }
@@ -852,6 +859,7 @@ export async function composeRun(
         onShardServer,
         toolchainId,
         sessionMap, sessionHook, warnings,
+        sealedArtifacts: sealedArtifactWriter(graderDirectory),
         capacity: {
           committed: config.workflow === 'collaboration' ? 1 : Math.min(config.maxContainers, spec.population),
           maxContainers: config.maxContainers,
@@ -884,6 +892,7 @@ export async function composeRun(
       shardServers: [{ baseUrl: '' }],
       sessionMap, sessionHook, warnings,
       capacity: null,
+      sealedArtifacts: sealedArtifactWriter(graderDirectory),
       cleanup: async () => {
         await server.stop().catch(() => {})
       },

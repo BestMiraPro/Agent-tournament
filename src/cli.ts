@@ -6,6 +6,8 @@ import { openDb } from './db/open.js'
 import { makeRepos } from './db/repos.js'
 import { recoverIncompleteRounds } from './db/recover.js'
 import { AuditCollector } from './engine/audit.js'
+import { MOCK_CHANNEL_LIMITS } from './engine/channel.js'
+import type { SealedArtifactWriter } from './engine/collaboration.js'
 import { TournamentEngine } from './engine/driver.js'
 import { loadSeedStrategies, seedStrategyFrom } from './engine/seed-strategy.js'
 import { Reflector } from './evolution/reflect.js'
@@ -443,6 +445,8 @@ interface RealDeps {
   planFor: ((agentIds: readonly string[]) => Promise<void>) | null
   /** Non-null under Docker only: recycles workers between rounds (see compose-run). */
   releasePopulation: (() => Promise<void>) | null
+  /** Where the grader opens a collaboration round's sealed output. */
+  sealedArtifacts: SealedArtifactWriter | null
 }
 
 /**
@@ -548,6 +552,7 @@ async function buildRealDeps(
     runner: composed.runner,
     planFor: composed.planFor,
     releasePopulation: composed.releasePopulation ?? null,
+    sealedArtifacts: composed.sealedArtifacts ?? null,
   }
 }
 
@@ -576,6 +581,7 @@ export async function runTournamentCli(
     let runner: AgentRunner
     let planFor: ((agentIds: readonly string[]) => Promise<void>) | null = null
     let releasePopulation: (() => Promise<void>) | null = null
+    let sealedArtifacts: SealedArtifactWriter | null = null
     const runIdHolder: RunIdHolder = { value: '' }
     // Read first: a wrong folder should cost no setup.
     const seedStrategies = opts.seedStrategiesDir ? await loadSeedStrategies(opts.seedStrategiesDir) : []
@@ -599,6 +605,7 @@ export async function runTournamentCli(
       runner = built.runner
       planFor = built.planFor
       releasePopulation = built.releasePopulation
+      sealedArtifacts = built.sealedArtifacts
       stopServer = built.server.stop
 
       // Pre-flight: fail fast and legibly before any agent runs or money is spent,
@@ -641,6 +648,9 @@ export async function runTournamentCli(
       seedStrategy: seedStrategyFrom(seedStrategies),
       preparePopulation: planFor ?? undefined,
       releasePopulation: releasePopulation ?? undefined,
+      // A mock team finishes in milliseconds; a real one is read every couple of seconds.
+      channel: mode === 'real' ? undefined : MOCK_CHANNEL_LIMITS,
+      sealedArtifacts: sealedArtifacts ?? undefined,
       audit: new AuditCollector(repos, {
         provenance: {
           sandbox: config.sandbox,

@@ -4,6 +4,7 @@ import { readRoundAudit, type RoundAuditView } from '../engine/audit.js'
 // One shape, one type. The local copy had already drifted: it declared durationMs as
 // non-nullable while the row it is built from is nullable.
 import { submissionView, type SubmissionView } from './submission-view.js'
+import { teamRoundView, type TeamRoundView } from './team-views.js'
 
 /** RFC 4180: quote-and-escape when the field has comma/quote/newline/CR, else
  * raw. null/undefined and empty string render as empty (no quotes). */
@@ -30,7 +31,8 @@ export interface JsonDump {
   run: RunRow
   config: RunConfig
   /** Each round carries its audit and grading record exactly as the endpoints return them. */
-  rounds: (RoundRow & { entries: ExportEntry[]; audit: RoundAuditView; judging: unknown[] })[]
+  /** Collaboration rounds also carry `team`: the score, the sealed output manifest and the channel. */
+  rounds: (RoundRow & { entries: ExportEntry[]; audit: RoundAuditView; judging: unknown[]; team: TeamRoundView | null })[]
   agents: AgentRow[]
   genomes: GenomeRow[]
 }
@@ -91,6 +93,7 @@ export function buildJsonDump(runId: string, repos: Repos): JsonDump | null {
       entries,
       audit: readRoundAudit(repos, round.id),
       judging: repos.judgingAudits.forRound(round.id).map((row) => row.payload),
+      team: teamRoundView(repos, round.id),
     }
   })
   const agents = repos.agents.listAll(runId)

@@ -111,6 +111,9 @@ export const DEFAULT_CHANNEL_LIMITS: ChannelLimits = {
   maxFileChars: 1024 * 1024,
 }
 
+/** Mock runs finish in milliseconds, so their channel is read often and never held back. */
+export const MOCK_CHANNEL_LIMITS: Partial<ChannelLimits> = { pollMs: 20, minGapMs: 0 }
+
 /** Bodies stored per entry; the file keeps everything, the database a bounded copy. */
 export const MAX_STORED_BODY_CHARS = 20_000
 
