@@ -1,9 +1,10 @@
 import { resolve as resolvePath } from 'node:path'
 import { describeFailure, describeProviderError, errorTextFor, failureFromText, type AgentFailure } from '../../core/failure.js'
-import { serializeGenome } from '../../core/genome.js'
+import { serializeGenome, teamProfileName } from '../../core/genome.js'
 import type { QuiesceStatus } from '../../engine/capture.js'
 import { deadlineTimer, type AgentRunContext, type AgentRunner, type AgentRunResult } from '../agent-runner.js'
 import type { AgentHandle, Sandbox } from '../sandbox.js'
+import { buildTeamPrompt, buildTeamSteeringPrompt } from '../team-prompt.js'
 import { OpenCodeTimeoutError, type OpenCodeClient } from './client.js'
 import { splitModelId } from './model-id.js'
 
@@ -161,12 +162,39 @@ export class OpenCodeAgentRunner implements AgentRunner {
     return 'previous round is still active or remote termination is unconfirmed'
   }
 
-  /** Per-invocation guard permits unrelated workers within the admitted round. */
-  private assertAvailable(agentId: string, workspacePath: string): void {
+  /**
+   * Per-invocation guard permits unrelated workers within the admitted round. Members of a
+   * collaboration team share their folder by design, so only a non-team run is refused for
+   * a folder another run is still using.
+   */
+  private assertAvailable(agentId: string, workspacePath: string, shared: boolean): void {
     for (const run of this.live.values()) {
-      if (run.agentId === agentId || workspaceKey(run.directory) === workspaceKey(workspacePath)) {
+      const sameFolder = workspaceKey(run.directory) === workspaceKey(workspacePath)
+      if (run.agentId === agentId || (sameFolder && !(shared && run.shared))) {
         throw new Error(`agent ${run.agentId} is still active or remote termination is unconfirmed`)
       }
+    }
+  }
+
+  /**
+   * Queues a teammate's channel post into this agent's session, the way the steering message
+   * is queued: behind its current step. Only while its prompt is running — a session that has
+   * finished, been stopped or reports itself idle is never woken by a message.
+   */
+  async send(handle: AgentHandle, text: string): Promise<boolean> {
+    const run = this.live.get(handle.agentId)
+    if (!run || run.sessionId === null || run.prompt === null) return false
+    if (!run.promptDispatched || run.stopRequested || run.remoteStopped || run.localReturned) return false
+    const sessionId = run.sessionId
+    if (typeof run.client.sessionStatus === 'function') {
+      const status = await run.client.sessionStatus(sessionId, run.directory).catch(() => 'unknown' as const)
+      if (status === 'idle' || run.stopRequested || run.remoteStopped || run.localReturned) return false
+    }
+    try {
+      await run.client.promptAsync(sessionId, run.directory, { ...run.prompt, parts: [{ type: 'text', text }] })
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -286,7 +314,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
 
   async run(handle: AgentHandle, ctx: AgentRunContext): Promise<AgentRunResult> {
     if (ctx.agentId !== handle.agentId) throw new Error('agent context does not match handle')
-    this.assertAvailable(handle.agentId, handle.workspacePath)
+    this.assertAvailable(handle.agentId, handle.workspacePath, ctx.team !== undefined)
     const started = Date.now()
     const zero = { tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0, costUsd: 0 }
 
@@ -315,6 +343,8 @@ export class OpenCodeAgentRunner implements AgentRunner {
       // never the current shard plan, roster, or a reusable container name.
       handle: { ...handle },
       runtime: null,
+      shared: ctx.team !== undefined,
+      prompt: null,
       promptDispatched: false,
       stopRequested: false,
       abortRequested: false,
@@ -337,14 +367,22 @@ export class OpenCodeAgentRunner implements AgentRunner {
       }
       if (tracked.stopRequested) throw new Error('agent stopped before prompt dispatch')
 
+      const team = ctx.team
       const body = {
         model: splitModelId(ctx.genome.modelId),
         // Named explicitly: without it OpenCode runs its implicit `build` agent and the
-        // profile's temperature and unattended permission policy never apply.
-        agent: COMPETITOR_AGENT,
+        // profile's temperature and unattended permission policy never apply. A team member
+        // has its own profile in the shared folder.
+        agent: team ? teamProfileName(team.label) : COMPETITOR_AGENT,
         system: ctx.genome.strategyMd,
-        parts: [{ type: 'text' as const, text: buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null, this.options.toolsPath ?? null) }],
+        parts: [{
+          type: 'text' as const,
+          text: team
+            ? buildTeamPrompt(ctx.goalMd, team, this.options.contextPath ?? null, this.options.toolsPath ?? null)
+            : buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null, this.options.toolsPath ?? null),
+        }],
       }
+      tracked.prompt = { model: body.model, agent: body.agent, system: body.system }
 
       let timer: ReturnType<typeof setTimeout> | undefined
       let steerTimer: ReturnType<typeof setTimeout> | undefined
@@ -359,7 +397,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
               model: body.model,
               agent: body.agent,
               system: body.system,
-              parts: [{ type: 'text', text: buildSteeringPrompt(ctx.steerAfterMs!) }],
+              parts: [{ type: 'text', text: team ? buildTeamSteeringPrompt(ctx.steerAfterMs!, team) : buildSteeringPrompt(ctx.steerAfterMs!) }],
             }))
             .catch(() => {})
         })
@@ -404,9 +442,10 @@ export class OpenCodeAgentRunner implements AgentRunner {
           }
         }
 
-        const submission = await this.sandbox.readFile(handle, SUBMISSION_FILE)
+        // A team member's work is the shared output folder, captured once for the whole team.
+        const submission = team ? null : await this.sandbox.readFile(handle, SUBMISSION_FILE)
         return {
-          status: submission && submission.trim().length > 0 ? 'ok' : 'no_submission',
+          status: team || (submission && submission.trim().length > 0) ? 'ok' : 'no_submission',
           errorText: null,
           ...usage,
           durationMs: Date.now() - started,
@@ -454,6 +493,10 @@ interface LiveRun {
    * is configured, which keeps the legacy refusal text for those runners.
    */
   runtime: 'running' | 'stopped' | 'unknown' | null
+  /** A collaboration member: its folder is shared with its teammates by design. */
+  shared: boolean
+  /** What every message queued into this session repeats; null until the prompt is built. */
+  prompt: { model: { providerID: string; modelID: string }; agent: string; system: string } | null
   promptDispatched: boolean
   stopRequested: boolean
   abortRequested: boolean

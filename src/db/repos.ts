@@ -19,6 +19,21 @@ export interface RunRow {
   initialCriteria: string | null
 }
 
+/** One team-channel entry as recorded for its round. */
+export interface ChannelMessageRow {
+  roundId: string
+  seq: number
+  author: string
+  /** The member whose label wrote it; null for a label that was not on the team. */
+  agentId: string | null
+  target: string | null
+  postedAt: string
+  body: string
+  /** Agent ids the entry was forwarded to. */
+  deliveredTo: string[]
+  observedAt: number
+}
+
 export interface RoundRow {
   id: string
   runId: string
@@ -354,6 +369,32 @@ export function makeRepos(db: Db) {
         return rows.map((r) => ({
           id: r.id as number, roundId: r.round_id as string, createdAt: r.created_at as number,
           payload: JSON.parse(r.payload_json),
+        }))
+      },
+    },
+
+    /** Collaboration channel entries, per round, in file order. */
+    channel: {
+      append(input: { runId: string } & Omit<ChannelMessageRow, 'deliveredTo' | 'observedAt'>): void {
+        db.prepare(
+          'INSERT INTO channel_messages (run_id, round_id, seq, author, agent_id, target, posted_at, body, delivered_json, observed_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        ).run(input.runId, input.roundId, input.seq, input.author, input.agentId, input.target, input.postedAt, input.body, '[]', now())
+      },
+      markDelivered(roundId: string, seqs: readonly number[], agentId: string): void {
+        const read = db.prepare('SELECT delivered_json FROM channel_messages WHERE round_id = ? AND seq = ?')
+        const write = db.prepare('UPDATE channel_messages SET delivered_json = ? WHERE round_id = ? AND seq = ?')
+        for (const seq of seqs) {
+          const row = read.get(roundId, seq) as { delivered_json: string } | undefined
+          if (!row) continue
+          const delivered = JSON.parse(row.delivered_json) as string[]
+          if (!delivered.includes(agentId)) write.run(JSON.stringify([...delivered, agentId]), roundId, seq)
+        }
+      },
+      forRound(roundId: string): ChannelMessageRow[] {
+        const rows = db.prepare('SELECT * FROM channel_messages WHERE round_id = ? ORDER BY seq').all(roundId) as any[]
+        return rows.map((r) => ({
+          roundId: r.round_id, seq: r.seq, author: r.author, agentId: r.agent_id, target: r.target,
+          postedAt: r.posted_at, body: r.body, deliveredTo: JSON.parse(r.delivered_json), observedAt: r.observed_at,
         }))
       },
     },

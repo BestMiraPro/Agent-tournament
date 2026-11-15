@@ -100,9 +100,26 @@ CREATE TABLE IF NOT EXISTS events (
   payload_json TEXT NOT NULL
 );
 
+-- Collaboration: the team channel, one row per CHANNEL.md entry first seen in that round.
+CREATE TABLE IF NOT EXISTS channel_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  round_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  agent_id TEXT,
+  target TEXT,
+  posted_at TEXT NOT NULL,
+  body TEXT NOT NULL,
+  delivered_json TEXT NOT NULL DEFAULT '[]',
+  observed_at INTEGER NOT NULL,
+  UNIQUE(round_id, seq)
+);
+
 CREATE INDEX IF NOT EXISTS idx_genomes_agent ON genomes(agent_id, round_idx);
 CREATE INDEX IF NOT EXISTS idx_scores_round ON scores(round_id, rank);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_round ON events(round_id, id);
 CREATE INDEX IF NOT EXISTS idx_judging_audits_round ON judging_audits(round_id, id);
+CREATE INDEX IF NOT EXISTS idx_channel_round ON channel_messages(round_id, seq);
 `

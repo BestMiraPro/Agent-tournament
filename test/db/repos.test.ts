@@ -216,6 +216,23 @@ describe('agent-detail getters', () => {
   })
 })
 
+describe('channel messages', () => {
+  test('are kept per round in order, with who each was forwarded to', () => {
+    const { repos, run } = setup()
+    const round = repos.rounds.create({ runId: run.id, idx: 1, goalMd: 'g' })
+    const base = { runId: run.id, roundId: round.id, target: null, postedAt: '2026-11-15T10:00:00.000Z' }
+    repos.channel.append({ ...base, seq: 2, author: 'agent-02', agentId: 'B', body: 'second' })
+    repos.channel.append({ ...base, seq: 1, author: 'agent-01', agentId: 'A', body: 'first' })
+    repos.channel.markDelivered(round.id, [1], 'B')
+    repos.channel.markDelivered(round.id, [1], 'B')
+    repos.channel.markDelivered(round.id, [1, 2], 'C')
+    expect(repos.channel.forRound(round.id).map((m) => [m.seq, m.author, m.body, m.deliveredTo])).toEqual([
+      [1, 'agent-01', 'first', ['B', 'C']],
+      [2, 'agent-02', 'second', ['C']],
+    ])
+  })
+})
+
 describe('config round-trip', () => {
   test('preserves Infinity budget limits through the database', () => {
     const { repos } = setup()
