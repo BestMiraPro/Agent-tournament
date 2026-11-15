@@ -51,9 +51,9 @@ The engine does not know which runtime it is driving. Mock, local and Docker san
 | `mock` | In-process, no real agents | None needed | Not used | None | Development, tests, demos |
 | `local` | OpenCode sessions on the host; Claude Code CLI processes for `claude-subscription/*` | Host OpenCode config | Claude: setup token or this machine's Claude login. ChatGPT: OpenCode's login | Host network | Trusted tasks only. **No isolation.** |
 | `docker`, `shared` isolation | Resource-capped containers, possibly several agents per container | `auth.json` mounted read-only | Claude: setup token, in the container's CLI environment. ChatGPT: in the mounted `auth.json` | Ordinary | Runs the relay cannot carry |
-| `docker`, `protected` isolation | One container per agent | **None inside the container** | Both relayed: the container holds only a per-run token (Claude needs a setup token and full model ids) | Internal Docker network only | Untrusted agent code |
+| `docker`, `protected` isolation | One container per agent | **None inside the container** (except a Claude setup token, see the next column) | Claude: setup token held by the container's unmodified `claude` process, egress only to `api.anthropic.com:443` through the gateway. ChatGPT: relayed, no credential inside | Internal Docker network only | Untrusted agent code |
 
-In **protected** mode, each worker container is started with `--cap-drop ALL`, `no-new-privileges`, a read-only root filesystem, a fixed unprivileged user, memory/CPU/PID/file-size limits with swap disabled, and a writable `/work` plus bounded tmpfs. It joins only a per-agent `--internal` Docker network. Its only way out is a small gateway container that forwards two fixed routes. Model calls go through a host-side relay that swaps a per-run token for the real key. The relay accepts only model-call endpoints for models in the run's roster, within a per-agent request limit, and stops serving a run as soon as the run is stopped. Code: [`src/runtime/docker/cli.ts`](src/runtime/docker/cli.ts), [`gateway.ts`](src/runtime/docker/gateway.ts), [`provider-relay.ts`](src/runtime/provider-relay.ts).
+In **protected** mode, each worker container is started with `--cap-drop ALL`, `no-new-privileges`, a read-only root filesystem, a fixed unprivileged user, memory/CPU/PID/file-size limits with swap disabled, and a writable `/work` plus bounded tmpfs. It joins only a per-agent `--internal` Docker network. Its only way out is a small gateway container that forwards two fixed routes (three in runs with Claude subscription agents: a CONNECT proxy that reaches only `api.anthropic.com:443`, for the agent's own Claude Code process, which holds your setup token). Model calls from OpenCode go through a host-side relay that swaps a per-run token for the real key. The relay accepts only model-call endpoints for models in the run's roster, within a per-agent request limit, and stops serving a run as soon as the run is stopped. Code: [`src/runtime/docker/cli.ts`](src/runtime/docker/cli.ts), [`gateway.ts`](src/runtime/docker/gateway.ts), [`provider-relay.ts`](src/runtime/provider-relay.ts).
 
 Protected is the default for Docker runs created from the dashboard. The CLI's Docker mode keeps `shared` unless configured otherwise. An opt-in end-to-end suite (`ARENA_DOCKER_E2E=1`, [`test/e2e/container-policy.test.ts`](test/e2e/container-policy.test.ts)) starts real protected containers with fake credentials and a fake provider, and checks these boundaries from inside them.
 
@@ -80,7 +80,7 @@ npm start
 
 This builds the UI, starts the API and WebSocket server on `http://127.0.0.1:4300`, and opens the browser. Choose **Create run**, leave the sandbox on `mock`, and start rounds. Mock runs need no further setup.
 
-Real-agent and Docker modes need OpenCode and provider credentials. Agents, the judge and the reflector can also run on a Claude Pro/Max subscription (through the Claude Code CLI) or a ChatGPT Plus/Pro subscription (through OpenCode's own login); sign in under **Subscriptions** in the setup form. See the [operator guide](docs/operator-guide.md).
+Real-agent and Docker modes need OpenCode and provider credentials. Agents, the judge and the reflector can also run on a Claude Pro/Max subscription (through the unmodified Claude Code CLI) or a ChatGPT Plus/Pro subscription (through OpenCode's own login); sign in under **Subscriptions** in the setup form. Anthropic's terms allow "an end user from signing in to the unmodified Claude Code binary with their own Claude subscription, including where a platform hosts Claude Code", while developers "may not collect, store, or intermediate Claude.ai credentials or session tokens"; so nothing here relays or swaps a Claude token (details in the operator guide). See the [operator guide](docs/operator-guide.md).
 
 ## Run in Docker
 
@@ -124,7 +124,7 @@ The skipped cases are:
 - Process-termination tests for the other OS, and on Windows the POSIX-only Claude Code process-group and read-only-file tests.
 - On Windows without symlink privileges, file-symlink escape tests.
 
-Coverage includes the engine and selection logic, the Claude Code stream translation (against recorded CLI streams) and subscription relaying, judge parsing and anonymisation, the provider relay's allow/deny decisions, Docker argument construction, workspace path-escape and symlink attacks, SQLite migrations and restart recovery, the HTTP/WebSocket API, and the dashboard's pure state reducers.
+Coverage includes the engine and selection logic, the Claude Code stream translation (against recorded CLI streams), the ChatGPT relay and the Claude egress allowlist, judge parsing and anonymisation, the provider relay's allow/deny decisions, Docker argument construction, workspace path-escape and symlink attacks, SQLite migrations and restart recovery, the HTTP/WebSocket API, and the dashboard's pure state reducers.
 
 ## Repository layout
 

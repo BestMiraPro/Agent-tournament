@@ -1,6 +1,22 @@
 # Subscription runs: Claude Pro/Max and ChatGPT Plus/Pro
 
-Verified end to end without a real model or token (2026-11-15): `ClaudeCodeAgentRunner` → `docker exec` into the agent image (uid 1000, read-only root) → Claude Code 2.1.325 → this repo's provider relay → a scripted fake Anthropic upstream. The upstream saw only `/v1/messages?beta=true` with the swapped-in setup token, the agent wrote `SUBMISSION.md`, and quiesce confirmed the process group gone.
+> **Revised 2026-11-15 (owner decision): token in container.** Anthropic's legal and compliance page
+> (code.claude.com/docs/en/legal-and-compliance) says developers "may not collect, store, or
+> intermediate Claude.ai credentials or session tokens", and explicitly allows "an end user from
+> signing in to the unmodified Claude Code binary with their own Claude subscription, including where
+> a platform hosts Claude Code". The first version of this design had the provider relay swap a run
+> token for the setup token, which intermediates it. That path is removed: the relay never holds,
+> matches or injects a Claude token. A protected worker's unmodified `claude` process holds the setup
+> token itself and reaches Anthropic through a gateway CONNECT route limited to
+> `api.anthropic.com:443`. The ChatGPT relay is unchanged.
+
+Verified end to end without a real model call (2026-11-15), in the protected topology: worker on an
+`--internal` network with no direct egress (`EAI_AGAIN`), the production gateway arguments with the
+egress route, and `ClaudeCodeAgentRunner` → `docker exec` → the image's Claude Code 2.1.325 with a
+placeholder setup token in the env file and `HTTPS_PROXY=http://gateway:8789`. The gateway refused
+`example.com:443`, `api.anthropic.com:80`, `1.1.1.1:443` and `statsig.anthropic.com:443`, tunnelled
+`api.anthropic.com:443`, Anthropic answered 401 (`CLAUDE_AUTH_EXPIRED`), and quiesce confirmed the
+process gone.
 
 Date: 2026-11-15. Branch: `phase8-subscription-runs`.
 
@@ -52,6 +68,9 @@ Claude Code CLI 2.1.325:
   `x-app`, `x-claude-code-session-id`, `anthropic-version`, `anthropic-dangerous-direct-browser-access`.
   With `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` nothing else was contacted: the refusing proxy
   saw no connection at all, and the upstream saw only `/v1/messages`.
+- `HTTPS_PROXY` is honoured by both the macOS CLI and the Linux CLI in the agent image: with
+  `CLAUDE_CODE_OAUTH_TOKEN` set and no base URL, every request went as `CONNECT api.anthropic.com:443`
+  (the call plus two 401 retries) and nothing else was contacted.
 - `--json-schema=<schema>` adds a `StructuredOutput` tool; the `--output-format json` result has
   `structured_output` (the object) and `result` (its JSON text).
 - Stream shapes: `system/init` (`session_id`, `tools`, `model`, `permissionMode`, `apiKeySource`),
@@ -155,9 +174,12 @@ OpenCode 1.18.21 (read from the binary in the agent image):
 - `token` mode: the value printed by `claude setup-token`, pasted in the dashboard, normalised
   (whitespace removed) and validated (`^[A-Za-z0-9._~+/=-]{20,4096}$`), stored in
   `runs/secrets/claude-subscription.json` with mode 0600 (directory 0700). It is never written to
-  SQLite, exports, logs, events or argv: locally it goes to the CLI on fd 3; in a shared Docker
-  container through `docker exec -e CLAUDE_CODE_OAUTH_TOKEN` (the value comes from the docker
-  client's environment, not its argv). Locally, token mode uses a private `CLAUDE_CONFIG_DIR` per run in the OS temp folder (outside the workspace root, so no runtime-folder sweep can remove it mid-run); in a container the CLI uses the container's own home, recycled every round.
+  SQLite, exports, logs, events or argv: locally it goes to the CLI on fd 3; in a Docker shard
+  (shared or protected) through `docker exec --env-file` with a 0600 file in a private 0700 folder,
+  removed as soon as the CLI produces output (or the exec ends), so it is in neither a command line
+  nor the docker client's environment, and reaches only the exec'd process, never the container's
+  main process. The exec'd process already leads its own session (pid = pgid = sid, seen in the
+  image), so the leader script records it and execs `claude` directly: one process holds the token. Locally, token mode uses a private `CLAUDE_CONFIG_DIR` per run in the OS temp folder (outside the workspace root, so no runtime-folder sweep can remove it mid-run); in a container the CLI uses the container's own home, recycled every round.
 - `host` mode: the machine's own Claude Code login (`claude auth login`), used when no token is
   stored and `claude auth status` reports `loggedIn` with `authMethod: claude.ai`. Local runs only:
   a container has no access to the host's keychain.
@@ -166,7 +188,7 @@ OpenCode 1.18.21 (read from the binary in the agent image):
   Claude Code launched this app), then the runner sets only what it needs:
   `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
   `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, and per mode the token
-  descriptor, `CLAUDE_CONFIG_DIR`, or the relay's `ANTHROPIC_BASE_URL`.
+  descriptor, `CLAUDE_CONFIG_DIR`, or (protected) `HTTPS_PROXY`/`NO_PROXY`.
 
 ### ClaudeCodeProvider
 
@@ -184,15 +206,22 @@ classification.
   the inventory records its version. Both files are toolchain files, so the image tag changes.
 - Shared isolation: token mode only; the token is in the CLI process's environment inside the
   container, as `auth.json` already is in that mode.
-- Protected isolation: verified that the CLI honours `ANTHROPIC_BASE_URL` with an OAuth token and
-  talks to nothing else. The worker gets `ANTHROPIC_BASE_URL=http://gateway:8787/claude-subscription`
-  and `CLAUDE_CODE_OAUTH_TOKEN=<per-run relay token>`; the relay accepts only
-  `POST /claude-subscription/v1/messages[?beta=true]` (and `…/count_tokens`), checks the body's model
-  against the roster, forwards a fixed header allowlist and swaps the run token for the real
-  subscription token on the way to `https://api.anthropic.com`. The client is still Claude Code;
-  the relay only forwards. Requires token mode, and full model ids (the CLI resolves an alias before
-  the request, so the relay could not match it to the roster); the small/fast model variables are set
-  to the agent's own model so no auxiliary call names a model outside the roster.
+- Protected isolation: the unmodified `claude` process in the worker gets the setup token as
+  `CLAUDE_CODE_OAUTH_TOKEN` (env file, above), plus `HTTPS_PROXY=http://gateway:8789`,
+  `NO_PROXY=gateway,localhost,127.0.0.1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. The worker
+  still has no other network. The shard gateway gains a third route, only for runs with Claude
+  subscription agents: an HTTP CONNECT proxy on port 8789 (8788 is the connectors route on another
+  branch) that compares the target with `api.anthropic.com:443` byte for byte and dials that host
+  itself, so other hosts, other ports, IP literals, case and trailing-dot variants get 403 and every
+  other method 405. The relay is not involved: its grant names only OpenCode models, and it has no
+  route or credential for Claude. Aliases work again, since nothing on the host matches the model.
+  Hosts the CLI needs, measured with a placeholder setup token through a logging allowlist proxy
+  (host CLI) and the real gateway route (image CLI): `api.anthropic.com:443` only; an earlier full
+  multi-turn session against a fake upstream with nonessential traffic off contacted no other host.
+  With a real setup token this was not measured (none was available).
+- Trust: the token is inside the worker. The agent runs as the same user as its CLI and could read
+  the CLI's environment; what it could do with it is reach `api.anthropic.com` through the gateway,
+  which is the access the run grants anyway. This is the owner's chosen trade-off.
 
 ### ChatGPT through OpenCode
 
