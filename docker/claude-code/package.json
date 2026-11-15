@@ -1,0 +1,8 @@
+{
+  "name": "arena-claude-code",
+  "private": true,
+  "description": "The Claude Code CLI baked into the agent image, pinned and integrity-locked by package-lock.json.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.325"
+  }
+}
