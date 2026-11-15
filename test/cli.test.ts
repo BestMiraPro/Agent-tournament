@@ -418,6 +418,7 @@ describe('CLI research inputs and outputs', () => {
     const reportPath = join(dir, 'report.md')
     const out = await runTournamentCli({
       goal: 'write a good answer', rounds: 2, population: 4, seed: 1, dbPath: ':memory:', criteria: null, reportPath,
+      workflow: 'tournament',
     })
     const report = await readFile(reportPath, 'utf8')
     expect(report).toContain('# Tournament report: cli')

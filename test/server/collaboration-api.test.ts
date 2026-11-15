@@ -79,6 +79,20 @@ describe('collaboration through the API', () => {
     }
   })
 
+  test('the markdown report gives the team result and its folder, not a winner', async () => {
+    const { dashboard, runId } = await teamRun()
+    try {
+      const res = await dashboard.app.inject({ method: 'GET', url: `/api/runs/${runId}/export?format=md` })
+      expect(res.body).toMatch(/## Team result \(round 1, score [\d.]+\)/)
+      expect(res.body).toContain('- output/README.md (')
+      expect(res.body).toContain('### output/README.md\n\n# Team output')
+      expect(res.body).toContain('#### agent-03')
+      expect(res.body).not.toContain('## Winner')
+    } finally {
+      await dashboard.shutdown()
+    }
+  })
+
   test('a rejudge regrades the sealed artifact without storing anything', async () => {
     const { dashboard, runId } = await teamRun()
     try {
