@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/BestMiraPro/Agent-tournament/actions/workflows/ci.yml/badge.svg)](https://github.com/BestMiraPro/Agent-tournament/actions/workflows/ci.yml)
 
-A local-first TypeScript platform that runs a population of LLM agents on the same task, grades their work blindly, and evolves their strategies across rounds through selection, cloning, mutation and recombination. Every score can be traced back to the evidence the grader was shown.
+A local-first TypeScript platform that runs LLM agents on a task round after round and grades their work. By default the agents work as **one team**: they share one folder, talk to each other through `CHANNEL.md`, and build an `output/` folder together that is judged as one piece of work. In the **tournament** workflow they compete instead: their work is graded blindly and their strategies evolve through selection, cloning, mutation and recombination. Every score can be traced back to the evidence the grader was shown.
 
 It runs fully offline on deterministic mocks. It can also drive real tool-using agents through [OpenCode](https://opencode.ai), either on the host or in Docker containers that are resource-capped, network-restricted and hold no provider credentials.
 
@@ -31,6 +31,8 @@ flowchart LR
     W -. live events .-> UI[Dashboard<br/>via WebSocket]
     J -. scores + audit .-> DB[(SQLite)]
 ```
+
+The diagram is the tournament workflow. In the default **collaboration** workflow a round has no selection: the team works at once in one shared folder that carries over between rounds (one protected container under Docker), each teammate's channel posts are delivered to the others while they work, `output/` and `CHANNEL.md` are captured once after everyone has stopped and sealed with a digest, the grader reads `output/README.md` and opens files with its read-only tools, and the team gets one score. Reflection then rewrites each agent's strategy from that score and its own part in the work. Nobody is cloned or culled. Design: [docs/superpowers/specs/2026-11-15-collaboration-mode-design.md](docs/superpowers/specs/2026-11-15-collaboration-mode-design.md).
 
 Each agent's strategy (a markdown "genome" plus model and temperature) is the unit of evolution. Agents work in their own workspace and write a `SUBMISSION.md`. After judging, the top band is cloned, the bottom band is culled, elites carry over unchanged, crossover children combine two parents, and a diversity floor rescues the most distinct culled strategy. Reflection then rewrites each survivor's strategy using what separated winners from losers. Lineage is kept for every agent, including retired ones.
 
@@ -70,7 +72,7 @@ npm ci
 npm run tournament -- --mode mock --rounds 2 --population 4 --goal "Write one clear sentence defining what a tournament is."
 ```
 
-Mock mode is deterministic and makes no network or model calls. It prints each round's mean and best score and the winning strategy.
+Mock mode is deterministic and makes no network or model calls. It prints each round's mean and best score and the winning strategy. That runs a collaboration team (the default); add `--workflow tournament` for the evolutionary tournament.
 
 To use the dashboard:
 

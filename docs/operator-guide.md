@@ -1,6 +1,11 @@
 # Operator Guide
 
-How to run an Agent Tournament: a population of LLM agents competing in rounds, with cloning/mutation between rounds and an LLM judge.
+How to run Agent Tournament. Runs use one of two workflows, chosen at creation and fixed for the run:
+
+- **Collaboration** (the default): the agents of a round are one team in one shared folder. They talk through `CHANNEL.md` and build `output/` together, and that folder is judged as one piece of work. Nobody is cloned or removed. Each agent's strategy is rewritten between rounds from the team's score and its own part in the work.
+- **Tournament**: a population of agents competes in rounds, each judged on its own `SUBMISSION.md`, with cloning, culling, crossover and mutation between rounds.
+
+`--workflow tournament` (CLI), `"workflow": "tournament"` (API) or the Workflow field in the setup form chooses the tournament.
 
 ## Quick start (mock mode, no LLM tokens)
 
@@ -9,7 +14,24 @@ npm install
 npm run tournament -- --goal "Write a single clear sentence defining what a tournament is." --rounds 2 --population 4 --mode mock
 ```
 
-Mock mode uses a deterministic fake provider — it scores on keyword overlap, no real LLM calls. Use it to verify the wiring before spending tokens.
+Mock mode uses a deterministic fake provider — it scores on keyword overlap, no real LLM calls. Use it to verify the wiring before spending tokens. A mock collaboration run goes through the whole team path: mock agents introduce themselves on the channel, wait for each other's posts, write their part of `output/`, and the first agent writes `output/README.md`.
+
+## Collaboration runs
+
+**The team folder.** Each run has one folder, `team-<runId>` under the workspace root (the container's `/work` under Docker), that carries over from round to round:
+
+- `output/` is the deliverable: the only thing judged. Its entry point is `output/README.md`, which says what was built, how to run or read it, and what is finished.
+- `CHANNEL.md` is the message board. Agents post with `node <folder>/.opencode/arena/post.mjs <label> "message"` (or `@label` for one teammate). The helper appends whole entries under a lock, so concurrent posts are never lost. Agents are told never to edit the file by hand.
+- `agents/<label>/` is each agent's scratch space; `NOTES.md` there holds its notes from reflection.
+- The seed folder, if any, is copied in once, when the folder is created.
+
+**Direct messages.** While agents work, the engine reads `CHANNEL.md` every 2 seconds and queues each new post into the other agents' sessions, behind whatever they are doing; an `@label` post goes only to that agent. Delivery is bounded so a chatty agent cannot flood the others or the budget: at most 2,000 characters of a post, 6,000 per message, one message per agent every 15 seconds (posts in between are combined), and 30 messages per agent per round, the last of which says forwarding has stopped. Agents that have finished are never woken. The live view shows the channel as it happens, and every round's entries are kept.
+
+**Judging.** Once every agent has stopped, `output/` and `CHANNEL.md` are captured once and sealed with a digest. Text files are stored with the round (up to 256 KiB each and 8 MiB per round); binary files are listed with their size and hash. For local and docker runs the grader gets a copy inside its own folder and reads `README.md` first, then opens what it needs with its read-only tools. The team gets one score per round, with the usual decision record. An empty `output/` scores 0 without a scoring call, and so does a team over its quota (one agent's workspace limits per member). Every member's score row repeats the team score, so the analytics and the CSV export keep working.
+
+**Team size.** Under Docker the whole team shares one protected container, charged one agent's ceilings per member: memory and CPUs per agent × agents, plus 256 processes and 2,048 open files per agent, plus one 64 MiB gateway. On the reference machine (~5.2 GiB of free Docker memory, 80% committable) four agents at `1g` fit and five do not, so four is the default team in the setup form and on the CLI. A team that does not fit is refused with the largest team that would. The container restarts every round; the folder does not.
+
+**What changes from a tournament.** No selection, cloning, culling, crossover, diversity floor or elites, and those settings are hidden in the setup form. Every agent runs at once whatever Max parallel agents says. Population changes are manual only (add or retire agents between rounds). Rejudge regrades the sealed output, not the live folder.
 
 ## Real mode (local — agents as host processes)
 
@@ -81,7 +103,8 @@ A seed folder (`seedDir`, API only) is copied into every agent's workspace befor
 |------|---------|-------|
 | `--goal` | "Produce the best possible answer." | The task every agent attempts |
 | `--rounds` | 5 | Number of rounds |
-| `--population` | 20 | Agents per round |
+| `--workflow` | collaboration | `collaboration` (one team, one shared output folder) or `tournament` |
+| `--population` | 4 (collaboration), 20 (tournament) | Agents per round |
 | `--seed` | 42 | RNG seed (deterministic runs) |
 | `--db` | `:memory:` | SQLite path (use a file to persist across runs) |
 | `--mode` | mock | `mock` (no LLM) or `real` (LLM via opencode) |
@@ -138,7 +161,8 @@ For UI development with hot reload, run `npm run dashboard -- --no-open` and `np
 ### The dashboard workflow
 
 1. **Browse runs** — the landing page lists all runs with summary stats (rounds, best score, cost). Click a row to open it.
-2. **Create a run** — "Create run" takes you to the setup form: name, goal, sandbox mode, roster (model + count + temperature per row), judge/reflect model pickers, selection knobs, concurrency, pricing, budget.
+2. **Create a run** — "Create run" takes you to the setup form: name, workflow (collaboration preselected), goal, sandbox mode, roster (model + count + temperature per row), judge/reflect model pickers, selection knobs and concurrency (tournament only), pricing, budget.
+   - In a collaboration run the side panel shows the team score and the team channel instead of the leaderboard, and **Team output** below the grid lists each round's sealed output folder: pick a round, pick a file, read it as captured, and see which agents wrote it.
 3. **Run a round** — in the run view, the between-rounds controls let you start the next round, override criteria, add/retire agents, abort, or reconfigure (PATCH) the config for the next round.
 4. **Review** — the agent grid shows live status; click an agent for its drawer (lineage, genomes, submission, diffs). The analytics panel has the fitness chart, model share, lineage tree. The round-detail panel shows the ranked entries with judge rationales.
 5. **Export** — the Export dropdown (JSON or CSV) downloads the full run dump.
@@ -167,6 +191,8 @@ The WebSocket pushes per-agent status/activity/usage and round status/scored/com
 **Port 4300/4301 in use** — kill the stale node process: `Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 4300,4301 }` then `Stop-Process -Id <pid> -Force`.
 
 **`workspaceRoot must be absolute`** — docker bind-mounts and local workspace mkdir both need an absolute path. Relative paths 400.
+
+**An agent added between rounds of a local collaboration run fails** — local runs keep one OpenCode server for the whole run, and each member runs under its own profile file in the shared folder (`.opencode/agents/member-<label>.md`). If the server read the folder's profiles before the new member's file existed, it may not know that profile. Docker runs start a fresh server every round and are not affected; for a local run, stop and resume the run (a restart composes a new server) after adding agents.
 
 **A round failed without scores** — abort pre-judge leaves a round row with no scores. The round-detail panel shows "Scoring in progress" for in-flight or "entries appear after judging" for a failed round. The run continues; start the next round.
 
