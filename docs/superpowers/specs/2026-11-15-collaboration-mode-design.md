@@ -109,6 +109,13 @@ Abort, budget and failure semantics are the tournament's: the round fails at its
 - JSON export: each collaboration round adds `team` (score, output manifest and capture, contributions, channel).
 - Dashboard: workflow selector in Create run, collaboration preselected. Selection and breeding knobs, Containers and Isolation are hidden for collaboration. The live view has a channel panel, an output-folder browser (list and view files of a round's sealed output) and the team score per round. Tournament runs render exactly as before.
 
+## Known limits
+
+- The seed sizes behind the quota exemption are taken when the workspace is created and kept in the engine's memory. After the dashboard restarts mid-run, seeded files count against the team quota like any other file.
+- Local runs keep one OpenCode server for the whole run. If that server read the shared folder's profiles before a member added between rounds had its `member-<label>.md`, the new member may not find its profile. Docker runs start a fresh server every round and are not affected.
+- Labels in the channel are self-declared (see above). Contribution evidence shows only what the activity stream observed: files written by a program inside a shell command are not attributed.
+- Text is captured as the sandbox decodes it (UTF-8), the same as tournament capture. Binary files are listed and hashed, never stored or shown.
+
 ## Not in scope
 
 Connectors, subscription runs and web search are separate branches. A Claude Code runner must implement `send()` to receive channel messages and read `AgentRunContext.team` for the collaboration prompt.
