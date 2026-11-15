@@ -1,11 +1,13 @@
 import { writeFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
-import { DEFAULT_CONFIG, type RosterEntry, type RunConfig } from './core/types.js'
+import { DEFAULT_CONFIG, DEFAULT_TEAM_SIZE, type RosterEntry, type RunConfig } from './core/types.js'
 import { openDb } from './db/open.js'
 import { makeRepos } from './db/repos.js'
 import { recoverIncompleteRounds } from './db/recover.js'
 import { AuditCollector } from './engine/audit.js'
+import { MOCK_CHANNEL_LIMITS } from './engine/channel.js'
+import type { SealedArtifactWriter } from './engine/collaboration.js'
 import { TournamentEngine } from './engine/driver.js'
 import { loadSeedStrategies, seedStrategyFrom } from './engine/seed-strategy.js'
 import { Reflector } from './evolution/reflect.js'
@@ -14,8 +16,10 @@ import { MockAgentRunner, type AgentRunner } from './runtime/agent-runner.js'
 import { GOOD_KEYWORDS, MockProvider } from './runtime/mock-provider.js'
 import { MockSandbox } from './runtime/mock-sandbox.js'
 import {
+  memoryLabel,
   planCapacity,
   readHostCapacity,
+  teamContainerLimits,
   type CapacityLedger,
   type HostCapacity,
 } from './runtime/docker/capacity.js'
@@ -43,6 +47,8 @@ export interface CliOptions {
   /** Write the run's markdown report here once the last round ends. */
   reportPath?: string
   mode?: 'mock' | 'real'
+  /** Collaboration (one team, one shared workspace) or tournament (evolving population). App default when absent. */
+  workflow?: RunConfig['workflow']
   /**
    * Which sandbox real mode runs agents in. `'local'` (the default) runs them as host
    * processes against one shared opencode server; `'docker'` runs them inside
@@ -232,6 +238,23 @@ export function resolveSandboxMode(
 }
 
 /**
+ * Validates `--workflow`. Like `--sandbox`, it arrives as an unvalidated string, and a typo
+ * must fail rather than quietly run the other workflow.
+ */
+export function resolveWorkflow(value: string | undefined): RunConfig['workflow'] {
+  const requested = value ?? DEFAULT_CONFIG.workflow
+  if (requested !== 'collaboration' && requested !== 'tournament') {
+    throw new Error(`unknown workflow "${requested}" — expected "collaboration" or "tournament"`)
+  }
+  return requested
+}
+
+/** `--population` when it is not given: a team that fits one container, or the tournament default. */
+export function defaultPopulation(workflow: RunConfig['workflow']): number {
+  return workflow === 'collaboration' ? DEFAULT_TEAM_SIZE : DEFAULT_CONFIG.populationSize
+}
+
+/**
  * Builds the per-agent client lookup the OpenCode runner uses.
  *
  * Under Docker each shard has its own opencode server on its own published port, so the
@@ -331,32 +354,56 @@ export async function assertHostCapacity(
     return
   }
 
+  // A collaboration team is ONE container sized for every member (teamContainerLimits).
+  const team = config.workflow === 'collaboration'
+  const members = Math.max(1, config.populationSize)
+  const perAgent = { memory: config.containerMemory, cpus: config.containerCpus }
+  const perContainer = team
+    ? teamContainerLimits(perAgent, members)
+    : { memory: config.containerMemory, memoryBytes: parseMemoryLimit(config.containerMemory), cpus: config.containerCpus }
   // Check the containers this run will ACTUALLY start, not the configured ceiling.
   // `planShards` clamps shard count to the population, so a 2-agent run never starts
   // more than 2 containers however high `maxContainers` is. Validating the ceiling
   // instead refuses runs that would have fit comfortably.
-  const containers = Math.max(1, Math.min(config.maxContainers, config.populationSize))
+  const containers = team ? 1 : Math.max(1, Math.min(config.maxContainers, config.populationSize))
+  const extraMemory = opts.extraMemoryBytes ?? 0
+  const extraCpus = opts.extraCpus ?? 0
 
   const verdict = opts.ledger && opts.reservationId
     ? opts.ledger.admit(
         opts.reservationId,
         {
           containers,
-          memoryBytes: parseMemoryLimit(config.containerMemory) + (opts.extraMemoryBytes ?? 0),
-          cpus: config.containerCpus + (opts.extraCpus ?? 0),
+          memoryBytes: perContainer.memoryBytes + extraMemory,
+          cpus: perContainer.cpus + extraCpus,
         },
         host,
       )
     : planCapacity(
         {
           containers,
-          memory: config.containerMemory,
-          cpus: config.containerCpus,
+          memory: memoryLabel(perContainer.memoryBytes + extraMemory),
+          cpus: perContainer.cpus + extraCpus,
         },
         host,
       )
   if (!verdict.ok) {
-    throw new Error(`docker sandbox: ${verdict.reason}`)
+    if (!team) throw new Error(`docker sandbox: ${verdict.reason}`)
+    // Fewer containers is no remedy for a team; fewer members is.
+    const reserved = opts.ledger && opts.reservationId ? opts.ledger.reservedFor(opts.reservationId, host) : undefined
+    let fit = 0
+    for (let n = members - 1; n >= 1 && fit === 0; n--) {
+      const smaller = teamContainerLimits(perAgent, n)
+      const plan = { containers: 1, memory: memoryLabel(smaller.memoryBytes + extraMemory), cpus: smaller.cpus + extraCpus }
+      if (planCapacity(plan, host, reserved).ok) fit = n
+    }
+    throw new Error(
+      `docker sandbox: Collaboration runs all ${members} agents in one container sized ${members} x ${config.containerMemory} = ${perContainer.memory}` +
+        `${extraMemory > 0 ? ' plus its gateway' : ''}. ${verdict.reason} ` +
+        (fit > 0
+          ? `A team of at most ${fit} agents fits: remove agents, or lower the memory per agent.`
+          : 'Not even a team of one fits: lower the memory per agent, or free Docker memory.'),
+    )
   }
 }
 
@@ -398,6 +445,8 @@ interface RealDeps {
   planFor: ((agentIds: readonly string[]) => Promise<void>) | null
   /** Non-null under Docker only: recycles workers between rounds (see compose-run). */
   releasePopulation: (() => Promise<void>) | null
+  /** Where the grader opens a collaboration round's sealed output. */
+  sealedArtifacts: SealedArtifactWriter | null
 }
 
 /**
@@ -454,6 +503,7 @@ async function buildRealDeps(
       name: 'cli',
       goal: opts.goal,
       sandbox: resolveSandboxMode('real', opts.sandbox),
+      workflow: config.workflow,
       roster: config.roster,
       population: config.populationSize,
       judge: { modelId: config.judge.modelId, mode: config.judge.mode },
@@ -468,8 +518,9 @@ async function buildRealDeps(
       maxContainers: config.maxContainers,
       containerMemory: config.containerMemory,
       containerCpus: config.containerCpus,
-      // The CLI keeps the placement it always had unless its config says otherwise.
-      isolation: config.isolation ?? 'shared',
+      // The CLI keeps the placement it always had unless its config says otherwise; a
+      // collaboration team's one container is always protected.
+      isolation: config.workflow === 'collaboration' ? 'protected' : config.isolation ?? 'shared',
       pricing: { ...config.pricing },
       budget: {
         maxRunTokens: config.budget.maxRunTokens,
@@ -501,6 +552,7 @@ async function buildRealDeps(
     runner: composed.runner,
     planFor: composed.planFor,
     releasePopulation: composed.releasePopulation ?? null,
+    sealedArtifacts: composed.sealedArtifacts ?? null,
   }
 }
 
@@ -529,6 +581,7 @@ export async function runTournamentCli(
     let runner: AgentRunner
     let planFor: ((agentIds: readonly string[]) => Promise<void>) | null = null
     let releasePopulation: (() => Promise<void>) | null = null
+    let sealedArtifacts: SealedArtifactWriter | null = null
     const runIdHolder: RunIdHolder = { value: '' }
     // Read first: a wrong folder should cost no setup.
     const seedStrategies = opts.seedStrategiesDir ? await loadSeedStrategies(opts.seedStrategiesDir) : []
@@ -538,6 +591,7 @@ export async function runTournamentCli(
         opts.workerModels && opts.workerModels.length > 0 ? opts.workerModels : [DEFAULT_REAL_WORKER_MODEL]
       config = {
         ...DEFAULT_CONFIG,
+        workflow: resolveWorkflow(opts.workflow),
         populationSize: opts.population,
         sandbox: resolveSandboxMode('real', opts.sandbox),
         roster: buildRoster(workerModels, opts.population, 0.7),
@@ -551,6 +605,7 @@ export async function runTournamentCli(
       runner = built.runner
       planFor = built.planFor
       releasePopulation = built.releasePopulation
+      sealedArtifacts = built.sealedArtifacts
       stopServer = built.server.stop
 
       // Pre-flight: fail fast and legibly before any agent runs or money is spent,
@@ -565,6 +620,7 @@ export async function runTournamentCli(
     } else {
       config = {
         ...DEFAULT_CONFIG,
+        workflow: resolveWorkflow(opts.workflow),
         populationSize: opts.population,
         sandbox: 'mock',
         roster: [{ modelId: 'mock/model', count: opts.population, temperature: 0.7 }],
@@ -592,6 +648,9 @@ export async function runTournamentCli(
       seedStrategy: seedStrategyFrom(seedStrategies),
       preparePopulation: planFor ?? undefined,
       releasePopulation: releasePopulation ?? undefined,
+      // A mock team finishes in milliseconds; a real one is read every couple of seconds.
+      channel: mode === 'real' ? undefined : MOCK_CHANNEL_LIMITS,
+      sealedArtifacts: sealedArtifacts ?? undefined,
       audit: new AuditCollector(repos, {
         provenance: {
           sandbox: config.sandbox,
@@ -698,7 +757,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     options: {
       goal: { type: 'string', default: 'Produce the best possible answer.' },
       rounds: { type: 'string', default: '5' },
-      population: { type: 'string', default: '20' },
+      // No default here: it depends on the workflow (defaultPopulation).
+      population: { type: 'string' },
+      workflow: { type: 'string' },
       seed: { type: 'string', default: '42' },
       db: { type: 'string', default: ':memory:' },
       mode: { type: 'string', default: 'mock' },
@@ -715,10 +776,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     },
   })
 
+  const workflow = resolveWorkflow(values.workflow)
   const out = await runTournamentCli({
     goal: values.goal!,
     rounds: Number(values.rounds),
-    population: Number(values.population),
+    population: values.population === undefined ? defaultPopulation(workflow) : Number(values.population),
+    workflow,
     seed: Number(values.seed),
     dbPath: values.db!,
     criteria: null,

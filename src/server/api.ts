@@ -23,6 +23,8 @@ import { ActivityCache, type ActivitySnapshot } from './activity.js'
 import { AuditCollector, readRoundAudit } from '../engine/audit.js'
 import { buildJudgingEnvelope, evidenceFromAudit, type JudgeCallRecord } from '../judge/audit.js'
 import type { HostCapacity } from '../runtime/docker/capacity.js'
+import { OUTPUT_README } from '../runtime/team-prompt.js'
+import { teamOutputView, teamScoreView } from './team-views.js'
 
 export interface SpecDefaults {
   workspaceRoot?: string | null
@@ -182,6 +184,7 @@ export function specForResume(run: RunRow, defaults?: SpecDefaults): RunSpec {
     name: run.name,
     goal: run.initialGoal ?? 'resumed',
     sandbox: cfg.sandbox,
+    workflow: cfg.workflow,
     roster: cfg.roster,
     population: cfg.populationSize,
     judge: { modelId: cfg.judge.modelId, mode: cfg.judge.mode },
@@ -322,6 +325,8 @@ function roundStats(repos: Repos, runId: string) {
      */
     judgeMode: string
     scoreScale: 'judge' | 'rank'
+    /** Collaboration rounds: the one team score every member's entry mirrors; null otherwise. */
+    team: { score: number; status: string } | null
   }[] = []
   for (const round of repos.rounds.listForRun(runId)) {
     const scores = repos.scores.forRound(round.id)
@@ -357,6 +362,10 @@ function roundStats(repos: Repos, runId: string) {
       metaDigest: round.metaDigest,
       judgeMode: round.judgeMode,
       scoreScale: round.judgeMode === 'batched_finals' ? 'rank' : 'judge',
+      team: (() => {
+        const team = teamScoreView(repos, round.id)
+        return team ? { score: team.score, status: team.status } : null
+      })(),
     })
   }
   return out
@@ -394,6 +403,8 @@ function roundDetail(repos: Repos, round: RoundRow) {
     // model column is a future migration.
     judgeMode: round.judgeMode,
     entries,
+    /** Collaboration rounds: the team's score and the judge's rationale; null otherwise. */
+    team: teamScoreView(repos, round.id),
   }
 }
 
@@ -485,6 +496,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         onEvent: emit,
         preparePopulation: composed.planFor ?? undefined,
         releasePopulation: composed.releasePopulation ?? undefined,
+        channel: composed.channel,
+        sealedArtifacts: composed.sealedArtifacts,
         audit: new AuditCollector(deps.repos, {
           provenance: {
             sandbox: composed.config.sandbox,
@@ -666,7 +679,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const record = deps.registry?.get(runId)
     if ((record?.manager ?? deps.manager).isBusy(runId)) return reply.code(409).send({ error: 'run is busy' })
     // Refused here rather than at the next round's planning, where it would fail the round.
-    if (run.config.sandbox === 'docker' && run.config.isolation === 'protected') {
+    // A collaboration team shares one container by design; its next round's preflight sizes it.
+    if (run.config.sandbox === 'docker' && run.config.isolation === 'protected' && run.config.workflow !== 'collaboration') {
       const active = deps.repos.agents.listActive(runId).length
       if (active + 1 > run.config.maxContainers) {
         return reply.code(409).send({
@@ -733,11 +747,12 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const labels = new Set(all.map((a) => a.label))
     // WHY length+1 with a collision loop: agents are never deleted, so length+1 is
     // unique absent races; the loop covers concurrent adds landing on the same n.
+    const prefix = run.config.workflow === 'collaboration' ? 'agent' : 'competitor'
     let n = all.length + 1
-    let label = `competitor-r${nextIdx}-manual-${n}`
+    let label = `${prefix}-r${nextIdx}-manual-${n}`
     for (let guard = 0; labels.has(label) && guard < all.length + 100; guard++) {
       n += 1
-      label = `competitor-r${nextIdx}-manual-${n}`
+      label = `${prefix}-r${nextIdx}-manual-${n}`
     }
     const agent = deps.repos.agents.create({ runId, label, parentAgentId, bornRound: nextIdx })
     // NO provisioning: PREPARE provisions every active agent each round, so a
@@ -814,6 +829,39 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
     if (!round) return reply.code(404).send({ error: 'no such round' })
     return readRoundAudit(deps.repos, round.id)
+  })
+
+  /** A collaboration round's sealed output folder: manifest, seal, and who wrote what. */
+  app.get('/api/runs/:runId/rounds/:idx/output', async (req, reply) => {
+    const { runId, idx } = req.params as { runId: string; idx: string }
+    if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
+    const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
+    if (!round) return reply.code(404).send({ error: 'no such round' })
+    const output = teamOutputView(deps.repos, round.id)
+    if (!output) return reply.code(404).send({ error: 'this round has no team output' })
+    return output
+  })
+
+  /** One file of a round's sealed output, as captured. Binary and oversized files have no content. */
+  app.get('/api/runs/:runId/rounds/:idx/output/file', async (req, reply) => {
+    const { runId, idx } = req.params as { runId: string; idx: string }
+    const path = (req.query as { path?: string }).path
+    if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
+    const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
+    if (!round) return reply.code(404).send({ error: 'no such round' })
+    if (typeof path !== 'string' || path === '') return reply.code(400).send({ error: 'path is required' })
+    const entry = deps.repos.teamOutputs.get(round.id)?.files.find((f) => f.path === path)
+    if (!entry) return reply.code(404).send({ error: 'no such file in this round\'s output' })
+    return { ...entry, content: entry.stored ? deps.repos.teamOutputs.file(round.id, path) : null }
+  })
+
+  /** A collaboration round's channel entries, in the order they were written. */
+  app.get('/api/runs/:runId/rounds/:idx/channel', async (req, reply) => {
+    const { runId, idx } = req.params as { runId: string; idx: string }
+    if (!deps.repos.runs.get(runId)) return reply.code(404).send({ error: 'no such run' })
+    const round = deps.repos.rounds.listForRun(runId).find((r) => r.idx === Number(idx))
+    if (!round) return reply.code(404).send({ error: 'no such round' })
+    return { messages: deps.repos.channel.forRound(round.id) }
   })
 
   app.get('/api/runs/:runId/export', async (req, reply) => {
@@ -907,6 +955,49 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     // The same frozen evidence the original grading saw: a rejudge re-reads the record,
     // never the live workspace, so the two are comparable.
     const stored = readRoundAudit(deps.repos, round.id)
+    if (run.config.workflow === 'collaboration') {
+      // The sealed snapshot, never the live folder (which later rounds have kept changing).
+      const output = deps.repos.teamOutputs.get(round.id)
+      if (!output) return reply.code(409).send({ error: 'this round has no sealed team output to regrade' })
+      const texts = deps.repos.teamOutputs.files(round.id)
+      const writer = record?.composed.sealedArtifacts
+      const artifactPath = output.status === 'ok' && writer ? await writer.write(round.id, texts).catch(() => null) : null
+      // In the round's own order (by label), so members keep the anonymous refs they were graded under.
+      const label = (agentId: string) => byId.get(agentId)?.label ?? ''
+      const members = deps.repos.submissions.forRound(round.id)
+        .sort((a, b) => (label(a.agentId) < label(b.agentId) ? -1 : label(a.agentId) > label(b.agentId) ? 1 : 0))
+        .map((sub) => ({ agentId: sub.agentId, evidence: evidenceFromAudit(stored.frozen ? stored : null, sub.agentId) }))
+      const calls: JudgeCallRecord[] = []
+      let team
+      try {
+        team = await judge.scoreTeam(round.goalMd, round.criteriaMd ?? '', {
+          status: output.status, reason: output.errorText,
+          readmeMd: texts.find((t) => t.path === OUTPUT_README)?.content ?? null,
+          files: output.files.map((f) => ({ path: f.path, bytes: f.bytes, binary: f.binary })),
+          texts, artifactPath, members,
+        }, round.idx, (r) => calls.push(r))
+      } catch (e) {
+        return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
+      }
+      const oldByAgent = new Map(deps.repos.scores.forRound(round.id).map((s) => [s.agentId, s]))
+      const entries = members.map((m) => ({
+        agentId: m.agentId,
+        label: byId.get(m.agentId)?.label ?? '',
+        oldScore: oldByAgent.get(m.agentId)?.score ?? 0,
+        oldRank: oldByAgent.get(m.agentId)?.rank ?? 0,
+        newScore: team.score,
+        newRank: 1,
+        newRationaleMd: team.rationaleMd,
+        rankChanged: false,
+      }))
+      const preview = buildJudgingEnvelope({
+        roundId: round.id, kind: 'rejudge_preview', evaluator: judge.evaluator(), mode: team.mode,
+        criteriaMd: round.criteriaMd ?? '', criteriaSource: round.criteriaSource,
+        evidence: { status: stored.frozen ? 'recorded' : 'not_recorded', digest: stored.frozen?.digest ?? null },
+        calls, agents: team.audits,
+      })
+      return { entries, metaDigest: team.metaDigest, mode: team.mode, preview }
+    }
     const inputs: JudgeInput[] = deps.repos.submissions.forRound(round.id).map((sub) => ({
       agentId: sub.agentId,
       submissionMd: sub.submissionMd ?? '',
@@ -995,6 +1086,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         onEvent: emit,
         preparePopulation: composed.planFor ?? undefined,
         releasePopulation: composed.releasePopulation ?? undefined,
+        channel: composed.channel,
+        sealedArtifacts: composed.sealedArtifacts,
         audit: new AuditCollector(deps.repos, {
           provenance: {
             sandbox: composed.config.sandbox,

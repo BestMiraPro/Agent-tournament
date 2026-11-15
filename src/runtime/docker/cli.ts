@@ -60,6 +60,10 @@ export interface RunSpec {
   maxOpenFiles?: number
 }
 
+/** Per-container process and open-file ceilings for one worker; a team container gets these per member. */
+export const WORKER_PIDS_LIMIT = 256
+export const WORKER_MAX_OPEN_FILES = 2048
+
 /** Where a run's context folder appears inside every shard. */
 export const CONTAINER_CONTEXT_PATH = '/context'
 
@@ -73,9 +77,9 @@ export const CONTAINER_CONTEXT_PATH = '/context'
  * Note what is absent: `--gpus` is never passed, so containers get no GPU access at all.
  */
 export function buildRunArgs(spec: RunSpec): string[] {
-  const pids = spec.pidsLimit ?? 256
+  const pids = spec.pidsLimit ?? WORKER_PIDS_LIMIT
   const fsize = spec.maxFileBytes ?? 268_435_456 // 256MB per file
-  const nofile = spec.maxOpenFiles ?? 2048
+  const nofile = spec.maxOpenFiles ?? WORKER_MAX_OPEN_FILES
 
   return [
     'run', '-d',
@@ -174,9 +178,9 @@ export const PROTECTED_WORKER_START =
  * docs/superpowers/specs/2026-09-15-protected-runtime-verified-facts.md.
  */
 export function buildProtectedRunArgs(spec: ProtectedRunSpec): string[] {
-  const pids = spec.pidsLimit ?? 256
+  const pids = spec.pidsLimit ?? WORKER_PIDS_LIMIT
   const fsize = spec.maxFileBytes ?? 268_435_456
-  const nofile = spec.maxOpenFiles ?? 2048
+  const nofile = spec.maxOpenFiles ?? WORKER_MAX_OPEN_FILES
   return [
     'run', '-d',
     '--name', spec.name,

@@ -5,11 +5,14 @@ import { openDb } from '../../src/db/open.js'
 import { makeRepos, type Repos } from '../../src/db/repos.js'
 import { DEFAULT_CONFIG } from '../../src/core/types.js'
 
+/** Manual population edits as a tournament has them; a team's labels and container are covered in collaboration-api. */
+const TOURNAMENT_CONFIG = { ...DEFAULT_CONFIG, workflow: 'tournament' as const }
+
 /** A run with 2 agents (each with one genome at round 1) and one round row, so bornRound pins to 2. */
 function seed() {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
-  const run = repos.runs.create({ name: 'pop', config: DEFAULT_CONFIG, seedDir: null })
+  const run = repos.runs.create({ name: 'pop', config: TOURNAMENT_CONFIG, seedDir: null })
   const round = repos.rounds.create({ runId: run.id, idx: 1, goalMd: 'goal 1' })
   const mk = (label: string, modelId: string) => {
     const agent = repos.agents.create({ runId: run.id, label, parentAgentId: null, bornRound: 1 })
@@ -31,7 +34,7 @@ function appFor(repos: Repos, manager: never, registry = new RunRegistry()) {
   return buildApi({
     repos,
     manager,
-    createRun: (name: string) => repos.runs.create({ name, config: DEFAULT_CONFIG, seedDir: null }).id,
+    createRun: (name: string) => repos.runs.create({ name, config: TOURNAMENT_CONFIG, seedDir: null }).id,
     registry,
   })
 }
@@ -39,7 +42,7 @@ function appFor(repos: Repos, manager: never, registry = new RunRegistry()) {
 describe('POST /api/runs/:runId/agents under protected isolation', () => {
   const dockerRun = (isolation: 'protected' | 'shared', maxContainers: number) => {
     const { repos, run } = seed()
-    repos.runs.updateConfig(run.id, { ...DEFAULT_CONFIG, sandbox: 'docker', isolation, maxContainers })
+    repos.runs.updateConfig(run.id, { ...TOURNAMENT_CONFIG, sandbox: 'docker', isolation, maxContainers })
     return { repos, run }
   }
   const add = (api: ReturnType<typeof appFor>, runId: string) => api.inject({
@@ -161,7 +164,7 @@ describe('POST /api/runs/:runId/agents', () => {
 
   test('404: clone source from another run', async () => {
     const { repos, run } = seed()
-    const other = repos.runs.create({ name: 'other', config: DEFAULT_CONFIG, seedDir: null })
+    const other = repos.runs.create({ name: 'other', config: TOURNAMENT_CONFIG, seedDir: null })
     const foreign = repos.agents.create({ runId: other.id, label: 'foreign', parentAgentId: null, bornRound: 1 })
     repos.genomes.create({
       agentId: foreign.id, roundIdx: 1, strategyMd: 's', notesMd: 'n',
@@ -181,7 +184,7 @@ describe('POST /api/runs/:runId/agents', () => {
     const repos = makeRepos(db)
     const run = repos.runs.create({
       name: 'capped',
-      config: { ...DEFAULT_CONFIG, budget: { ...DEFAULT_CONFIG.budget, maxRunUsd: 10 } },
+      config: { ...TOURNAMENT_CONFIG, budget: { ...TOURNAMENT_CONFIG.budget, maxRunUsd: 10 } },
       seedDir: null,
     })
     const api = appFor(repos, idle())
@@ -256,7 +259,7 @@ describe('DELETE /api/runs/:runId/agents/:agentId', () => {
 
   test('404: unknown agent + foreign agent', async () => {
     const { repos, run } = seed()
-    const other = repos.runs.create({ name: 'other', config: DEFAULT_CONFIG, seedDir: null })
+    const other = repos.runs.create({ name: 'other', config: TOURNAMENT_CONFIG, seedDir: null })
     const foreign = repos.agents.create({ runId: other.id, label: 'foreign', parentAgentId: null, bornRound: 1 })
     const api = appFor(repos, idle())
     for (const id of ['nope', foreign.id]) {
@@ -293,7 +296,7 @@ describe('DELETE /api/runs/:runId/agents/:agentId', () => {
   test('409: last active agent', async () => {
     const db = openDb(':memory:')
     const repos = makeRepos(db)
-    const run = repos.runs.create({ name: 'solo', config: DEFAULT_CONFIG, seedDir: null })
+    const run = repos.runs.create({ name: 'solo', config: TOURNAMENT_CONFIG, seedDir: null })
     const solo = repos.agents.create({ runId: run.id, label: 'solo', parentAgentId: null, bornRound: 1 })
     const api = appFor(repos, idle())
     const res = await api.inject({ method: 'DELETE', url: `/api/runs/${run.id}/agents/${solo.id}` })

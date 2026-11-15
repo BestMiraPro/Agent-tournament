@@ -22,6 +22,7 @@ function rig(opts: {
   const repos = makeRepos(db)
   const config: RunConfig = {
     ...DEFAULT_CONFIG,
+    workflow: 'tournament',
     populationSize: opts.populationSize ?? 2,
     sandbox: 'mock',
     concurrency: 2,
@@ -56,6 +57,7 @@ describe('engine releasePopulation boundary', () => {
     const repos = makeRepos(db)
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
+      workflow: 'tournament',
       populationSize: 2,
       sandbox: 'mock',
       concurrency: 2,

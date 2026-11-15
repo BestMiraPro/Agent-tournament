@@ -107,6 +107,22 @@ export type EngineEvent =
       roundIdx: number
       /** `failed` marks ranked agents whose attempt did not succeed, so rank 1 is not read as a win. */
       scores: { agentId: string; rank: number; score: number; failed?: boolean }[]
+      /** Collaboration: the one team score every member's entry above mirrors. */
+      team?: { score: number; status: string }
+    }
+  | {
+      /** Collaboration: a new CHANNEL.md entry, the moment the engine first reads it. */
+      type: 'channel.message'
+      runId: string
+      roundIdx: number
+      seq: number
+      author: string
+      /** The member whose label wrote it; null for a label not on the team. */
+      agentId: string | null
+      target: string | null
+      postedAt: string
+      /** Bounded for the live view; the round's channel endpoint and the file hold the rest. */
+      body: string
     }
   | {
       type: 'round.complete'

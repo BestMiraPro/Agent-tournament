@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { getRun, type ActivityItem, type ActivitySnapshot, type AgentFailure, type RunSnapshot, type StreamHealth } from './api.js'
+import { getRun, type ActivityItem, type ActivitySnapshot, type AgentFailure, type ChannelMessage, type RunSnapshot, type StreamHealth } from './api.js'
 
 export interface LiveAgent {
   status: 'pending' | 'running' | 'done' | 'failed'
@@ -23,6 +23,8 @@ export interface LiveAgent {
 
 /** A browser keeps no more of an agent's timeline than the server does. */
 const MAX_CLIENT_ITEMS = 100
+/** Channel entries a browser keeps for the live round; the round's channel endpoint has them all. */
+export const MAX_CLIENT_CHANNEL = 200
 
 export interface PendingPermission {
   requestId: string
@@ -54,6 +56,10 @@ export interface LiveState {
   streams: Record<string, StreamHealth>
   /** The newest server activity revision applied, so an older snapshot cannot overwrite it. */
   activityRevision: number
+  /** Collaboration: the live round's channel entries as they are read, oldest first. */
+  channel: ChannelMessage[]
+  /** Collaboration: the latest round's team score, once it is judged. */
+  teamScore: { roundIdx: number; score: number; status: string } | null
 }
 
 export const initialLiveState: LiveState = {
@@ -67,6 +73,8 @@ export const initialLiveState: LiveState = {
   wsStatus: 'connected',
   streams: {},
   activityRevision: 0,
+  channel: [],
+  teamScore: null,
 }
 
 function stateFromSnapshot(snapshot: RunSnapshot): LiveState {
@@ -121,7 +129,24 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
         ...state, roundStatus: status, roundIdx: event.roundIdx as number, busy: true, agents,
         // A new round is a new attempt: the previous round's outright failure no longer applies.
         lastError: status === 'preparing' ? null : state.lastError,
+        // Its channel starts empty too; the file keeps earlier rounds for the team.
+        channel: status === 'preparing' ? [] : state.channel,
       }
+    }
+    case 'channel.message': {
+      if (event.roundIdx !== state.roundIdx) return state
+      const seq = event.seq as number
+      if (state.channel.some((m) => m.seq === seq)) return state
+      const message: ChannelMessage = {
+        seq,
+        author: event.author as string,
+        agentId: (event.agentId as string | null) ?? null,
+        target: (event.target as string | null) ?? null,
+        postedAt: event.postedAt as string,
+        body: event.body as string,
+      }
+      const channel = [...state.channel, message].sort((a, b) => a.seq - b.seq)
+      return { ...state, channel: channel.length > MAX_CLIENT_CHANNEL ? channel.slice(-MAX_CLIENT_CHANNEL) : channel }
     }
     case 'agent.status': {
       if (!agentId) return state
@@ -215,11 +240,14 @@ export function liveReducer(state: LiveState, event: { type: string } & Record<s
           },
         },
       }
-    case 'round.scored':
+    case 'round.scored': {
+      const team = event.team as { score: number; status: string } | undefined
       return {
         ...state,
         scores: [...(event.scores as LiveState['scores'])].sort((a, b) => a.rank - b.rank),
+        teamScore: team ? { roundIdx: event.roundIdx as number, score: team.score, status: team.status } : state.teamScore,
       }
+    }
     case 'round.complete':
       return {
         ...state,

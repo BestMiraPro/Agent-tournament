@@ -134,7 +134,7 @@ const seamsFor = (daemon: ReturnType<typeof fakeDaemon>, over: Record<string, un
 }
 
 const specFor = (root: string, extra: Record<string, unknown> = {}) => parseRunSpec({
-  name: 'd', goal: 'g', sandbox: 'docker', isolation: 'shared',
+  name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', isolation: 'shared',
   roster: [{ modelId: 'mock/model', count: 2, temperature: 0.7 }],
   workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 2, containerMemory: '1g', ...extra,
 })

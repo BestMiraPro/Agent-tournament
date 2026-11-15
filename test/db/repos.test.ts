@@ -216,6 +216,23 @@ describe('agent-detail getters', () => {
   })
 })
 
+describe('channel messages', () => {
+  test('are kept per round in order, with who each was forwarded to', () => {
+    const { repos, run } = setup()
+    const round = repos.rounds.create({ runId: run.id, idx: 1, goalMd: 'g' })
+    const base = { runId: run.id, roundId: round.id, target: null, postedAt: '2026-11-15T10:00:00.000Z' }
+    repos.channel.append({ ...base, seq: 2, author: 'agent-02', agentId: 'B', body: 'second' })
+    repos.channel.append({ ...base, seq: 1, author: 'agent-01', agentId: 'A', body: 'first' })
+    repos.channel.markDelivered(round.id, [1], 'B')
+    repos.channel.markDelivered(round.id, [1], 'B')
+    repos.channel.markDelivered(round.id, [1, 2], 'C')
+    expect(repos.channel.forRound(round.id).map((m) => [m.seq, m.author, m.body, m.deliveredTo])).toEqual([
+      [1, 'agent-01', 'first', ['B', 'C']],
+      [2, 'agent-02', 'second', ['C']],
+    ])
+  })
+})
+
 describe('config round-trip', () => {
   test('preserves Infinity budget limits through the database', () => {
     const { repos } = setup()
@@ -237,5 +254,15 @@ describe('config round-trip', () => {
     }
     const run = repos.runs.create({ name: 'fin', config: cfg, seedDir: null })
     expect(repos.runs.get(run.id)!.config.budget.maxRunTokens).toBe(1234)
+  })
+
+  test('a stored config from before workflows existed decodes as tournament, which is what it ran as', () => {
+    const { db, repos } = setup()
+    const { workflow: _dropped, ...legacy } = { ...DEFAULT_CONFIG, workflow: 'collaboration' as const }
+    db.prepare('INSERT INTO runs (id, name, created_at, status, config_json, seed_dir) VALUES (?,?,?,?,?,?)')
+      .run('legacy', 'legacy', Date.now(), 'active', JSON.stringify(legacy), null)
+    expect(repos.runs.get('legacy')!.config.workflow).toBe('tournament')
+    const fresh = repos.runs.create({ name: 'c', config: { ...DEFAULT_CONFIG, workflow: 'collaboration' }, seedDir: null })
+    expect(repos.runs.get(fresh.id)!.config.workflow).toBe('collaboration')
   })
 })

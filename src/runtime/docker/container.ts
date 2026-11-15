@@ -42,6 +42,9 @@ export interface ShardContainerSpec {
   healthTimeoutMs?: number
   /** Present for protected isolation: no credentials, no egress, served through a gateway. */
   protectedRuntime?: ProtectedRuntimeSpec
+  /** Process and open-file ceilings; a collaboration team's container scales them per member. */
+  pidsLimit?: number
+  maxOpenFiles?: number
   /** How the app reaches the container's API. Default `loopback`. */
   reach?: DockerReach
 }
@@ -220,6 +223,8 @@ export async function startShardContainer(
         contextDir: spec.contextDir ?? null,
         toolsDir: spec.toolsDir ?? null,
         modelsFile: spec.modelsFile ?? null,
+        ...(spec.pidsLimit !== undefined ? { pidsLimit: spec.pidsLimit } : {}),
+        ...(spec.maxOpenFiles !== undefined ? { maxOpenFiles: spec.maxOpenFiles } : {}),
       }),
       120_000,
     )
@@ -292,6 +297,8 @@ async function startProtectedShard(
       configDir: runtime.configDir,
       toolsDir: spec.toolsDir,
       contextDir: spec.contextDir ?? null,
+      ...(spec.pidsLimit !== undefined ? { pidsLimit: spec.pidsLimit } : {}),
+      ...(spec.maxOpenFiles !== undefined ? { maxOpenFiles: spec.maxOpenFiles } : {}),
     }),
     120_000,
   )

@@ -1,4 +1,4 @@
-import { docker, type DockerFn } from './cli.js'
+import { docker, WORKER_MAX_OPEN_FILES, WORKER_PIDS_LIMIT, type DockerFn } from './cli.js'
 import { parseMemoryLimit } from '../../core/memory.js'
 
 // Re-exported so existing importers keep working; the parser itself lives in core.
@@ -127,6 +127,31 @@ export function memoryLabel(bytes: number): string {
   return bytes % 1024 ** 3 === 0 ? `${bytes / 1024 ** 3}g` : `${Math.ceil(bytes / 1024 ** 2)}m`
 }
 
+export interface TeamContainerLimits {
+  memory: string
+  memoryBytes: number
+  cpus: number
+  pidsLimit: number
+  maxOpenFiles: number
+}
+
+/**
+ * The one container a collaboration team shares: one worker's ceilings per member. A team is
+ * charged exactly what the same agents would be charged one container each, so the measured
+ * per-agent sizing (DEFAULT_CONFIG) keeps meaning what it says.
+ */
+export function teamContainerLimits(perAgent: { memory: string; cpus: number }, members: number): TeamContainerLimits {
+  const n = Math.max(1, Math.floor(members))
+  const memoryBytes = parseMemoryLimit(perAgent.memory) * n
+  return {
+    memory: memoryLabel(memoryBytes),
+    memoryBytes,
+    cpus: perAgent.cpus * n,
+    pidsLimit: WORKER_PIDS_LIMIT * n,
+    maxOpenFiles: WORKER_MAX_OPEN_FILES * n,
+  }
+}
+
 /**
  * Capacity this process has promised to runs that are starting or running.
  *
@@ -142,18 +167,7 @@ export class CapacityLedger {
 
   /** Checks `request` against `host` and every other reservation; records it only when it fits. */
   admit(id: string, request: CapacityRequest, host: HostCapacity): CapacityVerdict {
-    const others = [...this.entries].filter(([key]) => key !== id).map(([, entry]) => entry)
-    // Usage of every attached container is inside a ceiling counted here: other runs' in
-    // `memoryBytes`, this run's own in the request being admitted. A run re-admitted to grow
-    // used to count its running containers twice, as used memory and as its full request.
-    const ceilingContainers = new Set([...this.entries.values()].flatMap((e) => [...e.containerNames]))
-    const reserved: ReservedCapacity = {
-      memoryBytes: others.reduce((n, e) => n + e.request.containers * e.request.memoryBytes, 0),
-      cpus: others.reduce((n, e) => n + e.request.containers * e.request.cpus, 0),
-      observedBytes: (host.containers ?? [])
-        .filter((c) => ceilingContainers.has(c.name))
-        .reduce((n, c) => n + c.usedBytes, 0),
-    }
+    const reserved = this.reservedFor(id, host)
     const verdict = planCapacity(
       { containers: request.containers, memory: memoryLabel(request.memoryBytes), cpus: request.cpus },
       host,
@@ -163,6 +177,22 @@ export class CapacityLedger {
       this.entries.set(id, { request: { ...request }, containerNames: this.entries.get(id)?.containerNames ?? new Set() })
     }
     return verdict
+  }
+
+  /** What every reservation other than `id` holds against `host`, as `admit` counts it. */
+  reservedFor(id: string, host: HostCapacity): ReservedCapacity {
+    const others = [...this.entries].filter(([key]) => key !== id).map(([, entry]) => entry)
+    // Usage of every attached container is inside a ceiling counted here: other runs' in
+    // `memoryBytes`, this run's own in the request being admitted. A run re-admitted to grow
+    // used to count its running containers twice, as used memory and as its full request.
+    const ceilingContainers = new Set([...this.entries.values()].flatMap((e) => [...e.containerNames]))
+    return {
+      memoryBytes: others.reduce((n, e) => n + e.request.containers * e.request.memoryBytes, 0),
+      cpus: others.reduce((n, e) => n + e.request.containers * e.request.cpus, 0),
+      observedBytes: (host.containers ?? [])
+        .filter((c) => ceilingContainers.has(c.name))
+        .reduce((n, c) => n + c.usedBytes, 0),
+    }
   }
 
   /** Attributes a started container to a reservation, so its usage is not counted twice. */

@@ -120,6 +120,8 @@ describe('GET /api/runs/:runId/rounds/:idx', () => {
           submission: sub(1),
         },
       ],
+      // A tournament round has no team.
+      team: null,
     })
   })
 
@@ -172,6 +174,7 @@ describe('GET /api/runs/:runId/rounds/:idx', () => {
       metaDigest: null, costUsd: 0,
       status: 'pending', judgeMode: 'single_call',
       entries: [],
+      team: null,
     })
   })
 })

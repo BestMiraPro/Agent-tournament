@@ -105,7 +105,7 @@ describe('createDashboard after a restart', () => {
 
 describe('createDashboard with docker runs turned off', () => {
   const dockerSpec = {
-    name: 'docker run', goal: 'g', sandbox: 'docker', isolation: 'shared',
+    name: 'docker run', goal: 'g', sandbox: 'docker', workflow: 'tournament', isolation: 'shared',
     roster: [{ modelId: 'anthropic/claude-sonnet-4-5', count: 2, temperature: 0.7 }],
     pricing: { 'anthropic/claude-sonnet-4-5': { inPerM: 3, outPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 } },
   }

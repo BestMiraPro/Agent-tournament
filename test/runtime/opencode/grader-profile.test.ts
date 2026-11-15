@@ -5,6 +5,8 @@ import { describe, expect, test } from 'vitest'
 import {
   GRADER_AGENT,
   GRADER_DIR,
+  SEALED_DIR,
+  sealedArtifactWriter,
   serializeGraderProfile,
   writeGraderProfile,
 } from '../../../src/runtime/opencode/grader-profile.js'
@@ -39,6 +41,36 @@ describe('grader profile', () => {
       const dir = writeGraderProfile(root, null)
       expect(dir).toBe(join(root, GRADER_DIR))
       expect(readFileSync(join(dir, '.opencode', 'agents', `${GRADER_AGENT}.md`), 'utf8')).toBe(serializeGraderProfile(null))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('sealed copy for the grader', () => {
+  test("a round's stored output is written inside the grader's own folder, which it may read without any outside folder", async () => {
+    const root = mkdtempSync(join(tmpdir(), 'grader-sealed-'))
+    try {
+      const graderDir = writeGraderProfile(root, null)
+      const path = await sealedArtifactWriter(graderDir).write('round-1', [
+        { path: 'output/README.md', content: '# Team output' },
+        { path: 'output/src/model.py', content: 'print(1)' },
+      ])
+      expect(path).toBe(join(graderDir, SEALED_DIR, 'round-1', 'output'))
+      expect(readFileSync(join(path, 'README.md'), 'utf8')).toBe('# Team output')
+      expect(readFileSync(join(path, 'src', 'model.py'), 'utf8')).toBe('print(1)')
+      expect(serializeGraderProfile(null)).toContain('external_directory: deny')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('refuses a path that would leave the sealed folder, and an unsafe round id', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'grader-sealed-'))
+    try {
+      const writer = sealedArtifactWriter(writeGraderProfile(root, null))
+      await expect(writer.write('r1', [{ path: '../../escape.md', content: 'x' }])).rejects.toThrow(/escapes/)
+      await expect(writer.write('../r1', [])).rejects.toThrow(/unsafe round id/)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

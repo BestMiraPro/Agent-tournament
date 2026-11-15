@@ -63,7 +63,7 @@ async function makeDockerEngine(opts: { populationSize: number; maxContainers: n
   const config: RunConfig = {
     ...DEFAULT_CONFIG,
     populationSize: opts.populationSize,
-    sandbox: 'docker',
+    sandbox: 'docker', workflow: 'tournament',
     maxContainers: opts.maxContainers,
     concurrency: 2,
     roster: [{ modelId: 'mock/model', count: opts.populationSize, temperature: 0.7 }],

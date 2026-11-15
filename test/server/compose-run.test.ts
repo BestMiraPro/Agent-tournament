@@ -62,7 +62,7 @@ describe('composeRun', () => {
 
   describe('docker auth file', () => {
     const dockerSpec = (root: string, authFile: string) => parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 1, temperature: 0.7 }],
       workspaceRoot: root, authFile,
     })
@@ -140,7 +140,7 @@ describe('composeRun', () => {
     const GiB = 1024 ** 3
     const host = { totalMemoryBytes: 16 * GiB, usedMemoryBytes: 0, cpus: 16, containers: [] }
     const spec = (root: string, extra: Record<string, unknown> = {}) => parseRunSpec({
-      name: 'p', goal: 'g', sandbox: 'docker',
+      name: 'p', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 2, temperature: 0.7 }],
       workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 2, ...extra,
     })
@@ -241,6 +241,34 @@ describe('composeRun', () => {
       }
     })
 
+    test('a collaboration team gets ONE protected container sized for every member, and its workspace is /work', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-team-'))
+      const ledger = new CapacityLedger()
+      const startShardContainerFn = started()
+      const seams = {
+        ...mockSeams(), ledger, readCapacity: vi.fn(async () => host),
+        startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+        startShardContainerFn,
+        removeContainerFn: vi.fn(async (_name: string) => {}),
+      }
+      try {
+        const teamSpec = spec(root, { workflow: 'collaboration', roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 3, temperature: 0.7 }], maxContainers: 1 })
+        const c = await composeRun(teamSpec, seams as never, { runIdHolder: { value: 'run-t' } })
+        expect(c.capacity).toEqual({ committed: 1, maxContainers: 1 })
+        await c.planFor!(['a1', 'a2', 'a3'])
+        expect(ledger.active()).toEqual([expect.objectContaining({ containers: 1, memoryBytes: 3 * GiB + 64 * 1024 ** 2, cpus: 3.25 })])
+        const team = await c.sandbox.provisionTeam!('run-t', ['a1', 'a2', 'a3'], {})
+        expect([...team.handles.values()].map((h) => h.workspacePath)).toEqual(['/work', '/work', '/work'])
+        expect(startShardContainerFn).toHaveBeenCalledTimes(1)
+        const [s] = startShardContainerFn.mock.calls[0] as unknown as [{ hostDir: string; memory: string; cpus: number; pidsLimit: number; maxOpenFiles: number; authFile: string | null; protectedRuntime?: unknown }]
+        expect(s).toMatchObject({ hostDir: join(root, 'team-run-t'), memory: '3g', cpus: 3, pidsLimit: 768, maxOpenFiles: 6144, authFile: null })
+        expect(s.protectedRuntime).toBeDefined()
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
     test('without a host model catalogue a protected run is refused rather than started unpinned', async () => {
       const root = mkdtempSync(join(tmpdir(), 'compose-protected-'))
       const seams = { ...mockSeams(), hostModelsFile: vi.fn(() => null) }
@@ -315,7 +343,7 @@ describe('composeRun', () => {
     const GiB = 1024 ** 3
     const host = { totalMemoryBytes: 5 * GiB, usedMemoryBytes: 0, cpus: 16, containers: [] }
     const spec = (root: string, count: number) => parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'w/m', count, temperature: 0.7 }],
       workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: count, containerMemory: '1g',
     })
@@ -534,7 +562,7 @@ describe('composeRun', () => {
     const seams = mockSeams()
     seams.readCapacity.mockResolvedValueOnce({ totalMemoryBytes: 2 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })
     await expect(composeRun(parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'w/m', count: 4, temperature: 0.7 }],
       workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     }), seams as never)).rejects.toThrow(/docker sandbox/i)
@@ -571,7 +599,7 @@ describe('composeRun', () => {
     seams.readCapacity.mockRejectedValueOnce(new Error('docker info unavailable'))
     const reported: string[] = []
     const c = await composeRun(parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker', isolation: 'shared',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', isolation: 'shared',
       roster: [{ modelId: 'w/m', count: 4, temperature: 0.7 }],
       workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     }), seams as never, { reportWarning: (m) => reported.push(m) })
@@ -649,7 +677,7 @@ describe('composeRun', () => {
     > = { startShardContainerFn, removeContainerFn }
     try {
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'),
       }), { ...seams, ...dockerBoundary } as never)
@@ -710,7 +738,7 @@ describe('composeRun', () => {
     }
     try {
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'), contextDir: ctx,
       }), {
@@ -758,7 +786,7 @@ describe('composeRun', () => {
     }
     try {
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'), contextDir: ctx,
       }), {
@@ -816,7 +844,7 @@ describe('composeRun', () => {
         shardIndex: spec.shardIndex,
       }))
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: missing, count: 1, temperature: 0.7 }, { modelId: present, count: 1, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'),
       }), {

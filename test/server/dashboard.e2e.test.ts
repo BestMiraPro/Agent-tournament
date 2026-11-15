@@ -30,7 +30,8 @@ describe('dashboard end to end', () => {
       await criteriaGate
       return { criteriaMd: 'resolved scoring criteria', source: 'generated' }
     })
-    const scoreSpy = vi.spyOn(Judge.prototype, 'score')
+    // The legacy path runs on the app's default workflow: a collaboration team, judged as one artifact.
+    const scoreSpy = vi.spyOn(Judge.prototype, 'scoreTeam')
 
     try {
       const created = await dashboard.app.inject({
@@ -134,6 +135,7 @@ describe('dashboard end to end', () => {
     const population = 4
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
+      workflow: 'tournament',
       populationSize: population,
       sandbox: 'mock',
       roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
@@ -201,6 +203,7 @@ describe('dashboard end to end', () => {
     const population = 2
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
+      workflow: 'tournament',
       populationSize: population,
       sandbox: 'mock',
       roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
@@ -261,6 +264,7 @@ describe('dashboard end to end', () => {
     const population = 4
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
+      workflow: 'tournament',
       populationSize: population,
       sandbox: 'mock',
       roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
@@ -341,6 +345,7 @@ describe('dashboard end to end', () => {
     const population = 4
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
+      workflow: 'tournament',
       populationSize: population,
       sandbox: 'mock',
       roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
@@ -492,6 +497,7 @@ describe('dashboard end to end', () => {
     ]
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
+      workflow: 'tournament',
       populationSize: population,
       sandbox: 'mock',
       roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
@@ -566,6 +572,7 @@ describe('dashboard end to end', () => {
     ]
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
+      workflow: 'tournament',
       populationSize: population,
       sandbox: 'mock',
       roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
@@ -619,6 +626,7 @@ describe('dashboard end to end', () => {
     const population = 4
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
+      workflow: 'tournament',
       populationSize: population,
       sandbox: 'mock',
       roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],
@@ -706,6 +714,7 @@ describe('dashboard end to end', () => {
     const population = 30
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
+      workflow: 'tournament',
       populationSize: population,
       sandbox: 'mock',
       roster: [{ modelId: 'mock/model', count: population, temperature: 0.7 }],

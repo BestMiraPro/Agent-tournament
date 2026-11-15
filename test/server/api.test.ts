@@ -312,7 +312,7 @@ const setupComposed = () => {
 // reconfigure would hide both. Roster sums to 20 = DEFAULT populationSize.
 const seedRecord = (repos: ReturnType<typeof makeRepos>, registry: RunRegistry) => {
   const spec = parseRunSpec({
-    name: 'composed', goal: 'g', sandbox: 'mock',
+    name: 'composed', goal: 'g', sandbox: 'mock', workflow: 'tournament',
     roster: [{ modelId: 'm/m', count: 20, temperature: 0.7 }],
   })
   const config = runConfigFor(spec)

@@ -1,6 +1,11 @@
 # Architecture
 
-Agent Tournament runs a population of LLM agents through repeated rounds with evolutionary selection, a blind LLM judge, and a live dashboard. This doc describes how the pieces fit.
+Agent Tournament runs LLM agents through repeated rounds with an LLM judge and a live dashboard, in one of two workflows fixed per run (`RunConfig.workflow`):
+
+- **collaboration** (default): the round's agents are one team in one shared workspace that carries over between rounds. They talk through `CHANNEL.md` and co-write `output/`, which is captured once, sealed and judged as one artifact. No selection or breeding; each agent's strategy is reflected from the team's result.
+- **tournament**: agents compete individually with evolutionary selection and a blind judge.
+
+This doc describes how the pieces fit.
 
 ## System diagram
 
@@ -47,7 +52,7 @@ Both share the same engine (`src/engine/driver.ts`), judge (`src/judge/`), refle
 
 ## The round lifecycle
 
-One round, end to end:
+`runRound` shares its preflight (budget tracker, active population, prior execution reconciled, placement and capacity, abort check), the round row, criteria and failure handling between the workflows, then branches after genomes are resolved. The tournament round, end to end:
 
 1. **Start** — `POST /api/runs/:id/rounds` (or the CLI loop) calls `engine.runRound(runId, { goalMd, criteriaMd })`.
 2. **Prepare** — the engine creates a round row, resolves each agent's genome (seed/elite/clone/mutation/crossover), and writes `GOAL.md` + `STRATEGY.md` into each agent's workspace.
@@ -57,6 +62,18 @@ One round, end to end:
 6. **Select** — `src/core/selection.ts` ranks agents; the top band clones, the bottom band is culled, elites are kept verbatim, crossover (4d) breeds children. The `diversityFloor` (4f) rescues the most distinct culled agent.
 7. **Reflect** — `src/evolution/reflect.ts` rewrites each survivor's strategy for the next round (the mutation operator). LLM-recombine (4f) merges two parent strategies with a split-merge fallback.
 8. **Complete** — the round row is marked ended; the engine emits `round.complete`; the dashboard's grid clears for the next round.
+
+### A collaboration round
+
+`src/engine/collaboration.ts`, after the shared preflight (a sandbox without `provisionTeam` is refused there, before the round row exists):
+
+1. **Prepare** — `sandbox.provisionTeam(runId, agentIds)` returns one handle per agent onto the run's single shared workspace (`team-<runId>`; `/work` in its one Docker container), created and seeded on first use and kept across rounds. The engine writes `GOAL.md`, the channel helper (`.opencode/arena/post.mjs`), each member's OpenCode profile (`.opencode/agents/member-<label>.md`) and notes (`agents/<label>/NOTES.md`), and a `## Round N` line in `CHANNEL.md`. Strategies still travel in each prompt's `system` field.
+2. **Run** — every agent is dispatched at once with `AgentRunContext.team` (label, teammates, post command); the runner builds the team prompt (`src/runtime/team-prompt.ts`). `ChannelTail` (`src/engine/channel.ts`) reads `CHANNEL.md` every 2 s, records each new entry (`channel_messages`, `channel.message` event) and queues it into the other live agents' sessions through the optional `AgentRunner.send` (OpenCode: `prompt_async`, the steering path), with per-entry, per-message, per-gap and per-round caps. Budget gate, timeout and quiesce are the tournament's (`runAgentAttempt` is shared).
+3. **Barrier and capture** — after the pool drains and every agent is quiesced, a last channel read records what is left and `captureTeamOutput` (`src/engine/team-capture.ts`) captures `output/` and `CHANNEL.md` once: hashes within the team budget (one agent's workspace caps per member), stored text (bounded), binary files listed, one digest. `sealed` = every dispatched agent confirmed stopped. Stored in `round_outputs` / `round_output_files`.
+4. **Freeze** — each member gets a `submission.captured` event carrying the team seal, the audit is frozen, and per-member contributions (files from write/edit/patch activity, tool calls, channel posts) are stored with the snapshot. Workers are released.
+5. **Judge** — `Judge.scoreTeam` grades the one artifact (no shuffle: nothing to compare). Local and Docker compositions copy the sealed text under the grader's own folder (`.arena-grader/sealed/<roundId>/output`, via `ComposedRun.sealedArtifacts`) so its read-only tools can open it; mock inlines it. Members' activity is shown as `M1`, `M2`, … and cited evidence is checked against it. One envelope as usual, each member's entry holding the team assessment and the safety findings that cite it. An empty or over-quota output is not judged and scores 0, with members' behaviour still reviewed.
+6. **Score** — one row in `team_scores`, mirrored into each member's `scores` row (rank 1, no band).
+7. **Reflect** — no selection, breeding or retirement. Unless the budget was breached, `Reflector.reflectTeam` rewrites each strategy from the team score, the judge's rationale and digest, and the member's own posts and contributions; next-round genomes are `mutation` (rewritten) or `clone` (carried forward).
 
 ## Data model
 
@@ -71,6 +88,12 @@ runs       id, name, goal, status, config (JSON), createdAt
   │                        fileManifestJson, tokensIn/Out/CacheRead/CacheWrite,
   │                        costUsd, durationMs
   │
+  │     ├── round_outputs       roundId, status, digest, sealed, hashesComplete, manifest,
+  │     │                       channelMd, contributions          (collaboration: sealed output/)
+  │     ├── round_output_files  roundId, path, content            (its stored text)
+  │     ├── team_scores         roundId, score, rationaleMd, status (one team score)
+  │     └── channel_messages    roundId, seq, author, agentId, target, postedAt, body, delivered
+  │
   ├── agents       id, runId, label, parentAgentId, bornRound, status
   │     │
   │     └── genomes  id, agentId, roundIdx, modelId, temperature,
@@ -81,7 +104,8 @@ runs       id, name, goal, status, config (JSON), createdAt
 
 - **Agents are never deleted** — retire sets `status='retired'`; lineage is preserved for the drawer's lineage tree.
 - **Genomes are append-only** — one per (agent, round); the latest is the agent's current strategy. `origin` tracks seed/elite/mutation/clone/crossover/manual.
-- **Scores are per (round, agent)** — rank-ordered; `band` is top/middle/bottom.
+- **Scores are per (round, agent)** — rank-ordered; `band` is top/middle/bottom. In a collaboration round every member's row repeats the team score (rank 1, no band); `team_scores` is the record.
+- **New tables are created on open** — `CREATE TABLE IF NOT EXISTS` adds the collaboration tables to an older database, and a stored config without `workflow` decodes as `tournament`.
 
 ## The sandbox abstraction
 
@@ -94,6 +118,8 @@ runs       id, name, goal, status, config (JSON), createdAt
   - **shared** — several agents may share a container, `auth.json` is bind-mounted read-only, and containers have ordinary network access.
 
   See the operator guide's isolation section for the full list of what each policy enforces.
+
+Collaboration adds one optional method, `provisionTeam(teamId, agentIds, opts)`: one shared workspace per run, seeded once and kept across rounds. MockSandbox keeps it in memory for the life of the sandbox, LocalSandbox uses `<root>/team-<runId>`, and DockerSandbox (composed with `team: true`) places the whole team on one container with the folder at `/work`, always with the protected runtime and with memory, CPUs, PIDs and open files scaled per member (`teamContainerLimits`); the capacity preflight admits it as one container of that size plus its gateway.
 
 The engine doesn't know which sandbox it's using — it calls `sandbox.run(handle, ...)` and `sandbox.readFile(handle, ...)`.
 
@@ -108,7 +134,7 @@ The Judge and Reflector take a `Provider` in their constructor; they don't know 
 
 ## The event bridge
 
-The engine emits `EngineEvent`s (round.status, agent.status, agent.usage, round.scored, round.complete). The dashboard's `EventBroadcaster` (`src/server/event-bridge.ts`) forwards these to all WebSocket subscribers. The web client's `useLiveRun` hook dispatches them to a pure reducer (`liveReducer`) that updates the live state. The reducer is pure so it's unit-tested without a browser or socket.
+The engine emits `EngineEvent`s (round.status, agent.status, agent.usage, round.scored, round.complete, and for collaboration channel.message and the team score on round.scored). The dashboard's `EventBroadcaster` (`src/server/event-bridge.ts`) forwards these to all WebSocket subscribers. The web client's `useLiveRun` hook dispatches them to a pure reducer (`liveReducer`) that updates the live state. The reducer is pure so it's unit-tested without a browser or socket.
 
 ## Config + reconfiguration
 
@@ -132,5 +158,6 @@ The codebase was built via subagent-driven development (SDD) in phases:
 - **Phase 4i** — real-mode smoke (skipped — 4g+4h touched zero real-mode code; 4f green smoke stands).
 - **Phase 4j** — new features (export JSON/CSV, run browser, run comparison, rejudge).
 - **Phase 4k** — documentation (this file + operator guide + API reference + AGENTS.md).
+- **Phase 8** — collaboration workflow (shared team workspace, channel, sealed team output, team judging), now the default; see `docs/superpowers/specs/2026-11-15-collaboration-mode-design.md`.
 
 Specs live in `docs/superpowers/specs/`, plans in `docs/superpowers/plans/`. The local SDD ledger (`.superpowers/sdd/<phase>/progress.md`) is gitignored.

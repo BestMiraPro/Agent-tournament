@@ -4,6 +4,8 @@ import { readRoundAudit, type RoundAuditView } from '../engine/audit.js'
 // One shape, one type. The local copy had already drifted: it declared durationMs as
 // non-nullable while the row it is built from is nullable.
 import { submissionView, type SubmissionView } from './submission-view.js'
+import { teamRoundView, type TeamRoundView } from './team-views.js'
+import { OUTPUT_README } from '../runtime/team-prompt.js'
 
 /** RFC 4180: quote-and-escape when the field has comma/quote/newline/CR, else
  * raw. null/undefined and empty string render as empty (no quotes). */
@@ -30,7 +32,8 @@ export interface JsonDump {
   run: RunRow
   config: RunConfig
   /** Each round carries its audit and grading record exactly as the endpoints return them. */
-  rounds: (RoundRow & { entries: ExportEntry[]; audit: RoundAuditView; judging: unknown[] })[]
+  /** Collaboration rounds also carry `team`: the score, the sealed output manifest and the channel. */
+  rounds: (RoundRow & { entries: ExportEntry[]; audit: RoundAuditView; judging: unknown[]; team: TeamRoundView | null })[]
   agents: AgentRow[]
   genomes: GenomeRow[]
 }
@@ -91,6 +94,7 @@ export function buildJsonDump(runId: string, repos: Repos): JsonDump | null {
       entries,
       audit: readRoundAudit(repos, round.id),
       judging: repos.judgingAudits.forRound(round.id).map((row) => row.payload),
+      team: teamRoundView(repos, round.id),
     }
   })
   const agents = repos.agents.listAll(runId)
@@ -140,6 +144,23 @@ export function buildMarkdownReport(runId: string, repos: Repos): string | null 
     const mean = scores.reduce((n, s) => n + s.score, 0) / scores.length
     const model = repos.genomes.forRound(top.agentId, round.idx)?.modelId ?? ''
     out.push(`| ${round.idx} | ${top.score} | ${mean.toFixed(2)} | ${labelOf.get(top.agentId) ?? ''} | ${model} |`)
+  }
+
+  // A team has no winner: its result is the one score and the folder it built.
+  if (run.config.workflow === 'collaboration') {
+    const team = repos.teamScores.forRound(last.round.id)
+    const output = repos.teamOutputs.get(last.round.id)
+    out.push('', `## Team result (round ${last.round.idx}, score ${team?.score ?? last.scores[0]!.score})`, '')
+    out.push("### Judge's rationale", '', team?.rationaleMd ?? last.scores[0]!.rationaleMd, '')
+    out.push('### Output folder', '', ...(output?.files.length ? output.files.map((f) => `- ${f.path} (${f.bytes} bytes)`) : ['_Empty_']), '')
+    if (output) out.push(`Sealed: ${output.sealed ? 'yes' : 'no'}, digest ${output.digest}`, '')
+    out.push(`### ${OUTPUT_README}`, '', repos.teamOutputs.file(last.round.id, OUTPUT_README) ?? '_Not written_', '')
+    out.push('### Strategies', '')
+    for (const s of last.scores) {
+      out.push(`#### ${labelOf.get(s.agentId) ?? ''}`, '', repos.genomes.forRound(s.agentId, last.round.idx)?.strategyMd ?? '_Not recorded_', '')
+    }
+    if (last.round.criteriaMd) out.push(`## Criteria (round ${last.round.idx})`, '', last.round.criteriaMd, '')
+    return out.join('\n')
   }
 
   const winner = last.scores[0]!

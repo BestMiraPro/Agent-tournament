@@ -1,6 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { folderPatterns } from '../../core/genome.js'
+import type { SealedArtifactWriter } from '../../engine/collaboration.js'
+import { OUTPUT_DIR } from '../team-prompt.js'
+import { resolveInWorkspace } from '../workspace-path.js'
 
 /** The profile criteria and judge calls select by name; OpenCode names agents by file. */
 export const GRADER_AGENT = 'grader'
@@ -53,6 +57,30 @@ export function serializeGraderProfile(contextDir: string | null): string {
     '---',
     '',
   ].join('\n')
+}
+
+/** Where a collaboration round's sealed output is copied for grading, inside the grader's own folder. */
+export const SEALED_DIR = 'sealed'
+
+/**
+ * Copies a collaboration round's sealed output (the stored text, exactly as captured) under the
+ * grader's session directory, where its read-only tools can open it without any folder outside
+ * its own being allowed. No agent container mounts this folder.
+ */
+export function sealedArtifactWriter(graderDirectory: string): SealedArtifactWriter {
+  return {
+    async write(roundId, files) {
+      if (!/^[A-Za-z0-9._-]+$/.test(roundId)) throw new Error(`unsafe round id for a sealed copy: ${roundId}`)
+      const root = join(graderDirectory, SEALED_DIR, roundId)
+      await mkdir(join(root, OUTPUT_DIR), { recursive: true })
+      for (const f of files) {
+        const target = await resolveInWorkspace(root, f.path)
+        await mkdir(dirname(target), { recursive: true })
+        await writeFile(target, f.content, 'utf8')
+      }
+      return join(root, OUTPUT_DIR)
+    },
+  }
 }
 
 /** Writes the profile under the workspace root and returns the directory grader calls use. */

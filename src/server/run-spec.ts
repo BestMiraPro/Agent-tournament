@@ -13,6 +13,7 @@ const schema = z.object({
   name: z.string().min(1),
   goal: z.string().min(1),
   sandbox: z.enum(['mock', 'local', 'docker']).default('mock'),
+  workflow: z.enum(['collaboration', 'tournament']).optional(),
   roster: z.array(rosterEntry).min(1),
   judge: z
     .object({
@@ -71,6 +72,8 @@ export interface RunSpec {
   name: string
   goal: string
   sandbox: 'mock' | 'local' | 'docker'
+  /** Fixed at creation. parseRunSpec always sets it; absent means the app default. */
+  workflow?: 'collaboration' | 'tournament'
   roster: { modelId: string; count: number; temperature: number }[]
   population: number
   judge: { modelId: string; mode: 'auto' | 'single_call' | 'batched_finals' }
@@ -139,8 +142,18 @@ export function parseRunSpec(input: unknown): RunSpec {
   const maxContainers = p.maxContainers ?? DEFAULT_CONFIG.maxContainers
   // Protected is the docker default: co-tenants in one container can read and change each
   // other's work, so sharing must be chosen, never fallen into because containers ran out.
+  const workflow = p.workflow ?? DEFAULT_CONFIG.workflow
+  const collaboration = workflow === 'collaboration'
   const isolation = p.isolation ?? (p.sandbox === 'docker' ? 'protected' : 'shared')
-  if (p.sandbox === 'docker' && isolation === 'protected' && maxContainers < population) {
+  // A team shares one container by design, and that container always runs the protected
+  // policy: shared isolation's credential mount and ordinary network are tournament-only.
+  if (collaboration && p.sandbox === 'docker' && isolation === 'shared') {
+    throw new Error(
+      'Collaboration runs the team in one protected container, with no credentials inside and no ordinary network. ' +
+        'Choose protected isolation, or the tournament workflow for shared isolation.',
+    )
+  }
+  if (!collaboration && p.sandbox === 'docker' && isolation === 'protected' && maxContainers < population) {
     throw new Error(
       `Protected isolation needs one container per agent: ${population} agents but ${maxContainers} containers. ` +
         `Raise Containers to ${population}, lower the agent count to ${maxContainers}, or choose shared isolation, ` +
@@ -152,13 +165,15 @@ export function parseRunSpec(input: unknown): RunSpec {
   const eliteCount = p.selection?.eliteCount ?? DEFAULT_CONFIG.selection.eliteCount
   const topPct = p.selection?.topPct ?? DEFAULT_CONFIG.selection.topPct
   const topBand = Math.max(1, Math.floor(population * topPct))
-  if (eliteCount > topBand) {
+  // Collaboration never selects, so its selection settings are inert.
+  if (!collaboration && eliteCount > topBand) {
     throw new Error(`eliteCount (${eliteCount}) cannot exceed the top band size (${topBand})`)
   }
   return {
     name: p.name,
     goal: p.goal,
     sandbox: p.sandbox,
+    workflow,
     roster: p.roster,
     population,
     judge: {

@@ -85,6 +85,8 @@ import type { CapacityInfo } from './lib/placement.js'
 export interface RunSnapshot {
   runId: string
   name: string
+  /** A team judged on its shared output, or an evolving tournament; absent on servers from before. */
+  workflow?: 'collaboration' | 'tournament'
   lastRoundIdx: number
   goalMd: string | null
   /** Saved creation criteria: the round-1 draft default. */
@@ -143,6 +145,48 @@ export interface AgentDetail {
   }[]
 }
 
+/** One file of a collaboration round's sealed output. */
+export interface TeamFile {
+  path: string
+  bytes: number
+  sha256: string | null
+  binary: boolean
+  stored: boolean
+}
+
+/** Mirrors GET /api/runs/:runId/rounds/:idx/output. */
+export interface TeamOutput {
+  roundId: string
+  status: string
+  errorText: string | null
+  digest: string
+  sealed: boolean
+  hashesComplete: boolean
+  fileCount: number
+  totalBytes: number
+  files: TeamFile[]
+  contributions: Record<string, { label: string; files: string[]; posts: number; toolCalls: number }>
+  capturedAt: number
+}
+
+export interface ChannelMessage {
+  seq: number
+  author: string
+  agentId: string | null
+  target: string | null
+  postedAt: string
+  body: string
+}
+
+export const getRoundOutput = (runId: string, idx: number): Promise<TeamOutput> =>
+  fetch(`/api/runs/${runId}/rounds/${idx}/output`).then(json)
+
+export const getRoundOutputFile = (runId: string, idx: number, path: string): Promise<TeamFile & { content: string | null }> =>
+  fetch(`/api/runs/${runId}/rounds/${idx}/output/file?path=${encodeURIComponent(path)}`).then(json)
+
+export const getRoundChannel = (runId: string, idx: number): Promise<{ messages: ChannelMessage[] }> =>
+  fetch(`/api/runs/${runId}/rounds/${idx}/channel`).then(json)
+
 const json = async (res: Response) => {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
   return res.json()
@@ -171,6 +215,7 @@ export interface FullRunSpec {
   name: string
   goal: string
   sandbox: 'mock' | 'local' | 'docker'
+  workflow: 'collaboration' | 'tournament'
   roster: { modelId: string; count: number; temperature: number }[]
   // WHY optional + never-null: the server judge/reflect partials are
   // optional-only (unlike workspaceRoot's z.nullable) — an explicit null
@@ -312,6 +357,8 @@ export interface RoundStats {
    *           comparable with judge scores. The chart marks these rounds.
    */
   scoreScale: 'judge' | 'rank'
+  /** Collaboration rounds: the one team score; null for tournament rounds. */
+  team?: { score: number; status: string } | null
 }
 
 export const getRoundStats = (runId: string): Promise<RoundStats[]> =>
@@ -348,6 +395,8 @@ export interface RoundDetail {
       usageKnown: boolean | null
     } | null
   }[]
+  /** Collaboration rounds: the team's score and the judge's rationale; null otherwise. */
+  team?: { score: number; rationaleMd: string; status: string } | null
 }
 
 export const getRoundDetail = (runId: string, idx: number): Promise<RoundDetail> =>

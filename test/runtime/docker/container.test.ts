@@ -35,6 +35,19 @@ describe('startShardContainer with the protected runtime', () => {
     expect(d.calls.flat().join(' ')).not.toContain('auth.json')
   })
 
+  test('a team container carries its scaled process and open-file limits', async () => {
+    const d = fakeDocker()
+    await startShardContainer({ ...spec, memory: '4g', cpus: 4, pidsLimit: 1024, maxOpenFiles: 8192 }, d.fn, async () => true)
+    const worker = d.calls.filter((c) => c[0] === 'run')[0]!
+    expect(worker).toEqual(buildProtectedRunArgs({
+      name: 'arena-run1-0', image: 'agent-arena:tc-x', hostDir: '/host/shard-0', memory: '4g', cpus: 4,
+      network: 'arena-run1-net-0', configDir: '/host/config', toolsDir: '/host/tools', contextDir: null,
+      pidsLimit: 1024, maxOpenFiles: 8192,
+    }))
+    expect(worker.join(' ')).toContain('--pids-limit 1024')
+    expect(worker.join(' ')).toContain('nofile=4096:8192')
+  })
+
   test('never adopts an existing worker or gateway: a protected shard starts fresh with this run\'s config', async () => {
     const d = fakeDocker((args) => (args[0] === 'inspect' ? { stdout: 'true', stderr: '', code: 0 } : undefined))
     await startShardContainer(spec, d.fn, async () => true)

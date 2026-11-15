@@ -1,6 +1,6 @@
 import { parseMemoryLimit } from '../../../src/core/memory.js'
 import { GATEWAY_CPUS, GATEWAY_MEMORY, GATEWAY_MEMORY_BYTES } from '../../../src/runtime/docker/gateway-limits.js'
-import { memoryLabel, planCapacity } from '../../../src/runtime/docker/capacity.js'
+import { memoryLabel, planCapacity, teamContainerLimits } from '../../../src/runtime/docker/capacity.js'
 import { placementPreview } from '../../../src/runtime/docker/shard.js'
 
 /** What GET /api/capacity reports: Docker's reading plus what this app has already reserved. */
@@ -57,6 +57,47 @@ export function memoryNote(memory: string): string | null {
     default:
       return `${memory} has not been measured under sustained-conversation workloads; 1g sustained 100 tool-turn rounds with peaks of 725–762 MiB per worker.`
   }
+}
+
+/**
+ * A collaboration team's one protected container before Start: one agent's ceilings per member
+ * plus its gateway, checked with the server's own admission arithmetic (see setupEstimate).
+ */
+export function teamSetupEstimate(
+  plan: { population: number; memory: string; cpus: number },
+  capacity: CapacityInfo | null,
+): { ceilings: string; fit: SetupEstimate['fit']; memoryNote: string | null } {
+  const members = Math.max(0, Math.floor(plan.population))
+  let limits: ReturnType<typeof teamContainerLimits> | null
+  try {
+    limits = teamContainerLimits({ memory: plan.memory, cpus: plan.cpus }, members)
+  } catch {
+    limits = null
+  }
+  const memoryTotal = limits === null ? null : limits.memoryBytes + GATEWAY_MEMORY_BYTES
+  const cpuTotal = limits === null ? null : limits.cpus + GATEWAY_CPUS
+  const ceilings = limits === null || memoryTotal === null || cpuTotal === null
+    ? `Memory per agent "${plan.memory}" is not a size like 512m or 1g.`
+    : `1 container for ${members} agent${members === 1 ? '' : 's'}: ${members} × ${plan.memory} = ${limits.memory}, plus a ${GATEWAY_MEMORY} gateway = ${gib(memoryTotal)} memory, ${count(cpuTotal)} CPUs`
+  let fit: SetupEstimate['fit']
+  if (!capacity) {
+    fit = { state: 'unknown', message: 'Docker capacity could not be read: a collaboration run will be refused until it can be.' }
+  } else if (memoryTotal === null || cpuTotal === null) {
+    fit = { state: 'unknown', message: ceilings }
+  } else {
+    const verdict = planCapacity(
+      { containers: 1, memory: memoryLabel(memoryTotal), cpus: cpuTotal },
+      { totalMemoryBytes: capacity.totalMemoryBytes, usedMemoryBytes: capacity.usedMemoryBytes, cpus: capacity.cpus },
+      { memoryBytes: capacity.reservedMemoryBytes, cpus: capacity.reservedCpus, observedBytes: 0 },
+    )
+    const left = Math.max(0, Math.max(0, capacity.totalMemoryBytes - capacity.usedMemoryBytes) * HEADROOM - capacity.reservedMemoryBytes)
+    fit = verdict.ok
+      ? { state: 'fits', message: `Estimated to fit: ${gib(memoryTotal)} of ${gib(left)} Docker can commit.` }
+      : memoryTotal > left
+        ? { state: 'does_not_fit', message: `Estimated not to fit: ${gib(memoryTotal)} needed, ${gib(left)} Docker can commit. Remove agents or lower the memory per agent.` }
+        : { state: 'does_not_fit', message: `Estimated not to fit: ${count(cpuTotal)} CPUs needed, ${count(Math.max(0, capacity.cpus - capacity.reservedCpus))} available.` }
+  }
+  return { ceilings, fit, memoryNote: memoryNote(plan.memory) }
 }
 
 /**

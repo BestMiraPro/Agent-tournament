@@ -23,11 +23,13 @@ import {
   readRuntimeCatalog,
   type RuntimeCatalog,
 } from '../runtime/opencode/discovery.js'
-import { writeGraderProfile } from '../runtime/opencode/grader-profile.js'
+import { sealedArtifactWriter, writeGraderProfile } from '../runtime/opencode/grader-profile.js'
+import { MOCK_CHANNEL_LIMITS, type ChannelLimits } from '../engine/channel.js'
+import type { SealedArtifactWriter } from '../engine/collaboration.js'
 import { attachServer, startServer, type ServerHandle } from '../runtime/opencode/server.js'
 import { assertHostCapacity, makeClientResolver, sweepBeforeRun, validateRosterModels } from '../cli.js'
 import { ensureImage, readImageInventory } from '../runtime/docker/image.js'
-import { processLedger, readHostCapacity, type CapacityLedger } from '../runtime/docker/capacity.js'
+import { processLedger, readHostCapacity, teamContainerLimits, type CapacityLedger } from '../runtime/docker/capacity.js'
 import {
   containerName,
   inspectContainerState,
@@ -285,6 +287,10 @@ export interface ComposedRun {
    * attempt. Absent for mock and local runs, which hold no such state.
    */
   releasePopulation?: (() => Promise<void>) | null
+  /** Collaboration: channel polling and bounds for this runtime (mock runs read it often). */
+  channel?: Partial<ChannelLimits>
+  /** Collaboration: where the grader opens a round's sealed output (absent: it is inlined). */
+  sealedArtifacts?: SealedArtifactWriter
   cleanup: () => Promise<void>
 }
 
@@ -301,6 +307,7 @@ export interface RunIdHolder {
 export function runConfigFor(spec: RunSpec): RunConfig {
   return {
     ...DEFAULT_CONFIG,
+    workflow: spec.workflow ?? DEFAULT_CONFIG.workflow,
     populationSize: spec.population,
     sandbox: spec.sandbox,
     roster: spec.roster,
@@ -410,6 +417,7 @@ export async function composeRun(
       shardServers: [],
       sessionMap, sessionHook, warnings,
       capacity: null,
+      channel: MOCK_CHANNEL_LIMITS,
       cleanup: async () => {},
     }
   }
@@ -446,6 +454,14 @@ export async function composeRun(
     spec = { ...spec, contextDir }
     config.contextDir = contextDir
     assertContextFolder(contextDir, workspaceRoot, s.inspectPath)
+  }
+  // The CLI composes without parseRunSpec, so the rule is held here too: a team's one
+  // container never carries credentials or joins an ordinary network.
+  if (spec.sandbox === 'docker' && config.workflow === 'collaboration' && config.isolation !== 'protected') {
+    throw new Error(
+      'Collaboration runs the team in one protected container, with no credentials inside and no ordinary network. ' +
+        'Choose protected isolation, or the tournament workflow for shared isolation.',
+    )
   }
   // Host reads only, before capacity or any server: a protected run the relay cannot carry is refused now.
   const relayPlan = spec.sandbox === 'docker' && config.isolation === 'protected' ? await planRelay(spec, config, s) : null
@@ -579,6 +595,8 @@ export async function composeRun(
         return dir
       }
       const shardNetworks = new Set<string>()
+      /** Worker container name → the memory limit it was started with, for an OOM diagnosis. */
+      const memoryLimits = new Map<string, string>()
       /** Worker container name → its gateway, removed together. */
       const gateways = new Map<string, string>()
       const modelsFile = s.hostModelsFile()
@@ -666,7 +684,8 @@ export async function composeRun(
         cpus: config.containerCpus,
         authFile: spec.authFile,
         isolation: config.isolation,
-        startContainer: async (shardIndex, hostDir) => {
+        team: config.workflow === 'collaboration',
+        startContainer: async (shardIndex, hostDir, members) => {
           // Read live: containers start during the first round, long after the
           // caller has set the holder to the live run id, so a pending-timestamp
           // id never reaches a container name for a live run.
@@ -683,6 +702,10 @@ export async function composeRun(
               ...(relayHost ? { relayHost } : {}),
             }
           }
+          // A team's one container holds every member, so its ceilings are theirs summed.
+          const limits = config.workflow === 'collaboration'
+            ? teamContainerLimits({ memory: config.containerMemory, cpus: config.containerCpus }, members)
+            : null
           const started = await s.startShardContainerFn(
             {
               runId,
@@ -690,8 +713,9 @@ export async function composeRun(
               image,
               hostDir,
               toolsDir,
-              memory: config.containerMemory,
-              cpus: config.containerCpus,
+              memory: limits?.memory ?? config.containerMemory,
+              cpus: limits?.cpus ?? config.containerCpus,
+              ...(limits ? { pidsLimit: limits.pidsLimit, maxOpenFiles: limits.maxOpenFiles } : {}),
               // A protected worker mounts no credentials and no host catalogue: the relay holds the
               // keys, and the shard's own config folder carries the catalogue copy.
               authFile: relayPlan ? null : spec.authFile,
@@ -704,6 +728,7 @@ export async function composeRun(
             onWarning,
           )
           if (started.gatewayName) gateways.set(started.name, started.gatewayName)
+          memoryLimits.set(started.name, limits?.memory ?? config.containerMemory)
           // Its usage now sits inside this run's reservation, not on top of it.
           s.ledger.attach(reservationId, started.name)
           if (started.gatewayName) s.ledger.attach(reservationId, started.gatewayName)
@@ -745,7 +770,7 @@ export async function composeRun(
             return {
               code: 'CONTAINER_OOM',
               message:
-                `Container ${name} was stopped for exceeding its ${config.containerMemory} memory limit; ` +
+                `Container ${name} was stopped for exceeding its ${memoryLimits.get(name) ?? config.containerMemory} memory limit; ` +
                 'this is a resource limit, not a model failure. Raise Memory per container, or give each agent less to hold in memory.',
             }
           },
@@ -834,7 +859,11 @@ export async function composeRun(
         onShardServer,
         toolchainId,
         sessionMap, sessionHook, warnings,
-        capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
+        sealedArtifacts: sealedArtifactWriter(graderDirectory),
+        capacity: {
+          committed: config.workflow === 'collaboration' ? 1 : Math.min(config.maxContainers, spec.population),
+          maxContainers: config.maxContainers,
+        },
         releasePopulation,
         cleanup: async () => {
           // First: from here on this run's workers can make no further model calls.
@@ -863,6 +892,7 @@ export async function composeRun(
       shardServers: [{ baseUrl: '' }],
       sessionMap, sessionHook, warnings,
       capacity: null,
+      sealedArtifacts: sealedArtifactWriter(graderDirectory),
       cleanup: async () => {
         await server.stop().catch(() => {})
       },

@@ -535,3 +535,27 @@ circle.chart-line--min { fill: var(--failed); }
 /* Rounds whose scores are rank-derived rather than judged: same axis, different
    meaning, so the chart marks them rather than implying comparability. */
 .chart-scalemark { fill: rgba(242, 177, 52, .12); stroke: rgba(242, 177, 52, .3); stroke-width: 1; }
+
+/* ---------- collaboration: team channel and sealed output ---------------- */
+
+.channel__list { list-style: none; margin: 0; padding: 0; display: grid; gap: .45rem; max-height: 24rem; overflow: auto; }
+.channel__entry {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: .4rem .55rem; font-size: .78rem;
+}
+.channel__head { color: var(--text-dim); font-size: .72rem; margin-bottom: .2rem; }
+.channel__body { white-space: pre-wrap; word-break: break-word; }
+.teamoutput { display: grid; gap: .6rem; margin-top: 1.75rem; }
+.teamoutput__body { display: grid; grid-template-columns: minmax(14rem, 1fr) 2fr; gap: .8rem; align-items: start; }
+.teamoutput__files { list-style: none; margin: 0; padding: 0; display: grid; gap: .25rem; font-size: .8rem; }
+.teamoutput__file { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; text-align: left; font: inherit; word-break: break-all; }
+.teamoutput__file--on { font-weight: 600; text-decoration: underline; }
+.teamoutput__view {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
+  padding: .7rem .8rem; min-height: 6rem; font-size: .82rem; overflow: auto;
+}
+.teamoutput__text { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 32rem; overflow: auto; }
+.rounddetail__team { display: grid; gap: .3rem; }
+@media (max-width: 760px) {
+  .teamoutput__body { grid-template-columns: 1fr; }
+}

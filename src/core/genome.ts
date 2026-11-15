@@ -68,6 +68,14 @@ export function serializeCompetitorProfile(
 }
 
 /**
+ * The OpenCode profile a collaboration member runs as. Members share one folder, so each has
+ * its own file (`.opencode/agents/member-<label>.md`) carrying its own model and temperature.
+ */
+export function teamProfileName(label: string): string {
+  return `member-${label}`
+}
+
+/**
  * Absolute permission patterns covering a folder's contents, in both separator spellings:
  * which one OpenCode reports for a Windows path is not something these rules should bet on.
  */
