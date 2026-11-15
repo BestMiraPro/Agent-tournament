@@ -231,8 +231,18 @@ export function bridgeSeams(
  * `GET /experimental/tool`, no prompt sent). Side effect, accepted in the design: local-run
  * workers share this server, so their non-OpenCode models gain `websearch` too. Docker
  * shards run their own servers and are unchanged.
+ *
+ * The host server runs with the operator's home folder, and by default OpenCode reads Claude
+ * Code's `~/.claude/CLAUDE.md` into every agent's instructions and lists the skills under
+ * `~/.claude` and `~/.agents` in its prompt (seen in a local run, opencode 1.18.21, 15 November
+ * 2026). The operator's own instructions and skills are not the agents' to read or to send to a
+ * model provider, so both are off.
  */
-export const HOST_SERVER_ENV: Record<string, string> = { OPENCODE_ENABLE_EXA: '1' }
+export const HOST_SERVER_ENV: Record<string, string> = {
+  OPENCODE_ENABLE_EXA: '1',
+  OPENCODE_DISABLE_CLAUDE_CODE: '1',
+  OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
+}
 
 export { RUNTIME_DIR }
 

@@ -125,7 +125,9 @@ describe('composeRun', () => {
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
         workspaceRoot: root, contextDir: linked,
       }), { ...seams, inspectPath: vi.fn(() => 'directory' as const) } as never)
-      expect(seams.startHostServer).toHaveBeenCalledWith(expect.objectContaining({ env: { OPENCODE_ENABLE_EXA: '1' } }))
+      expect(seams.startHostServer).toHaveBeenCalledWith(expect.objectContaining({
+        env: { OPENCODE_ENABLE_EXA: '1', OPENCODE_DISABLE_CLAUDE_CODE: '1', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1' },
+      }))
       const profile = join(root, '.arena-grader', '.opencode', 'agents', 'grader.md')
       expect(existsSync(profile)).toBe(true)
       expect(readFileSync(profile, 'utf8')).toContain(`${JSON.stringify(`${real.replace(/\\/g, '/')}/*`)}: allow`)
