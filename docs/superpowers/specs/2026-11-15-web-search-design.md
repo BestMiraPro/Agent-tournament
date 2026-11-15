@@ -173,7 +173,9 @@ reports the MCP tool call (as `arena_web_search: <query>`); the host record is t
   OpenCode, so the keys would have to be in its config or environment, and its records and counters
   would live in a process the app does not own. In-process HTTP keeps keys, limits and evidence in the
   app — the provider relay's discipline.
-- The CLI does not wire web access (it has no live evidence path); `webAccess` is absent there.
+- The CLI's local real runs use the same path: `cliRunSpec` carries `webAccess` (on unless
+  `--no-web-access`), the CLI attaches the run's evidence to the engine's audit after `createRun`
+  (it has no live view), and its stop is the composition's cleanup, so the grant is revoked.
 
 ## 8. Docker (at integration — not built here)
 

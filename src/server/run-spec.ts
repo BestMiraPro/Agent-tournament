@@ -95,7 +95,7 @@ export interface RunSpec {
   seedStrategiesDir: string | null
   serverUrl: string | null
   criteria: string | null
-  /** Workers get the host's web tools (local runs). Parsed specs default it on; absent means off, as for the CLI. */
+  /** Workers get the host's web tools (local runs). Parsed specs default it on; absent means off. */
   webAccess?: boolean
 }
 

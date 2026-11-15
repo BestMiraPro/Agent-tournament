@@ -77,7 +77,7 @@ A seed folder (`seedDir`, API only) is copied into every agent's workspace befor
 
 ## Web search and page fetch for agents
 
-With **Web access** on in the setup form (the default), agents in **local** dashboard runs get two tools served by the app itself: `arena_web_search` (titles, URLs and snippets) and `arena_web_fetch` (one public page as text). OpenCode's own `webfetch` and `websearch` stay off for them, so their tool searches are the counted, recorded ones. Docker workers stay offline in this version, and CLI runs do not get the tools. In local mode an agent can still run `curl` from its shell: local runs have no isolation, so the toggle decides which tools are offered, not what the network allows.
+With **Web access** on in the setup form (the default), agents in **local** runs get two tools served by the app itself: `arena_web_search` (titles, URLs and snippets) and `arena_web_fetch` (one public page as text). OpenCode's own `webfetch` and `websearch` stay off for them, so their tool searches are the counted, recorded ones. Local CLI runs (`--mode real --sandbox local`) get the same tools unless started with `--no-web-access`, and their calls go into the run's audit. Docker workers stay offline in this version. In local mode an agent can still run `curl` from its shell: local runs have no isolation, so the toggle decides which tools are offered, not what the network allows.
 
 **Which search provider answers.** LangSearch, when its key is configured. Without a key, and whenever LangSearch fails (bad key, rate limit, used-up daily allowance, server error, timeout), the call goes to Exa's public search endpoint instead, without a key or with yours if `EXA_API_KEY` is set. The setup form's status line shows which applies; each result says which provider answered.
 
@@ -120,6 +120,7 @@ With `npm start` the app reads the file on every search, so no restart is needed
 | `--worker-models` | (none) | Comma-separated model ids for the agents |
 | `--seed-strategies` | (none) | Folder of `.md` files, one round-1 strategy per file (see Seed strategies) |
 | `--report` | (none) | Write the run's markdown report to this path when the last round ends |
+| `--no-web-access` | off | Local real runs: do not give agents the web tools (see Web search and page fetch) |
 
 ## Dashboard (live operator view)
 

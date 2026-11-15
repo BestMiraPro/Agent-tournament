@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { vi } from 'vitest'
 import {
   assertHostCapacity,
+  cliRunSpec,
   makeClientResolver,
   resolveSandboxMode,
   runTournamentCli,
@@ -10,6 +13,7 @@ import {
 import { DEFAULT_CONFIG, type RunConfig } from '../src/core/types.js'
 import type { HostCapacity } from '../src/runtime/docker/capacity.js'
 import type { SweepOptions } from '../src/runtime/docker/sweep.js'
+import { composeRun } from '../src/server/compose-run.js'
 
 const roomyHost: HostCapacity = {
   totalMemoryBytes: 16 * 1024 ** 3,
@@ -63,6 +67,40 @@ describe('CLI mode selection', () => {
         dbPath: ':memory:', criteria: null, mode: 'real',
       }),
     ).rejects.toThrow(/workspaceRoot/i)
+  })
+})
+
+describe('CLI web access', () => {
+  const cliOpts = { goal: 'g', rounds: 1, population: 1, seed: 1, dbPath: ':memory:', criteria: null, mode: 'real' as const, workspaceRoot: '/tmp/cli-web' }
+  const localConfig = (webAccess: boolean): RunConfig => ({
+    ...DEFAULT_CONFIG, sandbox: 'local', populationSize: 1, roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }], webAccess,
+  })
+
+  test('the spec a local CLI run composes with carries its web access choice', () => {
+    expect(cliRunSpec(cliOpts, localConfig(true)).webAccess).toBe(true)
+    expect(cliRunSpec(cliOpts, localConfig(false)).webAccess).toBe(false)
+  })
+
+  test('a local CLI run composes the same audited web tools the dashboard does', async () => {
+    const grant = { tokenFor: vi.fn((id: string) => `tok-${id}`), attach: vi.fn(), revoke: vi.fn() }
+    const composed = await composeRun(cliRunSpec(cliOpts, localConfig(true)), {
+      startHostServer: async () => ({ client: {}, stop: async () => {} }) as never,
+      validateModels: async () => {},
+      webTools: async () => ({ host: { grant: () => grant }, url: 'http://127.0.0.1:1/mcp' }),
+    })
+    expect(composed.attachWebEvidence).toBeTypeOf('function')
+    await composed.cleanup()
+    expect(grant.revoke).toHaveBeenCalledTimes(1)
+  })
+
+  test('the CLI defaults web access on, offers --no-web-access, feeds the audit and revokes on stop', () => {
+    const src = readFileSync('src/cli.ts', 'utf8')
+    expect(src).toContain('webAccess: opts.webAccess !== false')
+    expect(src).toContain("'no-web-access': { type: 'boolean', default: false }")
+    expect(src).toContain("webAccess: values['no-web-access'] ? false : undefined")
+    expect(src).toMatch(/engine\.createRun\('cli', opts\.goal\)\n\s+runIdHolder\.value = run\.id\n(?:\s*\/\/[^\n]*\n)*\s+attachWebEvidence\?\.\(run\.id, \(e\) => engine\.observe\(e\)\)/)
+    expect(src).toContain("stop: config.sandbox === 'local' ? composed.cleanup : composed.serverHandle.stop")
+    expect(src).toContain('stopServer = built.stop')
   })
 })
 
