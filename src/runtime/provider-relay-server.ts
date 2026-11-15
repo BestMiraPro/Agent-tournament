@@ -109,13 +109,34 @@ export async function startProviderRelay(opts: {
     const controller = new AbortController()
     res.on('close', () => { if (!res.writableFinished) controller.abort() })
 
+    let upstreamHeaders = decision.headers
+    if (decision.prepare) {
+      try {
+        upstreamHeaders = { ...upstreamHeaders, ...(await decision.prepare()) }
+      } catch (e) {
+        // The credential could not be produced: a sign-in to renew (401), a usage limit (429), or a
+        // refresh that failed for now (502). Each message is fixed text naming what to do.
+        const name = (e as Error).name
+        const status = name === 'ChatGptReauthRequired' ? 401 : name === 'ChatGptRateLimited' ? 429 : 502
+        const error = (e as Error).message
+        sendJson(res, status, error)
+        report({ ...base, status, outcome: 'refused', responseBytes: 0, error })
+        return
+      }
+    }
+
     let reply: Awaited<ReturnType<UpstreamCall>>
     try {
-      reply = await upstream(decision.url, { headers: decision.headers, body: decision.body, signal: controller.signal })
+      reply = await upstream(decision.url, { headers: upstreamHeaders, body: decision.body, signal: controller.signal })
     } catch {
       sendJson(res, 502, 'upstream unreachable')
       report({ ...base, status: 502, outcome: 'upstream_error', responseBytes: 0, error: 'upstream unreachable' })
       return
+    }
+    try {
+      decision.onReply?.(reply.status, reply.headers)
+    } catch {
+      /* bookkeeping must not break the relayed reply */
     }
     if (reply.status >= 300 && reply.status < 400) {
       controller.abort()

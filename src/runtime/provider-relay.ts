@@ -11,7 +11,18 @@
  * the grant bounds that use and every decision names the run it is charged to.
  */
 
+import { residencyOf } from './chatgpt-oauth.js'
+
 export type RelayAuthStyle = 'bearer' | 'x-api-key' | 'x-goog-api-key'
+
+/** Where a ChatGPT upstream gets a current access token, and its subscription limit. */
+export interface ChatGptCredentialSource {
+  credentials(): Promise<{ access: string; accountId?: string }>
+  /** The refusal to send while the subscription's limit holds, or null. */
+  limited(): { message: string } | null
+  /** Records an upstream 429 so later requests are refused until `resetAt` (ms). */
+  noteLimit(resetAt: number): void
+}
 
 export interface RelayUpstream {
   providerId: string
@@ -19,6 +30,16 @@ export interface RelayUpstream {
   baseUrl: string
   authStyle: RelayAuthStyle
   apiKey: string
+  /**
+   * The two subscription logins the relay carries, each for exactly one client and endpoint:
+   * - `claude-subscription`: a `claude setup-token` value, for Claude Code's own `/v1/messages`
+   *   requests (the worker's CLI holds the run token as its OAuth token).
+   * - `chatgpt`: OpenCode's ChatGPT Plus/Pro login for `openai`, refreshed per request through
+   *   `chatgpt` and sent to the Codex backend as OpenCode itself sends it.
+   * Absent: an API key in the provider's own header.
+   */
+  kind?: 'claude-subscription' | 'chatgpt'
+  chatgpt?: ChatGptCredentialSource
 }
 
 export interface RelayGrant {
@@ -49,7 +70,13 @@ export interface RelayRequest {
 }
 
 export type RelayDecision =
-  | { ok: true; runId: string; modelId: string; url: string; headers: Record<string, string>; body: Buffer }
+  | {
+      ok: true; runId: string; modelId: string; url: string; headers: Record<string, string>; body: Buffer
+      /** Headers that need an async credential (a refreshed access token), resolved just before sending. */
+      prepare?: () => Promise<Record<string, string>>
+      /** Sees the upstream status, to close a subscription's upstream on its usage limit. */
+      onReply?: (status: number, headers: Record<string, string | string[] | undefined>) => void
+    }
   | { ok: false; status: number; error: string; runId?: string }
 
 /** Request headers that carry meaning upstream. Everything else — cookies, forwarding, the worker token — stays behind. */
@@ -63,6 +90,48 @@ const FORWARDED_HEADERS = ['content-type', 'accept', 'anthropic-version', 'anthr
 const OPENCODE_CLIENT_HEADERS = ['user-agent', 'x-opencode-client', 'x-opencode-project', 'x-opencode-session', 'x-opencode-request'] as const
 const OPENCODE_PROVIDER_ID = 'opencode'
 const MAX_CLIENT_HEADER_LENGTH = 256
+
+/** What Claude Code 2.1.325 sends besides the forwarded headers; none carries a credential. */
+const CLAUDE_CODE_CLIENT_HEADERS = ['user-agent', 'x-app', 'x-claude-code-session-id', 'anthropic-dangerous-direct-browser-access'] as const
+
+/** What OpenCode sends to `openai` (its ChatGPT plugin adds them to every request); none carries a credential. */
+const CHATGPT_CLIENT_HEADERS = ['user-agent', 'originator', 'session-id', 'x-session-affinity', 'x-session-id'] as const
+
+function copyClientHeaders(from: RelayRequest['headers'], names: readonly string[], to: Record<string, string>): void {
+  for (const name of names) {
+    const value = headerValue(from, name)
+    if (value !== undefined && value.length <= MAX_CLIENT_HEADER_LENGTH && /^[\x20-\x7e]*$/.test(value)) to[name] = value
+  }
+}
+
+/**
+ * OpenCode puts the system prompt in `instructions` when it runs `openai` on a ChatGPT login and in
+ * leading `developer`/`system` input messages when it runs it on a key (verified against 1.18.21).
+ * A protected worker runs it as a key, so the relay makes the same move OpenCode makes itself.
+ */
+export function codexBody(body: Record<string, unknown>): Record<string, unknown> {
+  if (typeof body.instructions === 'string' || !Array.isArray(body.input)) return body
+  const input = [...body.input]
+  const system: string[] = []
+  while (input.length > 0) {
+    const first = input[0] as { role?: unknown; content?: unknown } | null
+    if (!first || (first.role !== 'developer' && first.role !== 'system')) break
+    const content = first.content
+    if (typeof content === 'string') system.push(content)
+    else if (Array.isArray(content)) {
+      system.push(content.map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '')).join(''))
+    }
+    input.shift()
+  }
+  if (system.length === 0) return body
+  return { ...body, instructions: system.join('\n'), input }
+}
+
+function retryAfterMs(headers: Record<string, string | string[] | undefined>): number {
+  const raw = headers['retry-after']
+  const value = Number(Array.isArray(raw) ? raw[0] : raw)
+  return Number.isFinite(value) && value > 0 ? Math.min(value, 24 * 3600) * 1000 : 60_000
+}
 
 const DEFAULT_BASE: Record<string, { base: string | null; authStyle: RelayAuthStyle }> = {
   '@ai-sdk/openai-compatible': { base: null, authStyle: 'bearer' },
@@ -187,6 +256,9 @@ export class RelayPolicy {
     if (grant.used >= grant.maxRequests) {
       return { ok: false, status: 429, runId: grant.runId, error: `this run used all ${grant.maxRequests} relay requests it was granted` }
     }
+    // A subscription past its usage limit is refused here, so a worker's retries cannot hammer it.
+    const limited = upstream.kind === 'chatgpt' ? upstream.chatgpt?.limited() ?? null : null
+    if (limited) return { ok: false, status: 429, runId: grant.runId, error: limited.message }
     grant.used++
 
     const headers: Record<string, string> = {}
@@ -194,12 +266,36 @@ export class RelayPolicy {
       const value = headerValue(req.headers, name)
       if (value !== undefined) headers[name] = value
     }
-    if (upstream.providerId === OPENCODE_PROVIDER_ID) {
-      for (const name of OPENCODE_CLIENT_HEADERS) {
-        const value = headerValue(req.headers, name)
-        if (value !== undefined && value.length <= MAX_CLIENT_HEADER_LENGTH && /^[\x20-\x7e]*$/.test(value)) headers[name] = value
+    if (upstream.providerId === OPENCODE_PROVIDER_ID) copyClientHeaders(req.headers, OPENCODE_CLIENT_HEADERS, headers)
+    if (upstream.kind === 'claude-subscription') copyClientHeaders(req.headers, CLAUDE_CODE_CLIENT_HEADERS, headers)
+
+    if (upstream.kind === 'chatgpt') {
+      const source = upstream.chatgpt
+      if (!source) return { ok: false, status: 502, runId: grant.runId, error: 'the ChatGPT login is not available to the relay' }
+      copyClientHeaders(req.headers, CHATGPT_CLIENT_HEADERS, headers)
+      return {
+        ok: true,
+        runId: grant.runId,
+        modelId,
+        url: upstream.baseUrl,
+        headers,
+        body: Buffer.from(JSON.stringify(codexBody(parsed as Record<string, unknown>))),
+        // Set last, after every forwarded header, so none can stand in for the token.
+        prepare: async () => {
+          const { access, accountId } = await source.credentials()
+          const residency = residencyOf(access)
+          return {
+            authorization: `Bearer ${access}`,
+            ...(accountId ? { 'chatgpt-account-id': accountId } : {}),
+            ...(residency ? { 'x-openai-internal-codex-residency': residency } : {}),
+          }
+        },
+        onReply: (status, replyHeaders) => {
+          if (status === 429) source.noteLimit(Date.now() + retryAfterMs(replyHeaders))
+        },
       }
     }
+
     // Set last, so no forwarded header can stand in for the key.
     if (upstream.authStyle === 'bearer') headers.authorization = `Bearer ${upstream.apiKey}`
     else headers[upstream.authStyle] = upstream.apiKey
@@ -226,6 +322,12 @@ function parsePath(raw: string): { providerId: string; rest: string; query: stri
 }
 
 function routeFor(upstream: RelayUpstream, rest: string, query: string): { pathModel: string | null } | null {
+  // Claude Code calls `/v1/messages?beta=true` (and may count tokens); nothing else of the API.
+  if (upstream.kind === 'claude-subscription') {
+    return ['v1/messages', 'v1/messages/count_tokens'].includes(rest) && (query === '' || query === 'beta=true') ? { pathModel: null } : null
+  }
+  // OpenCode's ChatGPT plugin sends only Responses calls to the Codex backend.
+  if (upstream.kind === 'chatgpt') return rest === 'responses' && query === '' ? { pathModel: null } : null
   switch (upstream.authStyle) {
     case 'bearer':
       return !query && ['chat/completions', 'responses', 'completions'].includes(rest) ? { pathModel: null } : null
