@@ -5,6 +5,8 @@
 # OpenCode data folder for credentials. Overrides go in a .env file next to this one:
 #   ARENA_PORT=4400                          host port
 #   OPENCODE_DATA_DIR=/path/to/opencode      where auth.json lives, if not ~/.local/share/opencode
+#   LANGSEARCH_API_KEY=...                   web search for agents (optional; Exa without a key otherwise)
+#   EXA_API_KEY=...                          the Exa fallback's own key (optional)
 services:
   dashboard:
     build: .
@@ -20,6 +22,9 @@ services:
       ARENA_OPENCODE_DATA: ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}
       # OpenCode's cache, including the model catalogue docker runs mount into agent containers.
       XDG_CACHE_HOME: ${PWD:?run docker compose from the repository folder}/runs/opencode-cache
+      # Web search keys stay in the dashboard process; agents never receive them.
+      LANGSEARCH_API_KEY: ${LANGSEARCH_API_KEY:-}
+      EXA_API_KEY: ${EXA_API_KEY:-}
     volumes:
       # Docker runs start agent containers on this Docker. Access to its socket is root-equivalent
       # on the Docker host, which is what `npm start` on the host has too.

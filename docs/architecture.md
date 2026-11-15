@@ -136,6 +136,17 @@ The engine doesn't know which sandbox it's using — it calls `sandbox.run(handl
 
 Design: `docs/superpowers/specs/2026-11-15-connectors-design.md`.
 
+## Web tools for agents
+
+`src/connectors/web/` serves two tools, `web_search` and `web_fetch`, from the host process:
+
+- **Search** (`search.ts`): LangSearch when `LANGSEARCH_API_KEY` is set, Exa's public MCP endpoint when it is not or when LangSearch fails for any reason (keyless, or `EXA_API_KEY` in a header). The answer names its provider and, after a fallback, the fixed reason code. Keys come from the environment or the repository `.env` (`config.ts`) and travel only in request headers.
+- **Fetch** (`fetch-page.ts`, `ssrf.ts`, `html-to-text.ts`): http(s) only; each hop resolved once, every answer checked against the blocked IPv4/IPv6 ranges (embedded IPv4 forms included), the connection pinned to the checked address; manual redirects (5), 2 MiB, 20 s; HTML converted to text by a small in-house extractor; binaries refused.
+- **Limits and evidence** (`limits.ts`, `evidence.ts`): per-agent and per-run call counts; one `WebCallRecord` per call (tool, target as query or host + path, provider, outcome, status, bytes, timing), which the dashboard turns into an `agent.web` engine event. The audit collector stores it as a `network` record from `host_tool`; the activity cache shows it as a tool item.
+- **MCP** (`mcp-server.ts`): `createWebMcpServer(deps)` builds the tools for one agent of one run; `webConnector()` keeps one limiter per run for many agents. `stdio.ts` serves the same tools over stdio for a host-side client.
+- **Local runs** (`http-server.ts`, `opencode.ts`): a process-wide loopback endpoint (`POST /mcp`, stateless Streamable HTTP) with a grant per run; each agent's workspace gets `.opencode/opencode.json` naming the endpoint and its own HMAC token, and the competitor profile allows `arena_web_search`/`arena_web_fetch` and denies OpenCode's own `websearch`. `composeRun` grants, the API (or, for a local CLI run, the CLI) attaches the run's evidence sink after `createRun`, and cleanup revokes.
+- **Docker** is not wired: protected workers keep only their two gateway routes. The connectors bridge registers `webConnector().createServer` at integration (design: `docs/superpowers/specs/2026-11-15-web-search-design.md`).
+
 ## The provider abstraction
 
 `src/runtime/provider.ts` — `complete(prompt, opts)` returns the LLM response. Two implementations:
@@ -172,5 +183,6 @@ The codebase was built via subagent-driven development (SDD) in phases:
 - **Phase 4j** — new features (export JSON/CSV, run browser, run comparison, rejudge).
 - **Phase 4k** — documentation (this file + operator guide + API reference + AGENTS.md).
 - **Phase 8** — collaboration workflow (shared team workspace, channel, sealed team output, team judging), now the default; see `docs/superpowers/specs/2026-11-15-collaboration-mode-design.md`.
+- **Phase 8** — web search and page fetch for agents (local runs wired; Docker through the connectors bridge at integration).
 
 Specs live in `docs/superpowers/specs/`, plans in `docs/superpowers/plans/`. The local SDD ledger (`.superpowers/sdd/<phase>/progress.md`) is gitignored.

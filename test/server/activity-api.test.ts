@@ -110,6 +110,43 @@ describe('live activity in the run snapshot', () => {
     expect(sink).toBeNull()
   })
 
+  test('the run\'s web tool records are attached with the live run id and reach the live view', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: sse([]) })))
+    const emitted: EngineEvent[] = []
+    const registry = new RunRegistry()
+    const attached: { runId: string; sink: (e: EngineEvent) => void }[] = []
+    const app = buildApi({
+      repos: makeRepos(openDb(':memory:')),
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('must not be called for specs') }) as never,
+      registry,
+      emit: (e: EngineEvent) => emitted.push(e),
+      composeWith: (async () => ({
+        config: { ...DEFAULT_CONFIG, populationSize: 1, sandbox: 'local', roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }] },
+        sandbox: {}, provider: {}, runner: {}, planFor: null,
+        serverHandle: { baseUrl: 'http://127.0.0.1:4096' }, shardServers: [],
+        sessionMap: new Map(), sessionHook: () => {}, warnings: [],
+        capacity: null, cleanup: async () => {},
+        attachWebEvidence: (runId: string, sink: (e: EngineEvent) => void) => attached.push({ runId, sink }),
+      })) as never,
+    } as never)
+    const res = await app.inject({
+      method: 'POST', url: '/api/runs',
+      payload: { name: 'l', goal: 'g', sandbox: 'local', workspaceRoot: '/tmp/w', roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }] },
+    })
+    const { runId } = JSON.parse(res.body) as { runId: string }
+    expect(attached.map((a) => a.runId)).toEqual([runId])
+    attached[0]!.sink({
+      type: 'agent.web', runId, agentId: 'agent-1', callId: 'W1', tool: 'web_search', outcome: 'completed', at: 9,
+      summary: 'web_search "x" via LangSearch: 3 results', detail: 'outcome=completed',
+    })
+    const shown = emitted.find((e) => e.type === 'agent.activity') as Extract<EngineEvent, { type: 'agent.activity' }>
+    expect(shown.item).toMatchObject({ id: 'web:W1', agentId: 'agent-1', status: 'completed', summary: 'web_search "x" via LangSearch: 3 results' })
+    const snap = JSON.parse((await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).body)
+    expect(snap.activity.agents['agent-1'].items[0]).toMatchObject({ id: 'web:W1' })
+    await disposeRunRecord(registry.get(runId)!)
+  })
+
   test('a lost upstream stream is reported as telemetry, not as an agent failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401, body: sse([]) })))
     const emitted: EngineEvent[] = []

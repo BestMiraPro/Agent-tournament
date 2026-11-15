@@ -56,6 +56,19 @@ describe('connectors', () => {
   })
 })
 
+describe('webAccess', () => {
+  test('defaults on, can be turned off, and must be a boolean', () => {
+    expect(parseRunSpec(base).webAccess).toBe(true)
+    expect(parseRunSpec({ ...base, webAccess: false }).webAccess).toBe(false)
+    expect(() => parseRunSpec({ ...base, webAccess: 'yes' })).toThrow()
+  })
+
+  test('lands in the run config', () => {
+    expect(runConfigFor(parseRunSpec(base)).webAccess).toBe(true)
+    expect(runConfigFor(parseRunSpec({ ...base, webAccess: false })).webAccess).toBe(false)
+  })
+})
+
 describe('isolation', () => {
   const abs = process.platform === 'win32' ? 'C:\\ws' : '/ws'
   // Container placement and isolation choices are the tournament's; a team has one protected container.

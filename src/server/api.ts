@@ -21,6 +21,7 @@ import { buildCsvRows, buildJsonDump, buildMarkdownReport } from './export.js'
 import { submissionView } from './submission-view.js'
 import { ActivityCache, type ActivitySnapshot } from './activity.js'
 import { AuditCollector, readRoundAudit } from '../engine/audit.js'
+import { readWebSearchKeys, webSearchStatus, type WebSearchStatus } from '../connectors/web/config.js'
 import { buildJudgingEnvelope, evidenceFromAudit, type JudgeCallRecord } from '../judge/audit.js'
 import type { HostCapacity } from '../runtime/docker/capacity.js'
 import { OUTPUT_README } from '../runtime/team-prompt.js'
@@ -66,6 +67,8 @@ export interface ApiDeps {
   capacity?: () => Promise<{ host: HostCapacity; reserved: { memoryBytes: number; cpus: number } }>
   /** The Connectors page's routes; absent in harnesses that do not need them. */
   connectors?: ConnectorRouteDeps
+  /** Which web search provider would answer; defaults to reading the keys from env / `.env`. */
+  webSearchStatus?: () => WebSearchStatus
 }
 
 /** Bridge callbacks that report upstream stream health as its own event, never as agent state. */
@@ -213,6 +216,8 @@ export function specForResume(run: RunRow, defaults?: SpecDefaults): RunSpec {
     serverUrl: defaults?.serverUrl ?? null,
     criteria: run.initialCriteria,
     connectors: (cfg.connectors ?? []).map((c) => ({ id: c.id, writeTools: [...c.writeTools] })),
+    // A config from before the toggle ran without web tools, and resumes that way.
+    webAccess: cfg.webAccess === true,
   }
 }
 
@@ -539,6 +544,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         engine.observe(e)
         emit(e)
       }
+      // The host's web tool calls take the same path as bridge evidence.
+      composed.attachWebEvidence?.(runId, bridgeEmit)
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
@@ -626,6 +633,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
     }
   })
+
+  // Which provider web_search would use, never a key: for the setup form's status line.
+  app.get('/api/web-search', async () => (deps.webSearchStatus ?? (() => webSearchStatus(readWebSearchKeys())))())
 
   // Totals only: per-container names belong to whatever else runs on this Docker host.
   app.get('/api/capacity', async (_req, reply) => {
@@ -1122,6 +1132,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         engine.observe(e)
         emit(e)
       }
+      composed.attachWebEvidence?.(runId, bridgeEmit)
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',

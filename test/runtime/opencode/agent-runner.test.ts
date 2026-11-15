@@ -47,6 +47,42 @@ describe('buildAgentPrompt', () => {
     expect(buildAgentPrompt('g')).not.toContain('Reference material')
     expect(buildAgentPrompt('g', '/context')).toContain('Reference material (read-only) is in /context.')
   })
+
+  test('describes the web tools only when the run has them', () => {
+    expect(buildAgentPrompt('g')).not.toContain('Web access')
+    expect(buildAgentPrompt('g', null, null, 'Web access: use arena_web_search.')).toContain('Web access: use arena_web_search.')
+  })
+})
+
+describe('OpenCodeAgentRunner workspace config', () => {
+  test('writes the agent\'s OpenCode config before its session exists, and tells it about the tools', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'x')
+    const seenAtSession: (string | null)[] = []
+    const c = new FakeClient(okResponse)
+    c.createSession = async () => {
+      seenAtSession.push(await sb.readFile(h, '.opencode/opencode.json'))
+      return { id: 'ses_1' }
+    }
+    const runner = new OpenCodeAgentRunner(c as never, sb, {
+      opencodeConfig: (agentId) => `{"for":"${agentId}"}`,
+      webToolsNote: 'Web access: tools here.',
+    })
+    await runner.run(h, ctx('s'))
+    expect(seenAtSession).toEqual(['{"for":"a1"}'])
+    expect(c.lastBody?.parts[0]?.text).toContain('Web access: tools here.')
+  })
+
+  test('without the option nothing is written', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    await sb.writeFile(h, 'SUBMISSION.md', 'x')
+    const c = new FakeClient(okResponse)
+    await new OpenCodeAgentRunner(c as never, sb).run(h, ctx('s'))
+    expect(await sb.readFile(h, '.opencode/opencode.json')).toBeNull()
+    expect(c.lastBody?.parts[0]?.text).not.toContain('Web access')
+  })
 })
 
 describe('OpenCodeAgentRunner', () => {

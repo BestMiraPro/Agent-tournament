@@ -36,6 +36,33 @@ const setup = () => {
   return { app, repos, started }
 }
 
+describe('GET /api/web-search', () => {
+  test('reports which provider would answer and never a key', async () => {
+    const app = buildApi({
+      repos: makeRepos(openDb(':memory:')),
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: () => '',
+      webSearchStatus: () => ({ primary: { id: 'langsearch', name: 'LangSearch', configured: true }, fallback: { id: 'exa', name: 'Exa', mode: 'keyless' } }),
+    })
+    const res = await app.inject({ method: 'GET', url: '/api/web-search' })
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ primary: { id: 'langsearch', name: 'LangSearch', configured: true }, fallback: { id: 'exa', name: 'Exa', mode: 'keyless' } })
+  })
+
+  test('by default reads the keys the app would use', async () => {
+    const saved = process.env.LANGSEARCH_API_KEY
+    process.env.LANGSEARCH_API_KEY = 'fake-key-for-status'
+    try {
+      const res = await setup().app.inject({ method: 'GET', url: '/api/web-search' })
+      expect(JSON.parse(res.body).primary.configured).toBe(true)
+      expect(res.body).not.toContain('fake-key-for-status')
+    } finally {
+      if (saved === undefined) delete process.env.LANGSEARCH_API_KEY
+      else process.env.LANGSEARCH_API_KEY = saved
+    }
+  })
+})
+
 describe('API', () => {
   test('GET export?format=md returns the markdown report', async () => {
     const { app } = setup()

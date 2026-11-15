@@ -105,7 +105,7 @@ describe('a run with connectors', () => {
     const closed: string[] = []
     const s = seams({ connectors: () => resolverOf(fakeConnector('gh', 'github', { closed })) })
     const c = await composeRun(parseRunSpec({
-      name: 'p', goal: 'g', sandbox: 'docker', roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 2, temperature: 0.7 }],
+      name: 'p', goal: 'g', sandbox: 'docker', workflow: 'tournament', roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 2, temperature: 0.7 }],
       workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 2, connectors: [{ id: 'gh' }],
     }), s as never, { runIdHolder: { value: 'run-9' } })
     expect(c.config.connectors).toEqual([{ id: 'gh', writeTools: [] }])
@@ -165,7 +165,7 @@ describe('a run with connectors', () => {
     bridge = new ToolBridge()
     const root = tempRoot()
     const spec = parseRunSpec({
-      name: 's', goal: 'g', sandbox: 'docker', isolation: 'shared', roster: [{ modelId: 'wandb/m', count: 1, temperature: 0.7 }],
+      name: 's', goal: 'g', sandbox: 'docker', workflow: 'tournament', isolation: 'shared', roster: [{ modelId: 'wandb/m', count: 1, temperature: 0.7 }],
       workspaceRoot: root, authFile: join(root, 'auth.json'), connectors: [{ id: 'gh' }],
     })
     const loop = await composeRun(spec, seams({ connectors: () => resolverOf(fakeConnector('gh', 'custom')) }) as never)

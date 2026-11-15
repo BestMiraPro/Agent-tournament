@@ -16,6 +16,9 @@ const catalogJson = JSON.stringify({
 })
 const authJson = JSON.stringify({ w: { type: 'api', key: 'FAKE-W-KEY' }, wandb: { type: 'api', key: 'FAKE-WANDB-KEY' } })
 import { parseRunSpec } from '../../src/server/run-spec.js'
+import type { AgentRunnerOptions } from '../../src/runtime/opencode/agent-runner.js'
+import type { WebCallRecord } from '../../src/connectors/web/evidence.js'
+import type { EngineEvent } from '../../src/engine/events.js'
 
 const TOOLCHAIN = 'abc123def4567890'
 const inventoryFixture = {
@@ -521,6 +524,72 @@ describe('composeRun', () => {
         await expect(ready()).resolves.toBeUndefined()
         expect(result.failure).toMatchObject({ code: 'CONTAINER_OOM' })
         await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('web access (local runs)', () => {
+    const webSeam = () => {
+      const grant = {
+        tokenFor: vi.fn((agentId: string) => `tok-${agentId}`),
+        attach: vi.fn((_runId: string, _evidence: (record: WebCallRecord) => void) => {}),
+        revoke: vi.fn(),
+      }
+      return { grant, webTools: vi.fn(async () => ({ host: { grant: () => grant }, url: 'http://127.0.0.1:5555/mcp' })) }
+    }
+    const seamsWith = (webTools: unknown) => ({
+      ...mockSeams(),
+      startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+      webTools,
+    })
+    // `undefined` is a spec without the field at all, as the CLI builds it.
+    const localSpec = (root: string, webAccess?: boolean) => {
+      const { webAccess: _parsed, ...spec } = parseRunSpec({ name: 'l', goal: 'g', sandbox: 'local', roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }], workspaceRoot: root })
+      return webAccess === undefined ? spec : { ...spec, webAccess }
+    }
+
+    test('grants the run, configures each agent with its own token, and revokes on cleanup', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-web-'))
+      const web = webSeam()
+      try {
+        const c = await composeRun(localSpec(root, true), seamsWith(web.webTools) as never)
+        expect(c.config.webAccess).toBe(true)
+        const options = (c.runner as unknown as { options: AgentRunnerOptions }).options
+        const config = JSON.parse(options.opencodeConfig!('agent-1')) as { mcp: Record<string, unknown> }
+        expect(config.mcp).toEqual({
+          arena: { type: 'remote', url: 'http://127.0.0.1:5555/mcp', headers: { Authorization: 'Bearer tok-agent-1' }, oauth: false, timeout: 60_000 },
+        })
+        expect(options.webToolsNote).toContain('arena_web_search')
+        expect(options.webToolsNote).toContain('200 searches and 500 page fetches')
+
+        const events: EngineEvent[] = []
+        c.attachWebEvidence!('run-9', (e) => events.push(e))
+        expect(web.grant.attach).toHaveBeenCalledWith('run-9', expect.any(Function))
+        const forward = web.grant.attach.mock.calls[0]![1]
+        forward({ id: 'W1', runId: 'run-9', agentId: 'agent-1', tool: 'web_fetch', target: 'e.example/a', outcome: 'completed', status: 200, bytes: 10, startedAt: 7, durationMs: 1 })
+        expect(events).toEqual([expect.objectContaining({ type: 'agent.web', runId: 'run-9', agentId: 'agent-1', callId: 'W1', at: 7 })])
+
+        await c.cleanup()
+        expect(web.grant.revoke).toHaveBeenCalledTimes(1)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('without web access nothing is granted or configured', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-web-'))
+      try {
+        for (const webAccess of [false, undefined]) {
+          const web = webSeam()
+          const c = await composeRun(localSpec(root, webAccess), seamsWith(web.webTools) as never)
+          expect(web.webTools).not.toHaveBeenCalled()
+          expect(c.attachWebEvidence).toBeUndefined()
+          expect(c.config.webAccess).toBe(false)
+          expect((c.runner as unknown as { options: AgentRunnerOptions }).options.opencodeConfig).toBeUndefined()
+          await c.cleanup()
+        }
       } finally {
         rmSync(root, { recursive: true, force: true })
       }

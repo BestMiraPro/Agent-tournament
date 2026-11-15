@@ -130,6 +130,7 @@ export function App() {
           : {}),
         pricing,
         ...(value.connectors.length > 0 ? { connectors: value.connectors } : {}),
+        webAccess: value.webAccess,
       }))
     } catch (e) {
       setSetupError(serverError(e))

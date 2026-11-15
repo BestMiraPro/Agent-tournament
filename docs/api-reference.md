@@ -20,7 +20,8 @@ Body (the full run spec; all fields except `name`+`goal`+`roster` are optional w
   "selection": { "crossoverPct": 0.2, "eliteCount": 2, "topPct": 0.3, "bottomPct": 0.2, "diversityFloor": true },
   "concurrency": 8,
   "pricing": { "model/id": { "inPerM": 1, "outPerM": 2, "cacheReadPerM": 0.1, "cacheWritePerM": 0.2 } },
-  "connectors": [{ "id": "github", "writeTools": [] }]  // local/docker only; see Connectors
+  "connectors": [{ "id": "github", "writeTools": [] }], // local/docker only; see Connectors
+  "webAccess": true                        // optional, default true: local workers get the host's web tools
 }
 ```
 - `201` `{ runId: string, warnings?: string[] }` — roster counts must sum to `populationSize` (derived from roster).
@@ -99,6 +100,13 @@ Completes the sign-in for a pending `state` (single use, 10 minutes) and answers
 Spawns an opencode server (60s success-only cache) to discover models.
 - `200` `{ models: string[] }`
 - `502` — opencode server failed to start.
+
+## Web search
+
+### `GET /api/web-search` — which search provider the web tools would use
+
+Read from the app's keys (environment, else the repository `.env`) on every request; never returns a key.
+- `200` `{ primary: { id: "langsearch", name: "LangSearch", configured: boolean }, fallback: { id: "exa", name: "Exa", mode: "keyed" | "keyless" } }`
 
 ## Rounds
 
@@ -187,7 +195,7 @@ Retires (does not delete — lineage is preserved). Fails if it would empty the 
 Live events pushed to the dashboard (one JSON message per event):
 - `round.status` `{ runId, roundIdx, status }` — `preparing`/`running`/`judging`/`scoring`/`complete`.
 - `agent.status` `{ runId, agentId, status }` — `pending`/`running`/`done`/`failed`.
-- `agent.activity` `{ runId, agentId, detail }` — current activity text. Connector calls arrive here too, as tool items with ids `connector:<callId>`.
+- `agent.activity` `{ runId, agentId, detail }` — current activity text. Connector calls arrive here too, as tool items with ids `connector:<callId>`; a host web tool call (`web_search`/`web_fetch`) arrives with an item id starting `web:`.
 - `agent.usage` `{ runId, agentId, tokensIn, tokensOut, costUsd }` — incremental usage.
 - `round.scored` `{ runId, roundIdx, scores: [...], team? }` — rank-ordered scores; collaboration rounds add `team: { score, status }`.
 - `channel.message` `{ runId, roundIdx, seq, author, agentId, target, postedAt, body }` — a new team-channel entry the moment the engine reads it (body cut at 4,000 characters; the channel endpoint has it whole).

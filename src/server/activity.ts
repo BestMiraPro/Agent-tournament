@@ -132,6 +132,14 @@ export class ActivityCache {
         })
         return { type: 'agent.activity', runId: event.runId, agentId: event.agentId, kind: 'tool', detail: stored.summary, item: { ...stored } }
       }
+      case 'agent.web': {
+        // Shown as a settled tool item, so the dashboard renders it like any other call.
+        const stored = this.upsert(event.runId, event.agentId, {
+          id: `web:${event.callId}`, sessionId: '', kind: 'tool', status: event.outcome === 'completed' ? 'completed' : 'error',
+          summary: event.summary, output: event.detail, observedAt: event.at,
+        })
+        return { type: 'agent.activity', runId: event.runId, agentId: event.agentId, kind: 'tool', detail: stored.summary, item: { ...stored } }
+      }
       case 'agent.activity': {
         const input = event.item
         if (!input) {

@@ -73,6 +73,11 @@ import { CONTAINER_CONTEXT_PATH, removeContainer } from '../runtime/docker/cli.j
 import { sweepOrphanContainers, type SweepOptions } from '../runtime/docker/sweep.js'
 import { DockerSandbox } from '../runtime/docker/sandbox.js'
 import type { RunSpec } from './run-spec.js'
+import type { EventSink } from '../engine/events.js'
+import { webCallEvent } from '../connectors/web/evidence.js'
+import { processWebTools, type RunWebGrant } from '../connectors/web/http-server.js'
+import { DEFAULT_WEB_LIMITS } from '../connectors/web/limits.js'
+import { webOpencodeConfig, webToolsPrompt } from '../connectors/web/opencode.js'
 
 export interface ComposeSeams {
   startHostServer: (opts: { timeoutMs: number; env?: Record<string, string> }) => Promise<ServerHandle>
@@ -124,6 +129,8 @@ export interface ComposeSeams {
   readTextFile: (path: string) => Promise<string>
   createShardNetworkFn: (runId: string, shardIndex: number) => Promise<string>
   removeShardNetworkFn: (name: string, onWarning: (message: string) => void) => Promise<boolean>
+  /** The process's web tool endpoint for local workers: grants per run, and the URL agents use. */
+  webTools: () => Promise<{ host: { grant(): RunWebGrant }; url: string }>
 }
 
 export type PathKind = 'file' | 'directory' | 'missing'
@@ -168,6 +175,7 @@ export const defaultSeams: ComposeSeams = {
   readTextFile: (path) => readFile(path, 'utf8'),
   createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
   removeShardNetworkFn: (name, onWarning) => removeShardNetwork(name, onWarning),
+  webTools: () => processWebTools(),
 }
 
 /**
@@ -322,6 +330,12 @@ export interface ComposedRun {
   channel?: Partial<ChannelLimits>
   /** Collaboration: where the grader opens a round's sealed output (absent: it is inlined). */
   sealedArtifacts?: SealedArtifactWriter
+  /**
+   * Local runs with web access: starts serving the run's web tools, with each call's record sent to
+   * `sink` as an `agent.web` event (the audit and the live view). Called once the run id exists;
+   * calls before it are refused. Absent when the run has no web tools.
+   */
+  attachWebEvidence?: (runId: string, sink: EventSink) => void
   cleanup: () => Promise<void>
 }
 
@@ -355,6 +369,7 @@ export function runConfigFor(spec: RunSpec): RunConfig {
     seedDir: spec.seedDir,
     contextDir: spec.contextDir ?? null,
     connectors: (spec.connectors ?? []).map((c) => ({ id: c.id, writeTools: [...c.writeTools] })),
+    webAccess: spec.webAccess === true,
   }
 }
 
@@ -957,6 +972,10 @@ export async function composeRun(
       }
     }
 
+    // Local workers reach the web only through the host's audited tools: a grant on the process's
+    // loopback endpoint, and a per-agent token in each workspace's OpenCode config.
+    const web = spec.webAccess ? await s.webTools() : null
+    const grant = web ? web.host.grant() : null
     const sandbox = new LocalSandbox(workspaceRoot)
     return {
       config, sandbox, provider,
@@ -965,6 +984,12 @@ export async function composeRun(
         contextPath: spec.contextDir,
         // Local agents run on this host and reach the bridge where it listens.
         ...(toolBridge ? { projectConfig: connectorConfig(`http://${toolBridge.host}:${toolBridge.port}`) } : {}),
+        ...(web && grant
+          ? {
+              opencodeConfig: (agentId: string) => webOpencodeConfig(web.url, grant.tokenFor(agentId)),
+              webToolsNote: webToolsPrompt(DEFAULT_WEB_LIMITS),
+            }
+          : {}),
       }),
       planFor: null,
       serverHandle: server,
@@ -973,7 +998,10 @@ export async function composeRun(
       capacity: null,
       sealedArtifacts: sealedArtifactWriter(graderDirectory),
       ...(connectorPlan ? { onConnectorEvent: connectorPlan.subscribe } : {}),
+      ...(grant ? { attachWebEvidence: (runId: string, sink: EventSink) => grant.attach(runId, (record) => sink(webCallEvent(record))) } : {}),
       cleanup: async () => {
+        // First: from here on this run's agents can make no further web calls.
+        grant?.revoke()
         await revokeTools()
         await server.stop().catch(() => {})
       },

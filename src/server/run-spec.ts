@@ -73,6 +73,8 @@ const schema = z.object({
     }))
     .max(16)
     .default([]),
+  // On by default: this is a research tool. Wired for local runs; Docker workers stay offline.
+  webAccess: z.boolean().default(true),
 })
 
 export type RunSpecInput = z.input<typeof schema>
@@ -107,6 +109,8 @@ export interface RunSpec {
   criteria: string | null
   /** Connectors enabled for the run; absent means none. */
   connectors?: RunConnector[]
+  /** Workers get the host's web tools (local runs). Parsed specs default it on; absent means off. */
+  webAccess?: boolean
 }
 
 /**
@@ -230,5 +234,6 @@ export function parseRunSpec(input: unknown): RunSpec {
     serverUrl: p.serverUrl,
     criteria: p.criteria,
     connectors: p.connectors.map((c) => ({ id: c.id, writeTools: [...new Set(c.writeTools)] })),
+    webAccess: p.webAccess,
   }
 }

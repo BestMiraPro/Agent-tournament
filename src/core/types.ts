@@ -121,6 +121,11 @@ export interface RunConfig {
    * into. Ids and tool names only: credentials never live in a run's config. Absent on runs from before connectors.
    */
   connectors?: RunConnector[]
+  /**
+   * Whether workers get the host's web tools (`web_search`, `web_fetch`). Wired for local runs
+   * (dashboard and CLI); absent means off — configs from before the toggle ran without them.
+   */
+  webAccess?: boolean
   roster: RosterEntry[]
   judge: {
     modelId: string

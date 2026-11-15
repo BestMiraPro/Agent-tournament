@@ -33,6 +33,8 @@ import { validateModel, summarizeValidation, type ModelRole } from './runtime/op
 import { OpenCodeClient } from './runtime/opencode/client.js'
 import { type ServerHandle } from './runtime/opencode/server.js'
 import { composeRun } from './server/compose-run.js'
+import type { RunSpec } from './server/run-spec.js'
+import type { EventSink } from './engine/events.js'
 import { buildMarkdownReport } from './server/export.js'
 
 export interface CliOptions {
@@ -74,6 +76,11 @@ export interface CliOptions {
    * (e.g. when the caller has already validated the roster out of band).
    */
   validateModels?: boolean
+  /**
+   * Real local runs: give agents the host's audited web tools (`web_search`, `web_fetch`), as the
+   * dashboard does. Defaults to true; `--no-web-access` turns it off. Docker runs ignore it.
+   */
+  webAccess?: boolean
 }
 
 export interface ValidateRosterOptions {
@@ -447,6 +454,10 @@ interface RealDeps {
   releasePopulation: (() => Promise<void>) | null
   /** Where the grader opens a collaboration round's sealed output. */
   sealedArtifacts: SealedArtifactWriter | null
+  /** Stops the run's runtime: for a local run its web grant first, then the server. */
+  stop: () => Promise<void>
+  /** Local runs with web access: where the run's web tool records go, once the run id exists. */
+  attachWebEvidence: ((runId: string, sink: EventSink) => void) | null
 }
 
 /**
@@ -456,6 +467,56 @@ interface RealDeps {
  */
 interface RunIdHolder {
   value: string
+}
+
+/**
+ * The run-spec the CLI composes with.
+ * Built literally from the caller's config, not via parseRunSpec: parseRunSpec
+ * REFUSES docker-without-authFile, but the CLI contract is warn-and-continue
+ * (test/cli.test.ts: 'the CLI refuses to start a docker run that would
+ * overcommit the host' runs docker with no authFile and expects the capacity
+ * refusal, not an auth refusal). Every field below is copied from config/opts,
+ * so the composed config cannot drift from the caller's.
+ */
+export function cliRunSpec(opts: CliOptions, config: RunConfig): RunSpec {
+  return {
+    name: 'cli',
+    goal: opts.goal,
+    sandbox: resolveSandboxMode('real', opts.sandbox),
+    workflow: config.workflow,
+    roster: config.roster,
+    population: config.populationSize,
+    judge: { modelId: config.judge.modelId, mode: config.judge.mode },
+    reflect: { modelId: config.reflect.modelId, topK: config.reflect.topK },
+    selection: {
+      eliteCount: config.selection.eliteCount,
+      topPct: config.selection.topPct,
+      bottomPct: config.selection.bottomPct,
+      crossoverPct: config.selection.crossoverPct,
+    },
+    concurrency: config.concurrency,
+    maxContainers: config.maxContainers,
+    containerMemory: config.containerMemory,
+    containerCpus: config.containerCpus,
+    // The CLI keeps the placement it always had unless its config says otherwise; a
+    // collaboration team's one container is always protected.
+    isolation: config.workflow === 'collaboration' ? 'protected' : config.isolation ?? 'shared',
+    pricing: { ...config.pricing },
+    budget: {
+      maxRunTokens: config.budget.maxRunTokens,
+      maxRoundTokens: config.budget.maxRoundTokens,
+      maxAgentTokens: config.budget.maxAgentTokens,
+    },
+    seedDir: config.seedDir,
+    contextDir: null,
+    seedStrategiesDir: null,
+    workspaceRoot: opts.workspaceRoot ?? null,
+    authFile: opts.authFile ?? null,
+    serverUrl: opts.serverUrl ?? null,
+    criteria: opts.criteria,
+    // Local runs get the host's web tools unless the CLI was told not to (--no-web-access).
+    webAccess: config.webAccess === true,
+  }
 }
 
 async function buildRealDeps(
@@ -493,48 +554,7 @@ async function buildRealDeps(
     )
   }
   const composed = await composeRun(
-    // Built literally from the caller's config, not via parseRunSpec: parseRunSpec
-    // REFUSES docker-without-authFile, but the CLI contract is warn-and-continue
-    // (test/cli.test.ts: 'the CLI refuses to start a docker run that would
-    // overcommit the host' runs docker with no authFile and expects the capacity
-    // refusal, not an auth refusal). Every field below is copied from config/opts,
-    // so the composed config cannot drift from the caller's.
-    {
-      name: 'cli',
-      goal: opts.goal,
-      sandbox: resolveSandboxMode('real', opts.sandbox),
-      workflow: config.workflow,
-      roster: config.roster,
-      population: config.populationSize,
-      judge: { modelId: config.judge.modelId, mode: config.judge.mode },
-      reflect: { modelId: config.reflect.modelId, topK: config.reflect.topK },
-      selection: {
-        eliteCount: config.selection.eliteCount,
-        topPct: config.selection.topPct,
-        bottomPct: config.selection.bottomPct,
-        crossoverPct: config.selection.crossoverPct,
-      },
-      concurrency: config.concurrency,
-      maxContainers: config.maxContainers,
-      containerMemory: config.containerMemory,
-      containerCpus: config.containerCpus,
-      // The CLI keeps the placement it always had unless its config says otherwise; a
-      // collaboration team's one container is always protected.
-      isolation: config.workflow === 'collaboration' ? 'protected' : config.isolation ?? 'shared',
-      pricing: { ...config.pricing },
-      budget: {
-        maxRunTokens: config.budget.maxRunTokens,
-        maxRoundTokens: config.budget.maxRoundTokens,
-        maxAgentTokens: config.budget.maxAgentTokens,
-      },
-      seedDir: config.seedDir,
-      contextDir: null,
-      seedStrategiesDir: null,
-      workspaceRoot: opts.workspaceRoot,
-      authFile: opts.authFile ?? null,
-      serverUrl: opts.serverUrl ?? null,
-      criteria: opts.criteria,
-    },
+    cliRunSpec(opts, config),
     {
       readCapacity: hooks.readCapacity,
       sweepFn: async () => [],
@@ -553,6 +573,9 @@ async function buildRealDeps(
     planFor: composed.planFor,
     releasePopulation: composed.releasePopulation ?? null,
     sealedArtifacts: composed.sealedArtifacts ?? null,
+    // A local composition's cleanup is exactly its web grant's revocation and the server's stop.
+    stop: config.sandbox === 'local' ? composed.cleanup : composed.serverHandle.stop,
+    attachWebEvidence: composed.attachWebEvidence ?? null,
   }
 }
 
@@ -582,6 +605,7 @@ export async function runTournamentCli(
     let planFor: ((agentIds: readonly string[]) => Promise<void>) | null = null
     let releasePopulation: (() => Promise<void>) | null = null
     let sealedArtifacts: SealedArtifactWriter | null = null
+    let attachWebEvidence: ((runId: string, sink: EventSink) => void) | null = null
     const runIdHolder: RunIdHolder = { value: '' }
     // Read first: a wrong folder should cost no setup.
     const seedStrategies = opts.seedStrategiesDir ? await loadSeedStrategies(opts.seedStrategiesDir) : []
@@ -597,6 +621,7 @@ export async function runTournamentCli(
         roster: buildRoster(workerModels, opts.population, 0.7),
         judge: { ...DEFAULT_CONFIG.judge, modelId: opts.judgeModel ?? DEFAULT_REAL_JUDGE_MODEL },
         reflect: { ...DEFAULT_CONFIG.reflect, modelId: opts.reflectModel ?? DEFAULT_REAL_REFLECT_MODEL },
+        webAccess: opts.webAccess !== false,
       }
 
       const built = await buildRealDeps(opts, config, runIdHolder, hooks)
@@ -606,7 +631,8 @@ export async function runTournamentCli(
       planFor = built.planFor
       releasePopulation = built.releasePopulation
       sealedArtifacts = built.sealedArtifacts
-      stopServer = built.server.stop
+      attachWebEvidence = built.attachWebEvidence
+      stopServer = built.stop
 
       // Pre-flight: fail fast and legibly before any agent runs or money is spent,
       // rather than mid-round with an opaque provider error. Mock mode never reaches
@@ -662,6 +688,8 @@ export async function runTournamentCli(
 
     const run = engine.createRun('cli', opts.goal)
     runIdHolder.value = run.id
+    // Web tool calls join the run's audit like bridge evidence does in the dashboard.
+    attachWebEvidence?.(run.id, (e) => engine.observe(e))
     disposeSandbox = () => engine.dispose(run.id)
 
     // Deliberately after createRun rather than at process start: the sweep's second safety
@@ -771,6 +799,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       'reflect-model': { type: 'string' },
       'worker-models': { type: 'string' },
       'no-validate-models': { type: 'boolean', default: false },
+      'no-web-access': { type: 'boolean', default: false },
       'seed-strategies': { type: 'string' },
       report: { type: 'string' },
     },
@@ -798,6 +827,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       ? values['worker-models'].split(',').map((s) => s.trim()).filter((s) => s.length > 0)
       : undefined,
     validateModels: values['no-validate-models'] ? false : undefined,
+    webAccess: values['no-web-access'] ? false : undefined,
     seedStrategiesDir: values['seed-strategies'],
     reportPath: values.report,
   })
