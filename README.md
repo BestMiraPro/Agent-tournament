@@ -111,20 +111,20 @@ npm run typecheck   # tsc --noEmit, strict mode with noUncheckedIndexedAccess
 npm run web:build   # Vite production build of the dashboard
 ```
 
-The suite has **1,499 test cases in 119 files**. Some are platform-specific or opt-in, so the pass/skip split depends on where it runs (macOS measured 1 October 2026; Linux has the same POSIX-only skips, and the Windows row is the 21 September measurement plus 83 platform-neutral cases added since):
+The suite has **1,623 test cases in 134 files**. Some are platform-specific or opt-in, so the pass/skip split depends on where it runs (macOS measured 15 November 2026; Linux has the same POSIX-only skips; the Windows row is not re-measured: the 21 September measurement plus the platform-neutral cases added since, with four more POSIX-only cases skipped):
 
 | Environment | Passed | Skipped |
 |---|---|---|
-| macOS (Node 26) | 1,484 | 15 |
-| Linux (Node 24, as in CI) | 1,484 | 15 |
-| Windows 11 (Node 24) | 1,480 | 19 |
+| macOS (Node 26) | 1,608 | 15 |
+| Linux (Node 24, as in CI) | 1,608 | 15 |
+| Windows 11 (Node 24, estimated) | 1,600 | 23 |
 
 The skipped cases are:
 - Four opt-in end-to-end suites that need real services: a real provider (`ARENA_E2E=1`), Docker (`ARENA_DOCKER_E2E=1`), the real dashboard (`ARENA_DASHBOARD_E2E=1`), and the protected-container policy check (also `ARENA_DOCKER_E2E=1`).
-- Process-termination tests for the other OS.
+- Process-termination tests for the other OS, and on Windows the POSIX-only Claude Code process-group and read-only-file tests.
 - On Windows without symlink privileges, file-symlink escape tests.
 
-Coverage includes the engine and selection logic, judge parsing and anonymisation, the provider relay's allow/deny decisions, Docker argument construction, workspace path-escape and symlink attacks, SQLite migrations and restart recovery, the HTTP/WebSocket API, and the dashboard's pure state reducers.
+Coverage includes the engine and selection logic, the Claude Code stream translation (against recorded CLI streams) and subscription relaying, judge parsing and anonymisation, the provider relay's allow/deny decisions, Docker argument construction, workspace path-escape and symlink attacks, SQLite migrations and restart recovery, the HTTP/WebSocket API, and the dashboard's pure state reducers.
 
 ## Repository layout
 
