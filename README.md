@@ -46,12 +46,12 @@ The engine does not know which runtime it is driving. Mock, local and Docker san
 
 ## Execution modes and isolation
 
-| Mode | Where agents run | Provider credentials | Network | Intended for |
-|---|---|---|---|---|
-| `mock` | In-process, no real agents | None needed | None | Development, tests, demos |
-| `local` | OpenCode sessions on the host | Host OpenCode config | Host network | Trusted tasks only. **No isolation.** |
-| `docker`, `shared` isolation | Resource-capped containers, possibly several agents per container | `auth.json` mounted read-only | Ordinary | Runs the relay cannot carry |
-| `docker`, `protected` isolation | One container per agent | **None inside the container** | Internal Docker network only | Untrusted agent code |
+| Mode | Where agents run | Provider credentials | Claude / ChatGPT subscription | Network | Intended for |
+|---|---|---|---|---|---|
+| `mock` | In-process, no real agents | None needed | Not used | None | Development, tests, demos |
+| `local` | OpenCode sessions on the host; Claude Code CLI processes for `claude-subscription/*` | Host OpenCode config | Claude: setup token or this machine's Claude login. ChatGPT: OpenCode's login | Host network | Trusted tasks only. **No isolation.** |
+| `docker`, `shared` isolation | Resource-capped containers, possibly several agents per container | `auth.json` mounted read-only | Claude: setup token, in the container's CLI environment. ChatGPT: in the mounted `auth.json` | Ordinary | Runs the relay cannot carry |
+| `docker`, `protected` isolation | One container per agent | **None inside the container** | Both relayed: the container holds only a per-run token (Claude needs a setup token and full model ids) | Internal Docker network only | Untrusted agent code |
 
 In **protected** mode, each worker container is started with `--cap-drop ALL`, `no-new-privileges`, a read-only root filesystem, a fixed unprivileged user, memory/CPU/PID/file-size limits with swap disabled, and a writable `/work` plus bounded tmpfs. It joins only a per-agent `--internal` Docker network. Its only way out is a small gateway container that forwards two fixed routes. Model calls go through a host-side relay that swaps a per-run token for the real key. The relay accepts only model-call endpoints for models in the run's roster, within a per-agent request limit, and stops serving a run as soon as the run is stopped. Code: [`src/runtime/docker/cli.ts`](src/runtime/docker/cli.ts), [`gateway.ts`](src/runtime/docker/gateway.ts), [`provider-relay.ts`](src/runtime/provider-relay.ts).
 
@@ -80,7 +80,7 @@ npm start
 
 This builds the UI, starts the API and WebSocket server on `http://127.0.0.1:4300`, and opens the browser. Choose **Create run**, leave the sandbox on `mock`, and start rounds. Mock runs need no further setup.
 
-Real-agent and Docker modes need OpenCode and provider credentials. See the [operator guide](docs/operator-guide.md).
+Real-agent and Docker modes need OpenCode and provider credentials. Agents, the judge and the reflector can also run on a Claude Pro/Max subscription (through the Claude Code CLI) or a ChatGPT Plus/Pro subscription (through OpenCode's own login); sign in under **Subscriptions** in the setup form. See the [operator guide](docs/operator-guide.md).
 
 ## Run in Docker
 
@@ -153,10 +153,11 @@ Most multi-agent demos stop at orchestration: start several agents, collect the 
 This is an active personal research and engineering project, not a hosted product.
 
 - **Single host, local-first.** The dashboard binds to `127.0.0.1` and has no authentication. It is not meant to be exposed on a network.
+- **Subscription calls cost $0.** Claude and ChatGPT subscription calls report no cost; their tokens count against token budgets, and the subscription's own usage limits apply (an exhausted limit fails the attempt with a distinct reason rather than retrying).
 - **Cost accounting covers worker agents.** Judge, reflection and recombination calls are not yet counted in the per-run budget, because the provider interface returns text rather than a usage envelope.
 - **`local` mode has no isolation**, and `shared` Docker mode trades isolation for compatibility (see the table above).
 - **Mock scores are synthetic.** They come from a keyword-based mock judge and exist to exercise the pipeline. No real-model benchmark results are published here.
-- **Real-mode behaviour depends on OpenCode and the provider.** The agent image pins OpenCode `1.18.21`. Real runs cost money and are not exercised in CI.
+- **Real-mode behaviour depends on OpenCode and the provider.** The agent image pins OpenCode `1.18.21` and Claude Code `2.1.325`. Real runs cost money and are not exercised in CI.
 - Developed mainly on Windows. CI runs on Ubuntu. macOS has not been tested.
 
 ## Documentation

@@ -51,7 +51,7 @@ Docker mode runs agents in resource-capped containers built from the research to
 - **Read-only system.** Agents run as an unprivileged user; only their workspace `/work` is writable. The reference folder is at `/context` and the tool inventory at `/run/arena/TOOLS.md`, both read-only.
 - **One agent per container.** A run with more agents than **Containers** is refused before anything starts, with the numbers to change.
 
-Every roster provider needs an API key in the credentials file; a provider signed in with OAuth cannot be relayed and the run is refused. OpenCode Zen free models work without a key.
+Every roster provider needs an API key in the credentials file; a provider signed in with OAuth cannot be relayed and the run is refused. Two subscription logins are the exception: OpenCode's ChatGPT Plus/Pro login for `openai`, and a Claude setup token for `claude-subscription` models (see [Subscriptions](#subscriptions-claude-promax-and-chatgpt-pluspro) below). OpenCode Zen free models work without a key.
 
 **Shared** is the earlier behaviour: several agents may share a container, the credentials file is mounted read-only, and containers have ordinary network access. Choose it when a run needs something the relay cannot carry.
 
@@ -74,6 +74,34 @@ A seed folder (`seedDir`, API only) is copied into every agent's workspace befor
 ### Markdown report
 
 **Export → Markdown report** (or `GET /api/runs/:runId/export?format=md`, or `--report <path>` on the CLI) writes one file with the goal, a leaderboard row per round, the winner of the last scored round, the lineage of its strategy back to a seed, the strategy itself, the judge's rationale and the winning submission. It is meant to be read without the dashboard, by a person or by another agent.
+
+## Subscriptions: Claude Pro/Max and ChatGPT Plus/Pro
+
+Agents, the judge and the reflector can run on your subscriptions instead of API keys. Pick them like any other model; the setup form labels them **subscription**.
+
+| | Claude Pro/Max | ChatGPT Plus/Pro |
+|---|---|---|
+| Model ids | `claude-subscription/<model>`, e.g. `claude-subscription/claude-opus-5-5`; aliases `opus`, `sonnet`, `haiku`, `fable` | OpenCode's own `openai/<model>`, e.g. `openai/gpt-5.5` |
+| Harness | The Claude Code CLI (`claude -p`), the only client Anthropic allows to use a subscription | OpenCode, like every other model |
+| Sign in | `claude setup-token`, then paste the token under **Subscriptions** in the setup form. Without a token, local runs use this machine's own `claude auth login` | `opencode auth login` → OpenAI → ChatGPT Plus/Pro |
+| Where it is kept | `runs/secrets/claude-subscription.json`, mode 0600. Never in the database, exports, logs, events or a command line | OpenCode's `auth.json`, as always |
+| local | Token or host login | Works as in OpenCode |
+| docker, shared | Setup token only (it is in the CLI's environment inside the container, as `auth.json` is in that mode) | `auth.json` is mounted read-only: if the access token expires mid-round, OpenCode inside cannot save the refresh and its calls fail (the run warns) |
+| docker, protected | Setup token only, full model ids only. The container holds a per-run relay token; the relay swaps it for your token on `/v1/messages` only | The relay refreshes the login on the host and forwards to the ChatGPT Codex backend; no credential enters the container |
+
+How a Claude agent runs: one `claude -p` per attempt in the agent's workspace (locally) or through `docker exec` in its shard, with streamed input so the steering message (and later messages) reach it at its next step. Its strategy is appended to Claude Code's system prompt. It may use Bash, Read, Edit, Write, Glob, Grep, TodoWrite and NotebookEdit; it has no web access, no subagents and no MCP servers; edits are confined to its workspace, the context folder and tool inventory are readable but not editable, and `.env` files (including `.env.example`) are unreadable. Locally, Bash can still reach anything your user can, exactly as for OpenCode agents. Temperature does not apply (the CLI has no such setting). The CLI runs with your settings files, CLAUDE.md, hooks, plugins and auto-memory turned off (`--safe-mode`, `--setting-sources=`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`), and every inherited `ANTHROPIC_*`/`CLAUDE*` variable is removed first, so an API key in your shell can never silently switch it to API billing. In host mode it still records the agent workspaces as projects in your `~/.claude.json`.
+
+Judging and reflecting on a Claude model run the CLI on this machine with JSON output; a schema-constrained call uses `--json-schema`. Judge calls may read the context folder; the Claude judge cannot search the web (the OpenCode grader can).
+
+**Usage limits.** Subscription calls cost $0 and report $0; their tokens still count against the token budgets. A USD cap still needs a price line for every roster model, so add `claude-subscription/<model> 0 0 0 0` for subscription models if you set one. When Claude reports the subscription's limit, the agent fails with `SUBSCRIPTION_LIMIT` ("This is the subscription's limit, not the agent's failure", with the reset time) and later Claude attempts fail at once until the reset instead of starting the CLI again; the setup form shows the last reading. A ChatGPT 429 closes the relay's ChatGPT upstream until the reset (`Retry-After`, else a minute). Selection still treats such an attempt as a failed attempt.
+
+**Errors you may see.** `CLAUDE_AUTH_EXPIRED`: paste a fresh `claude setup-token` value, or `claude auth login`. `CLAUDE_CLI_MISSING`: install Claude Code or set `CLAUDE_CLI_PATH`. A relayed ChatGPT call refused with "ChatGPT sign-in expired": run `opencode auth login` → OpenAI → ChatGPT Plus/Pro again. "the credentials file is read-only here": the relay will not refresh a login it cannot save back, because refreshing rotates the refresh token and would strand your host OpenCode; run any OpenCode command on the host to refresh it (this is the case in the Docker-hosted dashboard, which mounts `auth.json` read-only).
+
+**ChatGPT token refresh in protected runs.** Every relayed request re-reads `auth.json`, so a token your host OpenCode refreshed is used as is. The relay refreshes only within two minutes of expiry, under a lock file beside `auth.json`, after re-reading it, and writes the rotated pair back atomically before using it. OpenCode itself does not take that lock, so a refresh by both at the same instant can still race; if OpenAI refuses the relay's refresh, the relay re-reads the file first in case OpenCode won.
+
+**Terms.** Anthropic permits subscription sign-in only inside Claude Code; this app never calls the API with your token itself. In protected mode the relay forwards Claude Code's own requests with your token, which goes beyond running the CLI directly. Use subscriptions for your own work, within each provider's terms.
+
+**Not covered here.** The Docker-hosted dashboard image does not include the Claude Code CLI, so from it Claude models work only as Docker agents with a setup token, not as local agents, judge or reflector.
 
 ## CLI flags
 
