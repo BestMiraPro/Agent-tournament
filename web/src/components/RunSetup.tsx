@@ -1,9 +1,11 @@
 import { useEffect, useId, useState } from 'react'
 import { DEFAULT_CONFIG } from '../../../src/core/types.js'
-import { getCapacity, listModels } from '../api.js'
+import { getCapacity, getSubscriptions, listModels, type SubscriptionStatus } from '../api.js'
 import { setupEstimate, type CapacityInfo, type PlacementPlan } from '../lib/placement.js'
 import type { RosterEntry } from '../lib/roster.js'
-import { RosterBuilder } from './RosterBuilder.js'
+import { pickerModels } from '../lib/subscriptions.js'
+import { RosterBuilder, SubscriptionBadge } from './RosterBuilder.js'
+import { SubscriptionsPanel } from './SubscriptionsPanel.js'
 
 export interface RunSetupValue {
   name: string
@@ -96,6 +98,17 @@ export function RunSetup({ busy, error, onCreate }: {
     )
     return () => { alive = false }
   }, [])
+  // Subscription sign-in state; a failed read leaves it null and the pickers unlabelled.
+  const [subscriptions, setSubscriptions] = useState<SubscriptionStatus | null>(null)
+  useEffect(() => {
+    let alive = true
+    getSubscriptions().then(
+      (s) => { if (alive) setSubscriptions(s) },
+      () => { if (alive) setSubscriptions(null) },
+    )
+    return () => { alive = false }
+  }, [])
+  const picker = pickerModels(models ?? [], subscriptions)
   // Shared picker list for the judge/reflect comboboxes (the roster builder
   // owns its own list id internally).
   const modelListId = useId()
@@ -127,13 +140,14 @@ export function RunSetup({ busy, error, onCreate }: {
         <fieldset>
           <legend>Roster</legend>
           <p className="help">Which models compete, and how many agents each gets.</p>
-          <RosterBuilder value={roster} onChange={setRoster} models={models ?? []} disabled={busy} />
+          <RosterBuilder value={roster} onChange={setRoster} models={picker.models} labels={picker.labels} disabled={busy} />
         </fieldset>
       </section>
       <section aria-labelledby="setup-h-models">
         <h2 id="setup-h-models">Models</h2>
         <label htmlFor="setup-judge-model">Judge model</label>
         <input id="setup-judge-model" type="text" list={modelListId} value={judgeModel} onChange={(e) => setJudgeModel(e.target.value)} disabled={busy} />
+        {picker.labels[judgeModel] && <SubscriptionBadge />}
         <p className="help">The judge scores every submission — a stronger model judges more consistently.</p>
         <label htmlFor="setup-judge-mode">Judge mode</label>
         <select
@@ -149,10 +163,16 @@ export function RunSetup({ busy, error, onCreate }: {
         <p className="help">How the judge reads submissions — auto picks for you.</p>
         <label htmlFor="setup-reflect-model">Reflect model</label>
         <input id="setup-reflect-model" type="text" list={modelListId} value={reflectModel} onChange={(e) => setReflectModel(e.target.value)} disabled={busy} />
+        {picker.labels[reflectModel] && <SubscriptionBadge />}
         <p className="help">Reflection rewrites each survivor's strategy — the mutation operator.</p>
         <datalist id={modelListId}>
-          {(models ?? []).map((m) => <option key={m} value={m} />)}
+          {picker.models.map((m) => <option key={m} value={m} label={picker.labels[m] ? `${m} (subscription)` : undefined} />)}
         </datalist>
+      </section>
+      <section aria-labelledby="setup-h-subscriptions">
+        <h2 id="setup-h-subscriptions">Subscriptions</h2>
+        <p className="help">Run agents, the judge and the reflector on your Claude Pro/Max or ChatGPT Plus/Pro subscription instead of API keys. Subscription calls count tokens against the budget and cost $0; the subscription's own usage limits still apply.</p>
+        <SubscriptionsPanel status={subscriptions} onChange={setSubscriptions} disabled={busy} />
       </section>
       <section aria-labelledby="setup-h-sandbox">
         <h2 id="setup-h-sandbox">Sandbox</h2>

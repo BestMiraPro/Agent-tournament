@@ -196,6 +196,31 @@ export interface FullRunSpec {
 /** Docker capacity and this app's reservations; rejects when the server cannot read Docker. */
 export const getCapacity = (): Promise<CapacityInfo> => fetch('/api/capacity').then(json)
 
+/** Sign-in state of the two subscriptions, as GET /api/subscriptions reports it: never a token. */
+export interface SubscriptionStatus {
+  claude: {
+    cli: { found: boolean; version: string | null }
+    tokenSet: boolean
+    hostLogin: boolean
+    mode: 'token' | 'host' | null
+    usage: { status: string; rateLimitType: string | null; resetsAt: number | null; utilization: number | null } | null
+    models: string[]
+  }
+  chatgpt: { credentialsFile: string | null; signedIn: boolean; expired: boolean; expiresAt: number | null; modelPrefix: string }
+}
+
+export const getSubscriptions = (): Promise<SubscriptionStatus> => fetch('/api/subscriptions').then(json)
+
+export const setClaudeToken = (token: string): Promise<SubscriptionStatus> =>
+  fetch('/api/subscriptions/claude', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token }),
+  }).then(json)
+
+export const clearClaudeToken = (): Promise<SubscriptionStatus> =>
+  fetch('/api/subscriptions/claude', { method: 'DELETE' }).then(json)
+
 export const createRunFull = (spec: FullRunSpec): Promise<{ runId: string; warnings?: string[] }> =>
   fetch('/api/runs', {
     method: 'POST',
