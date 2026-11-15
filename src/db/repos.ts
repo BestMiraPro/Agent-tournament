@@ -53,7 +53,9 @@ function encodeConfig(config: unknown): string {
 }
 
 function decodeConfig(json: string): RunConfig {
-  return JSON.parse(json, (_k, v) => (v === INFINITY_SENTINEL ? Infinity : v)) as RunConfig
+  const config = JSON.parse(json, (_k, v) => (v === INFINITY_SENTINEL ? Infinity : v)) as RunConfig
+  // Runs stored before workflows existed were all tournaments; the app default is not what they ran as.
+  return config.workflow === undefined ? { ...config, workflow: 'tournament' } : config
 }
 
 export function makeRepos(db: Db) {

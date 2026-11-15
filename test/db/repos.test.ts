@@ -238,4 +238,14 @@ describe('config round-trip', () => {
     const run = repos.runs.create({ name: 'fin', config: cfg, seedDir: null })
     expect(repos.runs.get(run.id)!.config.budget.maxRunTokens).toBe(1234)
   })
+
+  test('a stored config from before workflows existed decodes as tournament, which is what it ran as', () => {
+    const { db, repos } = setup()
+    const { workflow: _dropped, ...legacy } = { ...DEFAULT_CONFIG, workflow: 'collaboration' as const }
+    db.prepare('INSERT INTO runs (id, name, created_at, status, config_json, seed_dir) VALUES (?,?,?,?,?,?)')
+      .run('legacy', 'legacy', Date.now(), 'active', JSON.stringify(legacy), null)
+    expect(repos.runs.get('legacy')!.config.workflow).toBe('tournament')
+    const fresh = repos.runs.create({ name: 'c', config: { ...DEFAULT_CONFIG, workflow: 'collaboration' }, seedDir: null })
+    expect(repos.runs.get(fresh.id)!.config.workflow).toBe('collaboration')
+  })
 })

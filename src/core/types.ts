@@ -72,6 +72,14 @@ export interface RosterEntry {
 }
 
 export interface RunConfig {
+  /**
+   * `collaboration`: the agents of a round work as one team in one shared workspace, talk
+   * through CHANNEL.md and are judged on the output folder they build together; nobody is
+   * cloned or culled. `tournament`: agents compete individually and the population evolves.
+   * Fixed for the life of a run. Stored configs from before the choice existed decode as
+   * tournament, which is what they ran as.
+   */
+  workflow: 'collaboration' | 'tournament'
   populationSize: number
   concurrency: number
   /**
@@ -139,7 +147,20 @@ export interface RunConfig {
   pricing: Record<string, ModelPrice>
 }
 
+/**
+ * Default size of a collaboration team, from the same measurements as the container sizing
+ * below. A team shares ONE container, charged one agent's ceiling (`containerMemory`, 1g) per
+ * member plus one 64m gateway. The reference host has ~5.2 GiB of free Docker memory and the
+ * capacity preflight commits at most 80% of it, ~4.16 GiB: four members (4 GiB + 64 MiB) fit,
+ * five (5 GiB + 64 MiB) are refused. The charge is conservative: the measured per-container
+ * peaks (~413 MiB on short work, ~725-762 MiB over 100-turn conversations) each include their
+ * own ~250 MiB OpenCode server, and a team container runs one server for everybody. The
+ * tournament's population default (20) cannot fit in one container on that host at all.
+ */
+export const DEFAULT_TEAM_SIZE = 4
+
 export const DEFAULT_CONFIG: RunConfig = {
+  workflow: 'tournament',
   populationSize: 20,
   concurrency: 8,
   agentTimeoutMs: Infinity,

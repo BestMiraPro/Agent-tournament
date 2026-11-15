@@ -1,7 +1,7 @@
 import { writeFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
-import { DEFAULT_CONFIG, type RosterEntry, type RunConfig } from './core/types.js'
+import { DEFAULT_CONFIG, DEFAULT_TEAM_SIZE, type RosterEntry, type RunConfig } from './core/types.js'
 import { openDb } from './db/open.js'
 import { makeRepos } from './db/repos.js'
 import { recoverIncompleteRounds } from './db/recover.js'
@@ -43,6 +43,8 @@ export interface CliOptions {
   /** Write the run's markdown report here once the last round ends. */
   reportPath?: string
   mode?: 'mock' | 'real'
+  /** Collaboration (one team, one shared workspace) or tournament (evolving population). App default when absent. */
+  workflow?: RunConfig['workflow']
   /**
    * Which sandbox real mode runs agents in. `'local'` (the default) runs them as host
    * processes against one shared opencode server; `'docker'` runs them inside
@@ -229,6 +231,23 @@ export function resolveSandboxMode(
     throw new Error(`unknown sandbox "${requested}" — expected "local" or "docker"`)
   }
   return requested
+}
+
+/**
+ * Validates `--workflow`. Like `--sandbox`, it arrives as an unvalidated string, and a typo
+ * must fail rather than quietly run the other workflow.
+ */
+export function resolveWorkflow(value: string | undefined): RunConfig['workflow'] {
+  const requested = value ?? DEFAULT_CONFIG.workflow
+  if (requested !== 'collaboration' && requested !== 'tournament') {
+    throw new Error(`unknown workflow "${requested}" — expected "collaboration" or "tournament"`)
+  }
+  return requested
+}
+
+/** `--population` when it is not given: a team that fits one container, or the tournament default. */
+export function defaultPopulation(workflow: RunConfig['workflow']): number {
+  return workflow === 'collaboration' ? DEFAULT_TEAM_SIZE : DEFAULT_CONFIG.populationSize
 }
 
 /**
@@ -454,6 +473,7 @@ async function buildRealDeps(
       name: 'cli',
       goal: opts.goal,
       sandbox: resolveSandboxMode('real', opts.sandbox),
+      workflow: config.workflow,
       roster: config.roster,
       population: config.populationSize,
       judge: { modelId: config.judge.modelId, mode: config.judge.mode },
@@ -538,6 +558,7 @@ export async function runTournamentCli(
         opts.workerModels && opts.workerModels.length > 0 ? opts.workerModels : [DEFAULT_REAL_WORKER_MODEL]
       config = {
         ...DEFAULT_CONFIG,
+        workflow: resolveWorkflow(opts.workflow),
         populationSize: opts.population,
         sandbox: resolveSandboxMode('real', opts.sandbox),
         roster: buildRoster(workerModels, opts.population, 0.7),
@@ -565,6 +586,7 @@ export async function runTournamentCli(
     } else {
       config = {
         ...DEFAULT_CONFIG,
+        workflow: resolveWorkflow(opts.workflow),
         populationSize: opts.population,
         sandbox: 'mock',
         roster: [{ modelId: 'mock/model', count: opts.population, temperature: 0.7 }],
@@ -698,7 +720,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     options: {
       goal: { type: 'string', default: 'Produce the best possible answer.' },
       rounds: { type: 'string', default: '5' },
-      population: { type: 'string', default: '20' },
+      // No default here: it depends on the workflow (defaultPopulation).
+      population: { type: 'string' },
+      workflow: { type: 'string' },
       seed: { type: 'string', default: '42' },
       db: { type: 'string', default: ':memory:' },
       mode: { type: 'string', default: 'mock' },
@@ -715,10 +739,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     },
   })
 
+  const workflow = resolveWorkflow(values.workflow)
   const out = await runTournamentCli({
     goal: values.goal!,
     rounds: Number(values.rounds),
-    population: Number(values.population),
+    population: values.population === undefined ? defaultPopulation(workflow) : Number(values.population),
+    workflow,
     seed: Number(values.seed),
     dbPath: values.db!,
     criteria: null,

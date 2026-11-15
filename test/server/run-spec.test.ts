@@ -235,3 +235,34 @@ describe('parseRunSpec container sizing', () => {
     expect(() => parseRunSpec({ ...base, containerCpus })).toThrow(/containerCpus/)
   })
 })
+
+describe('workflow', () => {
+  const docker = { ...base, sandbox: 'docker', workspaceRoot: process.platform === 'win32' ? 'C:\\ws' : '/ws', authFile: '/auth.json' }
+
+  test('defaults to the app default and lands in the run config', () => {
+    expect(parseRunSpec(base).workflow).toBe(DEFAULT_CONFIG.workflow)
+    expect(runConfigFor(parseRunSpec({ ...base, workflow: 'tournament' })).workflow).toBe('tournament')
+    expect(runConfigFor(parseRunSpec({ ...base, workflow: 'collaboration' })).workflow).toBe('collaboration')
+  })
+
+  test('rejects an unknown workflow', () => {
+    expect(() => parseRunSpec({ ...base, workflow: 'mode' })).toThrow()
+  })
+
+  test('a collaboration team shares one protected container, so the one-per-agent rule does not apply', () => {
+    const spec = parseRunSpec({ ...docker, workflow: 'collaboration', maxContainers: 1 })
+    expect(spec.isolation).toBe('protected')
+    expect(() => parseRunSpec({ ...docker, workflow: 'tournament', maxContainers: 1 })).toThrow(/one container per agent/)
+  })
+
+  test('collaboration refuses shared isolation: the team container is always protected', () => {
+    expect(() => parseRunSpec({ ...docker, workflow: 'collaboration', isolation: 'shared' }))
+      .toThrow(/Collaboration runs the team in one protected container/)
+  })
+
+  test('selection settings do not constrain a collaboration run', () => {
+    const selection = { eliteCount: 3, topPct: 0.2 }
+    expect(() => parseRunSpec({ ...base, workflow: 'tournament', selection })).toThrow(/eliteCount/)
+    expect(() => parseRunSpec({ ...base, workflow: 'collaboration', selection })).not.toThrow()
+  })
+})

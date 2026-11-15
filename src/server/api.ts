@@ -182,6 +182,7 @@ export function specForResume(run: RunRow, defaults?: SpecDefaults): RunSpec {
     name: run.name,
     goal: run.initialGoal ?? 'resumed',
     sandbox: cfg.sandbox,
+    workflow: cfg.workflow,
     roster: cfg.roster,
     population: cfg.populationSize,
     judge: { modelId: cfg.judge.modelId, mode: cfg.judge.mode },

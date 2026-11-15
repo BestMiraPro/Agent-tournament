@@ -1,13 +1,15 @@
 import { describe, expect, test } from 'vitest'
 import {
   assertHostCapacity,
+  defaultPopulation,
   makeClientResolver,
   resolveSandboxMode,
+  resolveWorkflow,
   runTournamentCli,
   sweepBeforeRun,
   type DockerStartupHooks,
 } from '../src/cli.js'
-import { DEFAULT_CONFIG, type RunConfig } from '../src/core/types.js'
+import { DEFAULT_CONFIG, DEFAULT_TEAM_SIZE, type RunConfig } from '../src/core/types.js'
 import type { HostCapacity } from '../src/runtime/docker/capacity.js'
 import type { SweepOptions } from '../src/runtime/docker/sweep.js'
 
@@ -243,6 +245,23 @@ describe('CLI orphan sweep', () => {
       },
     )
     expect(seen).toHaveLength(0)
+  })
+})
+
+describe('resolveWorkflow', () => {
+  test('defaults to the app default and accepts both workflows', () => {
+    expect(resolveWorkflow(undefined)).toBe(DEFAULT_CONFIG.workflow)
+    expect(resolveWorkflow('collaboration')).toBe('collaboration')
+    expect(resolveWorkflow('tournament')).toBe('tournament')
+  })
+
+  test('a typo fails loudly rather than running the other workflow', () => {
+    expect(() => resolveWorkflow('collab')).toThrow(/unknown workflow "collab"/)
+  })
+
+  test('the population default is a team that fits one container, or the tournament default', () => {
+    expect(defaultPopulation('collaboration')).toBe(DEFAULT_TEAM_SIZE)
+    expect(defaultPopulation('tournament')).toBe(DEFAULT_CONFIG.populationSize)
   })
 })
 

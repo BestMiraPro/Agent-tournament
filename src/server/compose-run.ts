@@ -301,6 +301,7 @@ export interface RunIdHolder {
 export function runConfigFor(spec: RunSpec): RunConfig {
   return {
     ...DEFAULT_CONFIG,
+    workflow: spec.workflow ?? DEFAULT_CONFIG.workflow,
     populationSize: spec.population,
     sandbox: spec.sandbox,
     roster: spec.roster,
