@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { SubmissionStatus } from '../core/types.js'
 import type { TeamContribution, TeamFileEntry } from '../db/repos.js'
 import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
+import { WorkspaceEscapeError } from '../runtime/workspace-path.js'
 import { OUTPUT_DIR, OUTPUT_README } from '../runtime/team-prompt.js'
 import type { AuditEvidence } from './audit.js'
 import { checkQuota, type Quota } from './capture.js'
@@ -31,6 +32,19 @@ export interface TeamCapture {
 }
 
 const sha = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex')
+
+/**
+ * A team file read for the snapshot. A path an agent turned into a link since it was listed is
+ * refused by the workspace and left out of the snapshot, rather than failing the whole round.
+ */
+async function readTeamFile(sandbox: Sandbox, handle: AgentHandle, path: string): Promise<string | null> {
+  try {
+    return await sandbox.readFile(handle, path)
+  } catch (e) {
+    if (e instanceof WorkspaceEscapeError) return null
+    throw e
+  }
+}
 
 /** What `readFile` decoded from bytes that were not text: a NUL, or replacement characters. */
 export function looksBinary(text: string): boolean {
@@ -72,7 +86,7 @@ export async function captureTeamOutput(
       files.push({ path: f.path, bytes: f.bytes, sha256: null, binary: false, stored: false })
       continue
     }
-    const text = await sandbox.readFile(handle, f.path)
+    const text = await readTeamFile(sandbox, handle, f.path)
     if (text === null) continue
     const binary = looksBinary(text)
     const store = !binary && text.length <= MAX_STORED_FILE_CHARS && storedChars + text.length <= MAX_STORED_ROUND_CHARS
@@ -83,7 +97,7 @@ export async function captureTeamOutput(
     files.push({ path: f.path, bytes: f.bytes, sha256: sha(text), binary, stored: store })
   }
 
-  const channel = await sandbox.readFile(handle, CHANNEL_FILE)
+  const channel = await readTeamFile(sandbox, handle, CHANNEL_FILE)
   const channelSha256 = channel === null ? null : sha(channel)
   const digest = `sha256:${sha(JSON.stringify({
     files: files.map((f) => [f.path, f.bytes, f.sha256]),
