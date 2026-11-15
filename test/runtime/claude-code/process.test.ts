@@ -1,13 +1,15 @@
 import { EventEmitter } from 'node:events'
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { describe, expect, test } from 'vitest'
 import {
   dockerExecArgs,
   dockerExecLauncher,
   KILL_GROUP_SCRIPT,
+  LEADER_SCRIPT,
+  writeSecretEnvFile,
   localLauncher,
   pidFileFor,
   PROBE_GROUP_SCRIPT,
@@ -25,13 +27,67 @@ const request = {
 }
 
 describe('docker exec launch', () => {
-  test('starts the CLI as a recorded session leader; secrets are named, never valued, in argv', () => {
-    const args = dockerExecArgs('arena-run-0', request)
+  test('starts the CLI as the recorded group leader; secrets go only in an env file, never argv', () => {
+    const args = dockerExecArgs('arena-run-0', request, '/tmp/arena-claude-env-x/env')
     expect(args.slice(0, 4)).toEqual(['exec', '-i', '-w', '/work/a1'])
-    expect(args).toEqual(expect.arrayContaining(['-e', 'DISABLE_AUTOUPDATER=1', '-e', 'CLAUDE_CODE_OAUTH_TOKEN']))
-    expect(args.join(' ')).not.toContain('secret-token-value')
+    expect(args).toEqual(expect.arrayContaining(['-e', 'DISABLE_AUTOUPDATER=1', '--env-file', '/tmp/arena-claude-env-x/env']))
+    expect(args.join(' ')).not.toMatch(/secret-token-value|CLAUDE_CODE_OAUTH_TOKEN/)
     const at = args.indexOf('arena-run-0')
-    expect(args.slice(at + 1, at + 8)).toEqual(['setsid', '-w', 'sh', '-c', 'echo $$ > "$0" && exec claude "$@"', '/tmp/arena-claude-a1-11111111.pid', '-p'])
+    expect(args.slice(at + 1, at + 6)).toEqual(['sh', '-c', LEADER_SCRIPT, '/tmp/arena-claude-a1-11111111.pid', '-p'])
+    expect(LEADER_SCRIPT).toContain('exec claude "$@"')
+    expect(dockerExecArgs('c', { ...request, secrets: {} }, null)).not.toContain('--env-file')
+  })
+
+  test('the env file is 0600 in a private folder, holds only the secrets, and is gone once the CLI speaks', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'arena-envfile-test-'))
+    const spawned: { args: string[]; env: Record<string, string>; child: EventEmitter & { stdout: PassThrough } }[] = []
+    const launcher = dockerExecLauncher({
+      containerFor: () => 'arena-run-0', envFileDir: dir,
+      baseEnv: { PATH: '/bin', CLAUDE_CODE_OAUTH_TOKEN: 'inherited' },
+      spawnFn: ((_cmd: string, args: string[], opts: { env: Record<string, string> }) => {
+        const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 1 })
+        spawned.push({ args, env: opts.env, child })
+        return child
+      }) as never,
+      run: async () => ({ code: 0, stdout: '', stderr: '' }),
+    })
+    launcher.launch(handle, request)
+    const { args, env, child } = spawned[0]!
+    const file = args[args.indexOf('--env-file') + 1]!
+    expect(readFileSync(file, 'utf8')).toBe('CLAUDE_CODE_OAUTH_TOKEN=secret-token-value-1234567890\n')
+    if (process.platform !== 'win32') {
+      expect(statSync(file).mode & 0o777).toBe(0o600)
+      expect(statSync(dirname(file)).mode & 0o777).toBe(0o700)
+    }
+    // Neither the docker client's command line nor its environment holds the token.
+    expect(env).toEqual({ PATH: '/bin' })
+    expect(JSON.stringify(args)).not.toContain('secret-token-value')
+    child.stdout.write('{"type":"system"}\n')
+    expect(existsSync(file)).toBe(false)
+    expect(existsSync(dirname(file))).toBe(false)
+  })
+
+  test('an exec that never speaks still removes its env file when it ends', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'arena-envfile-test-'))
+    let child!: EventEmitter
+    let args: string[] = []
+    const launcher = dockerExecLauncher({
+      containerFor: () => 'c', envFileDir: dir,
+      spawnFn: ((_c: string, a: string[]) => { args = a; child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 1 }); return child }) as never,
+      run: async () => ({ code: 0, stdout: '', stderr: '' }),
+    })
+    const proc = launcher.launch(handle, request)
+    const file = args[args.indexOf('--env-file') + 1]!
+    expect(existsSync(file)).toBe(true)
+    child.emit('exit', 1, null)
+    await proc.exited
+    await new Promise((r) => setImmediate(r))
+    expect(existsSync(file)).toBe(false)
+  })
+
+  test('refuses a secret an env file could not carry intact', () => {
+    expect(() => writeSecretEnvFile({ CLAUDE_CODE_OAUTH_TOKEN: 'has space' })).toThrow(/cannot be passed/)
+    expect(() => writeSecretEnvFile({ 'BAD NAME': 'x' })).toThrow(/cannot be passed/)
   })
 
   test('pid files only take safe keys', () => {
@@ -48,6 +104,7 @@ describe('docker exec launch', () => {
     const spawned: { env: Record<string, string> }[] = []
     const launcher = dockerExecLauncher({
       containerFor: () => 'arena-run-0',
+      envFileDir: mkdtempSync(join(tmpdir(), 'arena-envfile-test-')),
       run,
       baseEnv: { PATH: '/bin', ANTHROPIC_API_KEY: 'no' },
       spawnFn: ((_cmd: string, _args: string[], opts: { env: Record<string, string> }) => {
@@ -56,7 +113,7 @@ describe('docker exec launch', () => {
       }) as never,
     })
     const proc = launcher.launch(handle, request)
-    expect(spawned[0]!.env).toEqual({ PATH: '/bin', CLAUDE_CODE_OAUTH_TOKEN: 'secret-token-value-1234567890' })
+    expect(spawned[0]!.env).toEqual({ PATH: '/bin' })
     await proc.kill()
     expect(calls[0]).toEqual(['exec', 'arena-run-0', 'sh', '-c', KILL_GROUP_SCRIPT, '/tmp/arena-claude-a1-11111111.pid'])
     expect(await proc.probe()).toBe('running')

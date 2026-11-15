@@ -1,4 +1,7 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { docker, type DockerFn } from '../docker/cli.js'
 import type { AgentHandle } from '../sandbox.js'
@@ -142,22 +145,59 @@ export function pidFileFor(key: string): string {
 }
 
 /**
- * `docker exec` arguments that start the CLI as the leader of a new session in the container,
- * record that process group, and keep stdin open for streamed messages. Settings travel as
- * `-e NAME=value`; secrets as `-e NAME`, which docker reads from its own environment.
+ * Records the process group the CLI leads, then becomes the CLI. A `docker exec` process already
+ * leads its own session (pid = pgid = sid, seen in the agent image), so normally this is one process
+ * from start to end and nothing else in the container holds the CLI's environment. Only if it is
+ * not a group leader does it take `setsid -w`, whose waiting parent keeps the exec's exit meaning
+ * the CLI's exit.
  */
-export function dockerExecArgs(container: string, req: LaunchRequest): string[] {
+export const LEADER_SCRIPT = [
+  'if [ "$(cut -d" " -f5 /proc/$$/stat)" = "$$" ]; then echo $$ > "$0" && exec claude "$@"; fi',
+  'exec setsid -w sh -c \'echo $$ > "$0" && exec claude "$@"\' "$0" "$@"',
+].join('\n')
+
+/**
+ * `docker exec` arguments that start the CLI in the agent's workspace with stdin open for streamed
+ * messages. Settings travel as `-e NAME=value`; secrets only through `envFile`, a 0600 file the
+ * launcher removes once the CLI is running, so they never appear on a command line or in the docker
+ * client's own environment, and reach only the exec'd process, never the container's.
+ */
+export function dockerExecArgs(container: string, req: LaunchRequest, envFile: string | null): string[] {
   const pidFile = pidFileFor(req.key)
   return [
     'exec', '-i', '-w', req.cwd,
     ...Object.entries(req.settings).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
-    ...Object.keys(req.secrets).flatMap((k) => ['-e', k]),
+    ...(envFile ? ['--env-file', envFile] : []),
     container,
-    // setsid -w: a session (and group) leader whose id the script records, waited for so the
-    // exec's own exit still means the CLI's exit.
-    'setsid', '-w', 'sh', '-c', 'echo $$ > "$0" && exec claude "$@"', pidFile,
+    'sh', '-c', LEADER_SCRIPT, pidFile,
     ...req.args,
   ]
+}
+
+const SECRET_NAME = /^[A-Z_][A-Z0-9_]*$/
+const SECRET_VALUE = /^[\x21-\x7e]+$/
+
+/**
+ * Writes secrets for `docker exec --env-file`: a 0600 file in a private 0700 folder. Returns the
+ * file and a function that removes both.
+ */
+export function writeSecretEnvFile(secrets: Record<string, string>, dir: string = tmpdir()): { file: string; remove: () => void } {
+  for (const [k, v] of Object.entries(secrets)) {
+    if (!SECRET_NAME.test(k) || !SECRET_VALUE.test(v)) throw new Error(`secret ${k} cannot be passed in an env file`)
+  }
+  const folder = mkdtempSync(join(dir, 'arena-claude-env-'))
+  chmodSync(folder, 0o700)
+  const file = join(folder, 'env')
+  writeFileSync(file, Object.entries(secrets).map(([k, v]) => `${k}=${v}\n`).join(''), { mode: 0o600, flag: 'wx' })
+  let removed = false
+  return {
+    file,
+    remove: () => {
+      if (removed) return
+      removed = true
+      rmSync(folder, { recursive: true, force: true })
+    },
+  }
 }
 
 /** Kills the recorded process group (dash's `kill` takes `-<pgid>`, not `-- -<pgid>`). */
@@ -189,6 +229,8 @@ export function dockerExecLauncher(opts: {
   baseEnv?: NodeJS.ProcessEnv
   spawnFn?: typeof spawn
   run?: DockerFn
+  /** Where secret env files are written; the OS temp folder by default. */
+  envFileDir?: string
 }): ClaudeLauncher {
   const spawnFn = opts.spawnFn ?? spawn
   const run = opts.run ?? docker
@@ -197,13 +239,26 @@ export function dockerExecLauncher(opts: {
       const container = opts.containerFor(handle)
       if (!container) throw new Error(`no container is placed for agent ${handle.agentId}`)
       const pidFile = pidFileFor(req.key)
-      const child = spawnFn('docker', dockerExecArgs(container, req), {
-        env: { ...strippedEnv(opts.baseEnv ?? process.env), ...req.secrets },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
+      const secrets = Object.keys(req.secrets).length > 0 ? writeSecretEnvFile(req.secrets, opts.envFileDir) : null
+      let child: ChildProcess
+      try {
+        child = spawnFn('docker', dockerExecArgs(container, req, secrets?.file ?? null), {
+          env: strippedEnv(opts.baseEnv ?? process.env),
+          stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
+        })
+      } catch (e) {
+        secrets?.remove()
+        throw e
+      }
       child.stdin?.on('error', () => {})
       const exited = exitedOf(child)
+      // Docker reads the env file before the exec starts, so the CLI's first output proves it is no
+      // longer needed; an exec that never produces any removes it when it ends.
+      if (secrets) {
+        child.stdout?.once('data', () => secrets.remove())
+        void exited.then(() => secrets.remove())
+      }
       const inContainer = async (script: string, timeoutMs: number) => {
         try {
           return await run(['exec', container, 'sh', '-c', script, pidFile], timeoutMs)

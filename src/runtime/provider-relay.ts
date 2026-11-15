@@ -31,14 +31,12 @@ export interface RelayUpstream {
   authStyle: RelayAuthStyle
   apiKey: string
   /**
-   * The two subscription logins the relay carries, each for exactly one client and endpoint:
-   * - `claude-subscription`: a `claude setup-token` value, for Claude Code's own `/v1/messages`
-   *   requests (the worker's CLI holds the run token as its OAuth token).
-   * - `chatgpt`: OpenCode's ChatGPT Plus/Pro login for `openai`, refreshed per request through
-   *   `chatgpt` and sent to the Codex backend as OpenCode itself sends it.
-   * Absent: an API key in the provider's own header.
+   * `chatgpt`: OpenCode's ChatGPT Plus/Pro login for `openai`, refreshed per request through
+   * `chatgpt` and sent to the Codex backend as OpenCode itself sends it. Absent: an API key in the
+   * provider's own header. The relay never carries a Claude subscription token: Claude Code holds it
+   * in the worker and reaches Anthropic through the gateway's CONNECT route instead.
    */
-  kind?: 'claude-subscription' | 'chatgpt'
+  kind?: 'chatgpt'
   chatgpt?: ChatGptCredentialSource
 }
 
@@ -90,9 +88,6 @@ const FORWARDED_HEADERS = ['content-type', 'accept', 'anthropic-version', 'anthr
 const OPENCODE_CLIENT_HEADERS = ['user-agent', 'x-opencode-client', 'x-opencode-project', 'x-opencode-session', 'x-opencode-request'] as const
 const OPENCODE_PROVIDER_ID = 'opencode'
 const MAX_CLIENT_HEADER_LENGTH = 256
-
-/** What Claude Code 2.1.325 sends besides the forwarded headers; none carries a credential. */
-const CLAUDE_CODE_CLIENT_HEADERS = ['user-agent', 'x-app', 'x-claude-code-session-id', 'anthropic-dangerous-direct-browser-access'] as const
 
 /** What OpenCode sends to `openai` (its ChatGPT plugin adds them to every request); none carries a credential. */
 const CHATGPT_CLIENT_HEADERS = ['user-agent', 'originator', 'session-id', 'x-session-affinity', 'x-session-id'] as const
@@ -267,7 +262,6 @@ export class RelayPolicy {
       if (value !== undefined) headers[name] = value
     }
     if (upstream.providerId === OPENCODE_PROVIDER_ID) copyClientHeaders(req.headers, OPENCODE_CLIENT_HEADERS, headers)
-    if (upstream.kind === 'claude-subscription') copyClientHeaders(req.headers, CLAUDE_CODE_CLIENT_HEADERS, headers)
 
     if (upstream.kind === 'chatgpt') {
       const source = upstream.chatgpt
@@ -322,10 +316,6 @@ function parsePath(raw: string): { providerId: string; rest: string; query: stri
 }
 
 function routeFor(upstream: RelayUpstream, rest: string, query: string): { pathModel: string | null } | null {
-  // Claude Code calls `/v1/messages?beta=true` (and may count tokens); nothing else of the API.
-  if (upstream.kind === 'claude-subscription') {
-    return ['v1/messages', 'v1/messages/count_tokens'].includes(rest) && (query === '' || query === 'beta=true') ? { pathModel: null } : null
-  }
   // OpenCode's ChatGPT plugin sends only Responses calls to the Codex backend.
   if (upstream.kind === 'chatgpt') return rest === 'responses' && query === '' ? { pathModel: null } : null
   switch (upstream.authStyle) {

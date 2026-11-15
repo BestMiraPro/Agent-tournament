@@ -26,8 +26,10 @@ export interface ClaudeCodeRunnerOptions {
   credentials: (handle: AgentHandle) => Promise<ClaudeCredentials>
   /** `fd` for host processes; `env` for `docker exec`. */
   tokenTransport: 'fd' | 'env'
-  /** A private CLI config folder for the attempt (token and relay modes), or null for the host's. */
+  /** A private CLI config folder for the attempt (token mode on the host), or null for the default. */
   configDirFor?: (handle: AgentHandle, credentials: ClaudeCredentials) => Promise<string | null> | string | null
+  /** Protected workers: the gateway's CONNECT route to api.anthropic.com, the CLI's only way out. */
+  proxy?: { url: string; noProxy: string }
   /** Folders the agent may read but not change, as the CLI sees them. */
   readableDirs?: readonly string[]
   /** As `AgentRunnerOptions.contextPath` / `toolsPath`: named in the GOAL prompt. */
@@ -180,7 +182,10 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
 
       const sessionId = (this.options.newSessionId ?? randomUUID)()
       const args = competitorArgs({ model, strategy: ctx.genome.strategyMd, readableDirs: this.options.readableDirs ?? [], sessionId })
-      const { settings, secrets } = claudeEnvVars({ credentials, tokenTransport: this.options.tokenTransport, configDir, model })
+      const { settings, secrets } = claudeEnvVars({
+        credentials, tokenTransport: this.options.tokenTransport, configDir,
+        ...(this.options.proxy ? { proxy: this.options.proxy } : {}),
+      })
 
       // A stop requested while credentials were read closes admission: nothing is started.
       if (tracked.stopRequested) return refuse(failureFromText('Agent stopped before Claude Code started', 'AGENT_STOPPED'))

@@ -23,6 +23,8 @@ export interface ProtectedRuntimeSpec {
   relayPort: number
   /** The relay's address as the gateway reaches it; the host's loopback when unset. */
   relayHost?: string
+  /** The gateway also carries Claude Code's CONNECT egress to api.anthropic.com (runs with Claude subscription agents). */
+  claudeEgress?: boolean
 }
 
 export interface ShardContainerSpec {
@@ -306,6 +308,7 @@ async function startProtectedShard(
         image: spec.image,
         relayPort: runtime.relayPort,
         ...(runtime.relayHost ? { relayHost: runtime.relayHost } : {}),
+        ...(runtime.claudeEgress ? { claudeEgress: true } : {}),
       }),
       120_000,
     )

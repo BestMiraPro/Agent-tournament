@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
@@ -142,7 +142,7 @@ describe('composing runs with subscription models', () => {
     })
   })
 
-  test('protected Docker relays both subscriptions: the setup token and the refreshing ChatGPT login stay on the host', async () => {
+  test('protected Docker: the relay carries ChatGPT only; Claude agents get the CONNECT egress route, and the relay never sees the Claude token', async () => {
     await withRoot(async (root) => {
       const policy = new RelayPolicy()
       const grant = vi.spyOn(policy, 'grant')
@@ -151,32 +151,54 @@ describe('composing runs with subscription models', () => {
         name: 'p', goal: 'g', sandbox: 'docker', roster, workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 2,
       }), s as never, { runIdHolder: { value: 'run-p' } })
       const [, g] = grant.mock.calls[0]!
-      expect(g.allowedModels).toEqual(['claude-subscription/claude-opus-5-5', 'openai/gpt-5.5'])
-      expect(g.upstreams!.map((u) => [u.providerId, u.kind, u.baseUrl])).toEqual([
-        ['claude-subscription', 'claude-subscription', 'https://api.anthropic.com'],
-        ['openai', 'chatgpt', 'https://chatgpt.com/backend-api/codex/responses'],
-      ])
+      expect(g.allowedModels).toEqual(['openai/gpt-5.5'])
+      expect(g.upstreams!.map((u) => [u.providerId, u.kind, u.baseUrl])).toEqual([['openai', 'chatgpt', 'https://chatgpt.com/backend-api/codex/responses']])
+      expect(JSON.stringify(grant.mock.calls)).not.toMatch(/sk-ant|FAKE-SETUP-TOKEN/)
       await c.planFor!(['a1', 'a2'])
       await Promise.all([c.sandbox.provision('a1', {}), c.sandbox.provision('a2', {})])
-      const [shard] = s.startShardContainerFn.mock.calls[0] as unknown as [{ protectedRuntime: { configDir: string } }]
-      const opencodeJson = readFileSync(join(shard.protectedRuntime.configDir, 'opencode.json'), 'utf8')
-      // Claude Code is not an OpenCode provider; the worker's OpenCode only gets openai, at the relay.
+      const shards = s.startShardContainerFn.mock.calls.map((call) => (call as unknown as [{ protectedRuntime: { configDir: string; claudeEgress?: boolean } }])[0])
+      for (const shard of shards) expect(shard.protectedRuntime.claudeEgress).toBe(true)
+      // Nothing the host hands Docker, writes for workers, or keeps about the run holds the token.
+      expect(JSON.stringify(s.startShardContainerFn.mock.calls)).not.toMatch(/sk-ant|FAKE-SETUP-TOKEN/)
+      const opencodeJson = readFileSync(join(shards[0]!.protectedRuntime.configDir, 'opencode.json'), 'utf8')
       expect(Object.keys(JSON.parse(opencodeJson).provider)).toEqual(['openai'])
       expect(opencodeJson).not.toMatch(/FAKE-|sk-ant/)
-      const models = JSON.parse(readFileSync(join(shard.protectedRuntime.configDir, 'models.json'), 'utf8'))
+      const manifests = readdirSync(join(root, '.arena-runtime', 'run-p'), { recursive: true, withFileTypes: true })
+        .filter((d) => d.isFile()).map((d) => readFileSync(join(d.parentPath, d.name), 'utf8'))
+      expect(manifests.length).toBeGreaterThan(0)
+      for (const text of manifests) expect(text).not.toMatch(/sk-ant|FAKE-SETUP-TOKEN/)
+      expect(JSON.stringify(c.config)).not.toMatch(/sk-ant|FAKE-SETUP-TOKEN/)
+      expect(c.warnings.join('\n')).not.toMatch(/sk-ant|FAKE-SETUP-TOKEN/)
+      const models = JSON.parse(readFileSync(join(shards[0]!.protectedRuntime.configDir, 'models.json'), 'utf8'))
       expect(models.openai.models['gpt-5.5'].cost).toEqual({ input: 0, output: 0, cache_read: 0, cache_write: 0 })
       expect(models.wandb).toEqual(JSON.parse(catalogJson).wandb)
       await c.cleanup()
     })
   })
 
-  test('protected Docker refuses Claude aliases, which the relay could not match to the roster', async () => {
+  test('protected Docker accepts Claude aliases again: nothing on the host matches the model', async () => {
     await withRoot(async (root) => {
-      const spec = parseRunSpec({
+      const s = seams(subscriptions())
+      const c = await composeRun(parseRunSpec({
         name: 'p', goal: 'g', sandbox: 'docker', workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 1,
         roster: [{ modelId: 'claude-subscription/opus', count: 1, temperature: 0.7 }],
-      })
-      await expect(composeRun(spec, seams(subscriptions()) as never)).rejects.toThrow(/needs full Claude model ids, not aliases \(claude-subscription\/opus\)/)
+      }), s as never, { runIdHolder: { value: 'run-a' } })
+      await c.cleanup()
+    })
+  })
+
+  test('a protected run without Claude agents starts no egress route', async () => {
+    await withRoot(async (root) => {
+      const s = seams(subscriptions())
+      const c = await composeRun(parseRunSpec({
+        name: 'p', goal: 'g', sandbox: 'docker', workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 1,
+        roster: [{ modelId: 'openai/gpt-5.5', count: 1, temperature: 0.7 }],
+      }), s as never, { runIdHolder: { value: 'run-o' } })
+      await c.planFor!(['a1'])
+      await c.sandbox.provision('a1', {})
+      const [shard] = s.startShardContainerFn.mock.calls[0] as unknown as [{ protectedRuntime: { claudeEgress?: boolean } }]
+      expect(shard.protectedRuntime.claudeEgress).toBeUndefined()
+      await c.cleanup()
     })
   })
 

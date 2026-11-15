@@ -64,7 +64,7 @@ export class ClaudeCodeProvider implements Provider {
       model, systemPrompt: PROVIDER_SYSTEM_PROMPT, readableDirs: readable,
       ...(req.schema !== undefined ? { schema: req.schema } : {}),
     })
-    const { settings, secrets } = claudeEnvVars({ credentials, tokenTransport: 'fd', configDir, model })
+    const { settings, secrets } = claudeEnvVars({ credentials, tokenTransport: 'fd', configDir })
     const proc = this.opts.launcher.launch(
       { agentId: `${req.purpose}-call`, workspacePath: this.opts.directory, baseUrl: '' },
       {

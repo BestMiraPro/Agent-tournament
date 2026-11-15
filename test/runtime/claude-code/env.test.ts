@@ -59,16 +59,17 @@ describe('Claude CLI environment', () => {
     expect(JSON.stringify(settings)).not.toContain('tok-')
   })
 
-  test('relay mode points the CLI at the relay and pins auxiliary calls to the agent model', () => {
+  test('a protected worker holds the setup token itself and goes out only through the gateway proxy', () => {
     const { settings, secrets } = claudeEnvVars({
-      credentials: { mode: 'relay', baseUrl: 'http://gateway:8787/claude-subscription', token: 'run-token' },
-      tokenTransport: 'env', model: 'claude-opus-5-5',
+      credentials: { mode: 'token', token: 'sk-ant-oat01-protected-token-xyz' },
+      tokenTransport: 'env',
+      proxy: { url: 'http://gateway:8789', noProxy: 'gateway,localhost,127.0.0.1' },
     })
     expect(settings).toMatchObject({
-      ANTHROPIC_BASE_URL: 'http://gateway:8787/claude-subscription',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-opus-5-5',
-      ANTHROPIC_SMALL_FAST_MODEL: 'claude-opus-5-5',
+      HTTPS_PROXY: 'http://gateway:8789', NO_PROXY: 'gateway,localhost,127.0.0.1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     })
-    expect(secrets).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'run-token' })
+    expect(settings.ANTHROPIC_BASE_URL).toBeUndefined()
+    expect(JSON.stringify(settings)).not.toContain('sk-ant')
+    expect(secrets).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-protected-token-xyz' })
   })
 })

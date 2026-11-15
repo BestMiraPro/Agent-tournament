@@ -12,9 +12,6 @@ const PREFIX = `${CLAUDE_SUBSCRIPTION_PROVIDER}/`
  */
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,127}$/
 
-/** The CLI's own aliases; it resolves each to the newest model of that tier. */
-export const CLAUDE_MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'] as const
-
 /** Offered in the dashboard's pickers. Any id the CLI accepts still works typed in. */
 export const DEFAULT_CLAUDE_SUBSCRIPTION_MODELS = [
   'claude-subscription/claude-opus-5-5',
@@ -47,8 +44,4 @@ export function requireClaudeModel(modelId: string): string {
     )
   }
   return model
-}
-
-export function isClaudeAlias(model: string): boolean {
-  return (CLAUDE_MODEL_ALIASES as readonly string[]).includes(model)
 }

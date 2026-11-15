@@ -2,7 +2,6 @@ import { describe, expect, test } from 'vitest'
 import { COMPETITOR_TOOLS, competitorArgs, folderRule, providerArgs } from '../../../src/runtime/claude-code/argv.js'
 import {
   claudeModelOf,
-  isClaudeAlias,
   isClaudeSubscriptionModel,
   requireClaudeModel,
 } from '../../../src/runtime/claude-code/model-id.js'
@@ -14,8 +13,7 @@ describe('claude-subscription model ids', () => {
     expect(claudeModelOf('claude-subscription/claude-opus-5-5')).toBe('claude-opus-5-5')
     expect(claudeModelOf('claude-subscription/opus')).toBe('opus')
     expect(claudeModelOf('claude-subscription/claude-sonnet-5-5[1m]')).toBe('claude-sonnet-5-5[1m]')
-    expect(isClaudeAlias('fable')).toBe(true)
-    expect(isClaudeAlias('claude-opus-5-5')).toBe(false)
+    expect(claudeModelOf('claude-subscription/fable')).toBe('fable')
   })
 
   test('refuses anything that could be read as a flag or is not a model id', () => {

@@ -22,7 +22,6 @@ function source(over: Partial<ChatGptCredentialSource> = {}) {
 
 function subUpstreams(src: ChatGptCredentialSource): RelayUpstream[] {
   return [
-    { providerId: 'claude-subscription', baseUrl: 'https://api.anthropic.com', authStyle: 'bearer', apiKey: 'REAL-SETUP-TOKEN', kind: 'claude-subscription' },
     { providerId: 'openai', baseUrl: 'https://chatgpt.com/backend-api/codex/responses', authStyle: 'bearer', apiKey: '', kind: 'chatgpt', chatgpt: src },
   ]
 }
@@ -31,18 +30,16 @@ function subPolicy(src: ChatGptCredentialSource): RelayPolicy {
   const p = new RelayPolicy([], limits)
   p.grant('run-s', {
     token: 'run-tok', maxRequests: 5,
-    allowedModels: ['claude-subscription/claude-opus-5-5', 'openai/gpt-5.5'],
+    allowedModels: ['openai/gpt-5.5'],
     upstreams: subUpstreams(src),
   })
   return p
 }
 
-/** What Claude Code 2.1.325 sent to a fake upstream through ANTHROPIC_BASE_URL with an OAuth token. */
+/** What Claude Code 2.1.325 sends with an OAuth token, were it ever pointed at the relay. */
 const claudeHeaders = {
   authorization: 'Bearer run-tok', 'content-type': 'application/json', 'anthropic-version': '2023-06-01',
   'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20', 'user-agent': 'claude-cli/2.1.325 (external, sdk-cli)',
-  'x-app': 'cli', 'x-claude-code-session-id': 'e0b82d40-0c53-4d96-be6f-27456f496021', 'anthropic-dangerous-direct-browser-access': 'true',
-  'x-stainless-os': 'MacOS', cookie: 'c=1',
 }
 
 /** What opencode 1.18.21 sent to `openai` in key mode (a protected worker), captured from the agent image. */
@@ -78,35 +75,19 @@ describe('relay credentials for subscription logins', () => {
     expect(relayUpstreamsFromAuth(auth, cat, ['openai']).unsupported[0]!.reason).toMatch(/OAuth login, which the relay cannot carry/)
   })
 
-  test('carries claude-subscription only with a setup token, never the host login', () => {
-    expect(relayUpstreamsFromAuth('{}', cat, ['claude-subscription'], { claudeToken: 'FAKE-CLAUDE-TOKEN' }).upstreams).toEqual([
-      { providerId: 'claude-subscription', baseUrl: 'https://api.anthropic.com', authStyle: 'bearer', apiKey: 'FAKE-CLAUDE-TOKEN', kind: 'claude-subscription' },
-    ])
-    expect(relayUpstreamsFromAuth('{}', cat, ['claude-subscription']).unsupported[0]!.reason).toMatch(/needs a `claude setup-token` value/)
+  test('never carries a Claude subscription: it has no catalogue entry and no credential to relay', () => {
+    const { upstreams, unsupported } = relayUpstreamsFromAuth('{}', cat, ['claude-subscription'])
+    expect(upstreams).toEqual([])
+    expect(unsupported).toEqual([{ providerId: 'claude-subscription', reason: 'claude-subscription is not in the model catalogue' }])
   })
 })
 
 describe('relay policy for subscription upstreams', () => {
-  test("forwards Claude Code's own message calls with the setup token swapped in", () => {
-    const d = subPolicy(source().src).authorize({
-      method: 'POST', path: '/claude-subscription/v1/messages?beta=true', headers: claudeHeaders, body: json({ model: 'claude-opus-5-5', messages: [] }),
-    })
-    if (!d.ok) throw new Error(d.error)
-    expect(d).toMatchObject({ modelId: 'claude-subscription/claude-opus-5-5', url: 'https://api.anthropic.com/v1/messages?beta=true' })
-    expect(d.headers).toEqual({
-      authorization: 'Bearer REAL-SETUP-TOKEN', 'content-type': 'application/json', 'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20', 'user-agent': 'claude-cli/2.1.325 (external, sdk-cli)',
-      'x-app': 'cli', 'x-claude-code-session-id': 'e0b82d40-0c53-4d96-be6f-27456f496021', 'anthropic-dangerous-direct-browser-access': 'true',
-    })
-  })
-
-  test('the Claude upstream is only /v1/messages: other paths, queries and models outside the roster are refused', () => {
+  test('has no route for Claude Code: a Claude request to the relay is refused and nothing is forwarded', () => {
     const p = subPolicy(source().src)
-    const call = (path: string, model = 'claude-opus-5-5') => p.authorize({ method: 'POST', path, headers: claudeHeaders, body: json({ model }) })
-    expect(call('/claude-subscription/v1/messages/count_tokens?beta=true')).toMatchObject({ ok: true })
-    expect(call('/claude-subscription/api/oauth/profile')).toMatchObject({ ok: false, status: 404 })
-    expect(call('/claude-subscription/v1/messages?beta=true&x=1')).toMatchObject({ ok: false, status: 404 })
-    expect(call('/claude-subscription/v1/messages', 'claude-haiku-5-5')).toMatchObject({ ok: false, status: 403 })
+    for (const path of ['/claude-subscription/v1/messages?beta=true', '/claude-subscription/v1/messages', '/anthropic/messages']) {
+      expect(p.authorize({ method: 'POST', path, headers: claudeHeaders, body: json({ model: 'claude-opus-5-5', messages: [] }) })).toMatchObject({ ok: false, status: 404 })
+    }
   })
 
   test('ChatGPT calls go to the Codex backend with a fresh token, account and residency, and the system prompt as instructions', async () => {

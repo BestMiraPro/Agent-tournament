@@ -1,15 +1,15 @@
 /**
  * How the Claude Code CLI is authenticated for one call.
  *
- * - `token`: a long-lived token from `claude setup-token`.
+ * - `token`: a long-lived token from `claude setup-token`, handed only to the unmodified CLI process.
  * - `host`: the machine's own Claude Code login (`claude auth login`); host processes only.
- * - `relay`: a protected worker. The CLI talks to the provider relay through the shard gateway and
- *   holds only the run's relay token, which the relay swaps for the real subscription token.
+ *
+ * Nothing in between holds, matches or injects the token: Anthropic's terms let a platform host
+ * Claude Code for a user's own subscription, but not collect or intermediate the credential.
  */
 export type ClaudeCredentials =
   | { mode: 'token'; token: string }
   | { mode: 'host' }
-  | { mode: 'relay'; baseUrl: string; token: string }
 
 /** The file descriptor a token is written to when it is not passed in the environment. */
 export const TOKEN_FD = 3
@@ -41,13 +41,16 @@ export interface ClaudeEnvOptions {
   credentials: ClaudeCredentials
   /**
    * `fd`: the token is written to descriptor 3 and never enters the environment (host processes).
-   * `env`: it is a secret variable, which `docker exec -e NAME` takes from the client's environment.
+   * `env`: it is a secret variable, which the Docker launcher passes through a 0600 env file it removes.
    */
   tokenTransport: 'fd' | 'env'
-  /** A private config directory: token and relay modes, so no host settings or history are used. */
+  /** A private config directory (token mode, on the host), so no host settings or history are used. */
   configDir?: string | null
-  /** The agent's model; in relay mode every auxiliary call is pinned to it, so none leaves the roster. */
-  model?: string
+  /**
+   * A protected worker's only way out: the gateway's CONNECT route, which tunnels to
+   * api.anthropic.com and nothing else. `noProxy` keeps the gateway's own routes direct.
+   */
+  proxy?: { url: string; noProxy: string }
 }
 
 /**
@@ -70,13 +73,10 @@ export function claudeEnvVars(opts: ClaudeEnvOptions): { settings: Record<string
   if (c.mode === 'token') {
     if (opts.tokenTransport === 'fd') settings.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR = String(TOKEN_FD)
     else secrets.CLAUDE_CODE_OAUTH_TOKEN = c.token
-  } else if (c.mode === 'relay') {
-    settings.ANTHROPIC_BASE_URL = c.baseUrl
-    if (opts.model) {
-      settings.ANTHROPIC_DEFAULT_HAIKU_MODEL = opts.model
-      settings.ANTHROPIC_SMALL_FAST_MODEL = opts.model
-    }
-    secrets.CLAUDE_CODE_OAUTH_TOKEN = c.token
+  }
+  if (opts.proxy) {
+    settings.HTTPS_PROXY = opts.proxy.url
+    settings.NO_PROXY = opts.proxy.noProxy
   }
   return { settings, secrets }
 }

@@ -1,5 +1,4 @@
 import { CODEX_RESPONSES_URL } from './chatgpt-oauth.js'
-import { CLAUDE_SUBSCRIPTION_PROVIDER } from './claude-code/model-id.js'
 import { upstreamFor, type ChatGptCredentialSource, type RelayUpstream } from './provider-relay.js'
 
 /**
@@ -19,9 +18,9 @@ export interface CatalogProvider {
  * file. Keys stay in this process: they are never written to a worker mount, config, manifest,
  * environment or command line.
  *
- * Two subscription logins are carried: `claude-subscription` with a `claude setup-token` value (for
- * Claude Code's own requests), and OpenCode's ChatGPT Plus/Pro login for `openai`, which the relay
- * refreshes itself through `subscriptions.chatgpt`. Any other provider the relay cannot carry is
+ * One OAuth login is carried: OpenCode's ChatGPT Plus/Pro login for `openai`, which the relay
+ * refreshes itself through `subscriptions.chatgpt`. A Claude subscription token is never handed to
+ * the relay (Claude Code holds it in the worker). Any other provider the relay cannot carry is
  * reported with a reason instead: another OAuth login (no refresh flow for it here), an SDK without
  * a known upstream, no key. Reasons are fixed text; no credential value or file content is ever
  * repeated in them.
@@ -30,7 +29,7 @@ export function relayUpstreamsFromAuth(
   authJson: string,
   catalog: Record<string, CatalogProvider>,
   providerIds: readonly string[],
-  subscriptions: { claudeToken?: string | null; chatgpt?: ChatGptCredentialSource | null } = {},
+  subscriptions: { chatgpt?: ChatGptCredentialSource | null } = {},
 ): { upstreams: RelayUpstream[]; unsupported: { providerId: string; reason: string }[] } {
   let auth: unknown
   try {
@@ -43,17 +42,6 @@ export function relayUpstreamsFromAuth(
   const upstreams: RelayUpstream[] = []
   const unsupported: { providerId: string; reason: string }[] = []
   for (const providerId of [...new Set(providerIds)]) {
-    if (providerId === CLAUDE_SUBSCRIPTION_PROVIDER) {
-      if (subscriptions.claudeToken) {
-        upstreams.push({ providerId, baseUrl: 'https://api.anthropic.com', authStyle: 'bearer', apiKey: subscriptions.claudeToken, kind: 'claude-subscription' })
-      } else {
-        unsupported.push({
-          providerId,
-          reason: "claude-subscription needs a `claude setup-token` value under Subscriptions (the machine's own Claude login cannot be relayed)",
-        })
-      }
-      continue
-    }
     const entry = catalog[providerId]
     if (!entry) {
       unsupported.push({ providerId, reason: `${providerId} is not in the model catalogue` })

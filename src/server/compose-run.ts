@@ -36,7 +36,7 @@ import {
   startShardContainer,
   type ProtectedRuntimeSpec,
 } from '../runtime/docker/container.js'
-import { GATEWAY_ALIAS, GATEWAY_CPUS, GATEWAY_MEMORY_BYTES, GATEWAY_RELAY_PORT } from '../runtime/docker/gateway.js'
+import { GATEWAY_ALIAS, GATEWAY_CPUS, GATEWAY_EGRESS_PORT, GATEWAY_MEMORY_BYTES, GATEWAY_RELAY_PORT } from '../runtime/docker/gateway.js'
 import { createShardNetwork, removeShardNetwork } from '../runtime/docker/network.js'
 import { relayProviderConfig } from '../runtime/opencode/relay-config.js'
 import type { RelayPolicy, RelayUpstream } from '../runtime/provider-relay.js'
@@ -62,7 +62,7 @@ import { ClaudeCodeAgentRunner, type ClaudeActivity } from '../runtime/claude-co
 import { folderRule } from '../runtime/claude-code/argv.js'
 import { resolveClaudeCredentials } from '../runtime/claude-code/credentials.js'
 import type { ClaudeCredentials } from '../runtime/claude-code/env.js'
-import { CLAUDE_SUBSCRIPTION_PROVIDER, claudeModelOf, isClaudeAlias, isClaudeSubscriptionModel } from '../runtime/claude-code/model-id.js'
+import { CLAUDE_SUBSCRIPTION_PROVIDER, claudeModelOf, isClaudeSubscriptionModel } from '../runtime/claude-code/model-id.js'
 import { dockerExecLauncher, localLauncher } from '../runtime/claude-code/process.js'
 import { ClaudeCodeProvider } from '../runtime/claude-code/provider.js'
 import { chatGptLoginOf } from '../runtime/chatgpt-oauth.js'
@@ -240,18 +240,12 @@ async function planRelay(spec: RunSpec, config: RunConfig, s: ComposeSeams): Pro
   } catch {
     throw new Error(`The host model catalogue ${modelsFile} is not valid JSON; let OpenCode refresh it, or choose shared isolation.`)
   }
-  const providers = [...new Set(config.roster.map((r) => providerOf(r.modelId)))]
-  // The CLI resolves an alias to a full id before its request, so the relay could not match it.
-  const aliases = [...new Set(config.roster.map((r) => claudeModelOf(r.modelId)).filter((m): m is string => m !== null && isClaudeAlias(m)))]
-  if (aliases.length > 0) {
-    throw new Error(
-      `Protected isolation needs full Claude model ids, not aliases (${aliases.map((a) => `claude-subscription/${a}`).join(', ')}): ` +
-        'the relay checks each request against the roster, and Claude Code sends the resolved id. Use e.g. claude-subscription/claude-opus-5-5.',
-    )
-  }
-  const claudeToken = providers.includes(CLAUDE_SUBSCRIPTION_PROVIDER) ? await s.subscriptions.claudeTokens.read() : null
+  // Claude subscription agents never touch the relay: the unmodified CLI in the worker holds the
+  // setup token itself and leaves through the gateway's CONNECT route (Anthropic's terms allow hosting
+  // Claude Code for a user's own subscription, not intermediating the credential). Only OpenCode's
+  // providers are relayed.
+  const providers = [...new Set(config.roster.map((r) => providerOf(r.modelId)))].filter((p) => p !== CLAUDE_SUBSCRIPTION_PROVIDER)
   const { upstreams, unsupported } = relayUpstreamsFromAuth(await read(spec.authFile, 'credentials file'), catalog, providers, {
-    claudeToken,
     chatgpt: s.subscriptions.chatGptLogin(spec.authFile),
   })
   if (unsupported.length > 0) {
@@ -262,8 +256,7 @@ async function planRelay(spec: RunSpec, config: RunConfig, s: ComposeSeams): Pro
   }
   return {
     upstreams,
-    // Claude Code talks to the relay itself; only OpenCode's providers go in the worker's config.
-    providers: providers.filter((p) => p !== CLAUDE_SUBSCRIPTION_PROVIDER),
+    providers,
     catalogJson: upstreams.some((u) => u.kind === 'chatgpt') ? withFreeProvider(catalog, 'openai') : catalogJson,
   }
 }
@@ -537,6 +530,9 @@ export async function composeRun(
     assertContextFolder(contextDir, workspaceRoot, s.inspectPath)
   }
   await preflightClaude(spec, config, s)
+  // Breeding keeps to roster models; an agent added later on a Claude model outside the roster gets no
+  // egress route and fails visibly rather than widening a protected shard.
+  const claudeAgentsPossible = config.roster.some((r) => isClaudeSubscriptionModel(r.modelId))
   // Host reads only, before capacity or any server: a protected run the relay cannot carry is refused now.
   const relayPlan = spec.sandbox === 'docker' && config.isolation === 'protected' ? await planRelay(spec, config, s) : null
   if (spec.sandbox === 'docker' && config.isolation === 'shared' && spec.authFile && config.roster.some((r) => providerOf(r.modelId) === 'openai')) {
@@ -642,7 +638,8 @@ export async function composeRun(
         relayHost = relay.gatewayHost
         relay.policy.grant(reservationId, {
           token: relayToken,
-          allowedModels: config.roster.map((r) => r.modelId),
+          // Never Claude subscription models: those requests do not pass through the relay.
+          allowedModels: config.roster.map((r) => r.modelId).filter((m) => !isClaudeSubscriptionModel(m)),
           maxRequests: RELAY_REQUESTS_PER_AGENT * Math.max(1, config.populationSize),
           upstreams: relayPlan.upstreams,
         })
@@ -823,6 +820,8 @@ export async function composeRun(
               configDir: await writeRelayConfig(runId, shardIndex),
               relayPort,
               ...(relayHost ? { relayHost } : {}),
+              // The CONNECT route to api.anthropic.com exists only where a Claude agent may need it.
+              ...(claudeAgentsPossible ? { claudeEgress: true } : {}),
             }
           }
           const started = await s.startShardContainerFn(
@@ -887,15 +886,18 @@ export async function composeRun(
       // Termination of a retained invocation resolves against the invocation's
       // original container ID — never the current plan's reusable name.
       const runtimeState = (handle: AgentHandle) => s.runtimeStateOf(handle.runtimeId ?? '')
-      // Claude subscription agents run the image's Claude Code CLI in their own shard. Protected:
-      // through the relay with the run token. Shared: with the setup token, which `docker exec`
-      // takes from its own environment, never its command line.
+      // Claude subscription agents run the image's unmodified Claude Code CLI in their own shard,
+      // holding the setup token themselves: the launcher passes it to that one process through a 0600
+      // env file it removes once the CLI runs, never a command line. Protected workers have no other
+      // network, so the CLI goes out through the gateway's CONNECT route, which reaches only
+      // api.anthropic.com.
       const claudeRunner = new ClaudeCodeAgentRunner(sandbox, {
         launcher: dockerExecLauncher({ containerFor: (handle) => sandbox.containerNameFor(handle.agentId) }),
-        credentials: relayPlan
-          ? async () => ({ mode: 'relay', baseUrl: `http://${GATEWAY_ALIAS}:${GATEWAY_RELAY_PORT}/${CLAUDE_SUBSCRIPTION_PROVIDER}`, token: relayToken! })
-          : claudeCredentials(false),
+        credentials: claudeCredentials(false),
         tokenTransport: 'env',
+        ...(relayPlan
+          ? { proxy: { url: `http://${GATEWAY_ALIAS}:${GATEWAY_EGRESS_PORT}`, noProxy: `${GATEWAY_ALIAS},localhost,127.0.0.1` } }
+          : {}),
         readableDirs: [...(spec.contextDir ? [CONTAINER_CONTEXT_PATH] : []), TOOLS_MOUNT],
         contextPath: spec.contextDir ? CONTAINER_CONTEXT_PATH : null,
         toolsPath: `${TOOLS_MOUNT}/TOOLS.md`,
