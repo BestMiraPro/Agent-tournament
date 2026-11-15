@@ -17,10 +17,11 @@ import { RoundControls } from './components/RoundControls.js'
 import { RunSetup, type RunSetupValue } from './components/RunSetup.js'
 import { RunBrowser } from './components/RunBrowser.js'
 import { CompareRuns } from './components/CompareRuns.js'
+import { Connectors } from './components/Connectors.js'
 
 export function App() {
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null)
-  const [view, setView] = useState<'browser' | 'setup' | 'run' | 'compare'>('browser')
+  const [view, setView] = useState<'browser' | 'setup' | 'run' | 'compare' | 'connectors'>('browser')
   const [compareIds, setCompareIds] = useState<[string, string] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
@@ -122,6 +123,7 @@ export function App() {
           ? { maxContainers: value.maxContainers, containerMemory: value.containerMemory, containerCpus: value.containerCpus, isolation: value.isolation }
           : {}),
         pricing,
+        ...(value.connectors.length > 0 ? { connectors: value.connectors } : {}),
       }))
     } catch (e) {
       setSetupError(serverError(e))
@@ -192,7 +194,10 @@ export function App() {
   if (view === 'browser') {
     return (
       <>
-        <h1>Agent Tournament — runs</h1>
+        <div className="arena-head">
+          <h1>Agent Tournament — runs</h1>
+          <button onClick={() => { navigation.current++; selectedRun.current = null; setView('connectors') }}>Connectors</button>
+        </div>
         {error && <p className="error">{error}</p>}
         <RunBrowser
           onOpen={(id) => {
@@ -211,6 +216,19 @@ export function App() {
     )
   }
 
+  if (view === 'connectors') {
+    return (
+      <>
+        <div className="arena-head">
+          <h1>Agent Tournament — connectors</h1>
+          <button onClick={() => { navigation.current++; selectedRun.current = null; setView('setup') }}>New run</button>
+          <button onClick={() => { navigation.current++; selectedRun.current = null; setView('browser') }}>Browse runs</button>
+        </div>
+        <Connectors />
+      </>
+    )
+  }
+
   if (view === 'compare' && compareIds) {
     return <CompareRuns a={compareIds[0]} b={compareIds[1]} onBack={() => setView('browser')} />
   }
@@ -221,6 +239,7 @@ export function App() {
       <>
         <div className="arena-head">
           <h1>Agent Tournament — new run</h1>
+          <button onClick={() => { navigation.current++; selectedRun.current = null; setView('connectors') }}>Connectors</button>
           <button onClick={() => { navigation.current++; selectedRun.current = null; setView('browser') }}>Browse runs</button>
         </div>
         <RunSetup busy={creating} error={setupError} onCreate={handleCreate} />

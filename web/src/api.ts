@@ -191,6 +191,8 @@ export interface FullRunSpec {
   containerCpus?: number
   isolation?: 'protected' | 'shared'
   pricing: Record<string, { inPerM: number; outPerM: number; cacheReadPerM: number; cacheWritePerM: number }>
+  /** Local and docker runs only: connectors the run's agents get, and the write tools it opts into. */
+  connectors?: { id: string; writeTools: string[] }[]
 }
 
 /** Docker capacity and this app's reservations; rejects when the server cannot read Docker. */
@@ -528,3 +530,85 @@ export const rejudge = (runId: string, idx: number, judgeModelId: string): Promi
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ judgeModelId }),
   }).then(json)
+
+/** Mirrors connectorView in src/server/connectors-api.ts: a connector, never its credential values. */
+export interface ConnectorToolRow {
+  name: string
+  description: string
+  readOnlyHint: boolean | null
+  /** read: exposed unless switched off; write: needs a permit and a per-run opt-in; locked: never exposed. */
+  classification: 'read' | 'write' | 'locked'
+}
+
+export interface ConnectorInfo {
+  id: string
+  title: string
+  kind: 'github' | 'slack' | 'gmail' | 'custom'
+  builtin: false
+  origin: { type: 'preset' | 'custom' } | { type: 'imported'; source: string; name: string }
+  transport:
+    | { type: 'stdio'; command: string; args: string[]; envNames: string[]; secretEnvNames: string[] }
+    | { type: 'http'; url: string; headerNames: string[]; secretHeaderNames: string[] }
+    | { type: 'slack' | 'gmail' }
+  auth: { type: 'none' | 'oauth-google' | 'oauth-mcp' } | { type: 'token'; source: 'manual' | 'gh-cli'; env?: string }
+  secretsSet: string[]
+  connected: boolean
+  locked: boolean
+  readAllowlist: string[] | null
+  policy: { disabledTools: string[]; writeTools: string[] }
+  tools: ConnectorToolRow[] | null
+  toolsCheckedAt: number | null
+}
+
+export interface BuiltinConnectorInfo {
+  id: string
+  title: string
+  description: string
+  builtin: true
+  readOnly: true
+}
+
+export interface ConnectorList {
+  store: boolean
+  connectors: ConnectorInfo[]
+  builtins: BuiltinConnectorInfo[]
+}
+
+export type ConnectorPreset =
+  | { preset: 'github'; id?: string; title?: string; mode: 'remote' | 'local'; url?: string; command?: string; tokenSource: 'manual' | 'gh-cli'; token?: string }
+  | { preset: 'slack'; id?: string; title?: string; token: string }
+  | { preset: 'gmail'; id?: string; title?: string; clientId: string; clientSecret: string }
+  | { preset: 'remote'; id: string; title?: string; url: string; headers?: Record<string, string>; bearerToken?: string }
+  | { preset: 'local'; id: string; title?: string; command: string; args?: string[]; env?: Record<string, string> }
+
+export interface ImportableServer {
+  key: string
+  name: string
+  source: string
+  from: string
+  suggestedId: string
+  imported: boolean
+  transport: { type: 'stdio'; command: string; args: string[]; env: Record<string, string> } | { type: 'http'; url: string; headers: Record<string, string> }
+}
+
+const sendJson = (method: string, url: string, body?: unknown) =>
+  fetch(url, {
+    method,
+    headers: body === undefined ? {} : { 'content-type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  }).then(json)
+
+export const listConnectors = (): Promise<ConnectorList> => fetch('/api/connectors').then(json)
+export const addConnector = (preset: ConnectorPreset): Promise<{ connector: ConnectorInfo }> => sendJson('POST', '/api/connectors', preset)
+export const updateConnector = (
+  id: string,
+  patch: { title?: string; policy?: Partial<ConnectorInfo['policy']>; token?: string; clientId?: string; clientSecret?: string },
+): Promise<{ connector: ConnectorInfo }> => sendJson('PATCH', `/api/connectors/${encodeURIComponent(id)}`, patch)
+export const removeConnector = (id: string): Promise<{ ok: true }> => sendJson('DELETE', `/api/connectors/${encodeURIComponent(id)}`)
+export const testConnector = (id: string): Promise<{ connector?: ConnectorInfo; tools?: ConnectorToolRow[] }> =>
+  sendJson('POST', `/api/connectors/${encodeURIComponent(id)}/test`, {})
+export const listImportable = (): Promise<{ servers: ImportableServer[] }> => fetch('/api/connectors/import').then(json)
+export const importConnector = (key: string, id?: string): Promise<{ connector: ConnectorInfo }> =>
+  sendJson('POST', '/api/connectors/import', { key, ...(id ? { id } : {}) })
+export const startConnectorSignIn = (id: string): Promise<{ authorizationUrl?: string; connected?: boolean }> =>
+  sendJson('POST', `/api/connectors/${encodeURIComponent(id)}/oauth/start`, {})
