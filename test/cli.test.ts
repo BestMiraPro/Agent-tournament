@@ -33,10 +33,24 @@ describe('runTournamentCli', () => {
       seed: 42,
       dbPath: ':memory:',
       criteria: null,
+      workflow: 'tournament',
     })
     expect(out.rounds).toHaveLength(3)
     expect(out.rounds[0]!.meanScore).toBeGreaterThan(0)
     expect(out.rounds.at(-1)!.meanScore).toBeGreaterThan(out.rounds[0]!.meanScore)
+  })
+
+  test('collaboration is the default: one team, one shared output, one score per round', async () => {
+    const out = await runTournamentCli({
+      goal: 'write a good answer', rounds: 2, population: 3, seed: 1, dbPath: ':memory:', criteria: null,
+    })
+    expect(out.rounds).toHaveLength(2)
+    for (const r of out.rounds) {
+      expect(r.meanScore).toBeGreaterThan(0)
+      // Every member's score is the team's.
+      expect(r.bestScore).toBe(r.meanScore)
+    }
+    expect(out.winner.label).toMatch(/^agent-0[1-3]$/)
   })
 
   test('reports the winning strategy of the final round', async () => {
@@ -52,7 +66,7 @@ describe('CLI mode selection', () => {
   test('mock mode still runs and improves', async () => {
     const out = await runTournamentCli({
       goal: 'write a good answer', rounds: 3, population: 6, seed: 42,
-      dbPath: ':memory:', criteria: null, mode: 'mock',
+      dbPath: ':memory:', criteria: null, mode: 'mock', workflow: 'tournament',
     })
     expect(out.rounds).toHaveLength(3)
     expect(out.rounds.at(-1)!.meanScore).toBeGreaterThan(out.rounds[0]!.meanScore)
@@ -90,6 +104,8 @@ describe('CLI docker mode', () => {
 describe('CLI host-capacity preflight', () => {
   const dockerConfig = (over: Partial<RunConfig> = {}): RunConfig => ({
     ...DEFAULT_CONFIG,
+    // Containers counted one per agent: the tournament's placement. Teams are covered below.
+    workflow: 'tournament',
     sandbox: 'docker',
     maxContainers: 4,
     containerMemory: '1g',
@@ -144,7 +160,7 @@ describe('CLI host-capacity preflight', () => {
 
   test('an unreadable host refuses a protected run instead of assuming it fits', async () => {
     const warnings: string[] = []
-    const protectedConfig = { ...DEFAULT_CONFIG, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
+    const protectedConfig = { ...DEFAULT_CONFIG, workflow: 'tournament' as const, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
     await expect(
       assertHostCapacity(protectedConfig, async () => { throw new Error('docker info unavailable') }, (m) => warnings.push(m)),
     ).rejects.toThrow(/docker sandbox: host capacity could not be read, so a protected run cannot be admitted \(docker info unavailable\)/)
@@ -154,7 +170,7 @@ describe('CLI host-capacity preflight', () => {
   test('with a ledger, an admitted run holds its reservation until released', async () => {
     const { CapacityLedger } = await import('../src/runtime/docker/capacity.js')
     const ledger = new CapacityLedger()
-    const cfg = { ...DEFAULT_CONFIG, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
+    const cfg = { ...DEFAULT_CONFIG, workflow: 'tournament' as const, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
     await assertHostCapacity(cfg, async () => roomy, () => {}, { ledger, reservationId: 'r1' })
     expect(ledger.active()).toEqual([{ id: 'r1', containers: 2, memoryBytes: 1024 ** 3, cpus: 1 }])
   })
@@ -190,7 +206,7 @@ describe('CLI host-capacity preflight', () => {
         {
           goal: 'g', rounds: 1, population: 2, seed: 1,
           dbPath: ':memory:', criteria: null, mode: 'real', sandbox: 'docker',
-          workspaceRoot: '/tmp/does-not-need-to-exist',
+          workspaceRoot: '/tmp/does-not-need-to-exist', workflow: 'tournament',
         },
         hooks,
       ),

@@ -93,6 +93,7 @@ async function oomFixture(opts: { bottomPct?: number } = {}): Promise<OomFixture
     ...DEFAULT_CONFIG,
     populationSize: 2,
     sandbox: 'docker' as const,
+    workflow: 'tournament' as const,
     isolation: 'protected' as const,
     maxContainers: 2,
     concurrency: 2,

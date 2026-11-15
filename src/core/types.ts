@@ -160,7 +160,7 @@ export interface RunConfig {
 export const DEFAULT_TEAM_SIZE = 4
 
 export const DEFAULT_CONFIG: RunConfig = {
-  workflow: 'tournament',
+  workflow: 'collaboration',
   populationSize: 20,
   concurrency: 8,
   agentTimeoutMs: Infinity,

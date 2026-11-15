@@ -173,7 +173,7 @@ describe('real-mode wiring', () => {
     const dres = await docker.app.inject({
       method: 'POST', url: '/api/runs',
       payload: {
-        name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
       },
     })
@@ -210,7 +210,7 @@ describe('real-mode wiring', () => {
       config: {
         ...DEFAULT_CONFIG,
         populationSize: 1,
-        sandbox: 'docker',
+        sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
       },
       sandbox: new MockSandbox(),
@@ -238,7 +238,7 @@ describe('real-mode wiring', () => {
       const res = await app.inject({
         method: 'POST', url: '/api/runs',
         payload: {
-          name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
+          name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
           roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
         },
       })
@@ -291,7 +291,7 @@ describe('real-mode wiring', () => {
     const config: RunConfig = {
       ...DEFAULT_CONFIG,
       populationSize: 6,
-      sandbox: 'docker',
+      sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'mock/model', count: 6, temperature: 0.7 }],
     }
     const composed: ComposedRun = {
@@ -318,7 +318,7 @@ describe('real-mode wiring', () => {
     const create = await app.inject({
       method: 'POST', url: '/api/runs',
       payload: {
-        name: 'planned', goal: 'g', sandbox: 'docker', isolation: 'shared',
+        name: 'planned', goal: 'g', sandbox: 'docker', workflow: 'tournament', isolation: 'shared',
         workspaceRoot: process.platform === 'win32' ? 'C:\\tmp\\arena-planned' : '/tmp/arena-planned',
         authFile: process.platform === 'win32' ? 'C:\\tmp\\auth.json' : '/tmp/auth.json',
         roster: [{ modelId: 'mock/model', count: 6, temperature: 0.7 }],
@@ -389,7 +389,7 @@ describe('real-mode wiring', () => {
     const bad = await mk(new Error('docker sandbox: host cannot fit 4 containers')).inject({
       method: 'POST', url: '/api/runs',
       payload: {
-        name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
       },
     })
@@ -498,7 +498,7 @@ describe('real-mode wiring', () => {
       inspectPath: vi.fn(() => 'file' as const),
     })
     const dockerSpec = () => parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
       roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
     })
     const holderSeams = seams()
@@ -615,7 +615,7 @@ describe('real-mode wiring', () => {
       inspectPath: vi.fn(() => 'file' as const),
     }
     await expect(composeRun(parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
       workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     }), seams as never)).rejects.toThrow(/no docker daemon/)
@@ -883,7 +883,7 @@ describe('container names carry the live run id', () => {
   })
 
   const dockerSpec = () => parseRunSpec({
-    name: 'd', goal: 'g', sandbox: 'docker', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
+    name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
   })
 

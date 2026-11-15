@@ -62,7 +62,7 @@ describe('composeRun', () => {
 
   describe('docker auth file', () => {
     const dockerSpec = (root: string, authFile: string) => parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 1, temperature: 0.7 }],
       workspaceRoot: root, authFile,
     })
@@ -140,7 +140,7 @@ describe('composeRun', () => {
     const GiB = 1024 ** 3
     const host = { totalMemoryBytes: 16 * GiB, usedMemoryBytes: 0, cpus: 16, containers: [] }
     const spec = (root: string, extra: Record<string, unknown> = {}) => parseRunSpec({
-      name: 'p', goal: 'g', sandbox: 'docker',
+      name: 'p', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 2, temperature: 0.7 }],
       workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 2, ...extra,
     })
@@ -343,7 +343,7 @@ describe('composeRun', () => {
     const GiB = 1024 ** 3
     const host = { totalMemoryBytes: 5 * GiB, usedMemoryBytes: 0, cpus: 16, containers: [] }
     const spec = (root: string, count: number) => parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'w/m', count, temperature: 0.7 }],
       workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: count, containerMemory: '1g',
     })
@@ -562,7 +562,7 @@ describe('composeRun', () => {
     const seams = mockSeams()
     seams.readCapacity.mockResolvedValueOnce({ totalMemoryBytes: 2 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })
     await expect(composeRun(parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'w/m', count: 4, temperature: 0.7 }],
       workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     }), seams as never)).rejects.toThrow(/docker sandbox/i)
@@ -599,7 +599,7 @@ describe('composeRun', () => {
     seams.readCapacity.mockRejectedValueOnce(new Error('docker info unavailable'))
     const reported: string[] = []
     const c = await composeRun(parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker', isolation: 'shared',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', isolation: 'shared',
       roster: [{ modelId: 'w/m', count: 4, temperature: 0.7 }],
       workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     }), seams as never, { reportWarning: (m) => reported.push(m) })
@@ -677,7 +677,7 @@ describe('composeRun', () => {
     > = { startShardContainerFn, removeContainerFn }
     try {
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'),
       }), { ...seams, ...dockerBoundary } as never)
@@ -738,7 +738,7 @@ describe('composeRun', () => {
     }
     try {
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'), contextDir: ctx,
       }), {
@@ -786,7 +786,7 @@ describe('composeRun', () => {
     }
     try {
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'), contextDir: ctx,
       }), {
@@ -844,7 +844,7 @@ describe('composeRun', () => {
         shardIndex: spec.shardIndex,
       }))
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: missing, count: 1, temperature: 0.7 }, { modelId: present, count: 1, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'),
       }), {

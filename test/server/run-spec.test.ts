@@ -40,8 +40,9 @@ describe('seedStrategiesDir', () => {
 
 describe('isolation', () => {
   const abs = process.platform === 'win32' ? 'C:\\ws' : '/ws'
+  // Container placement and isolation choices are the tournament's; a team has one protected container.
   const docker = (count: number, extra: Record<string, unknown> = {}) => ({
-    ...base, sandbox: 'docker', workspaceRoot: abs, authFile: `${abs}/auth.json`,
+    ...base, workflow: 'tournament', sandbox: 'docker', workspaceRoot: abs, authFile: `${abs}/auth.json`,
     roster: [{ modelId: 'w/m', count, temperature: 0.7 }], ...extra,
   })
 
@@ -167,7 +168,7 @@ describe('parseRunSpec', () => {
 
   test('eliteCount beyond the top band throws', () => {
     expect(() =>
-      parseRunSpec({ ...base, selection: { eliteCount: 5, topPct: 0.2 } }),
+      parseRunSpec({ ...base, workflow: 'tournament', selection: { eliteCount: 5, topPct: 0.2 } }),
     ).toThrow(/top band size/)
   })
 
