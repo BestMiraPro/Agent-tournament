@@ -34,6 +34,16 @@ describe('specForResume', () => {
     expect(spec.population).toBe(3)
     expect(spec.workspaceRoot).toBe('/tmp/w')
   })
+
+  test('web access resumes as stored, and a config from before the toggle resumes without it', () => {
+    const repos = makeRepos(openDb(':memory:'))
+    const config = { ...DEFAULT_CONFIG, sandbox: 'local' as const, populationSize: 1, roster: [{ modelId: 'w/m', count: 1, temperature: 0.5 }] }
+    const on = repos.runs.create({ name: 'on', config: { ...config, webAccess: true }, seedDir: null })
+    const before = repos.runs.create({ name: 'old', config, seedDir: null })
+    const defaults = { workspaceRoot: '/tmp/w', authFile: null, serverUrl: null }
+    expect(specForResume(repos.runs.get(on.id)!, defaults).webAccess).toBe(true)
+    expect(specForResume(repos.runs.get(before.id)!, defaults).webAccess).toBe(false)
+  })
 })
 
 describe('budget recovery', () => {

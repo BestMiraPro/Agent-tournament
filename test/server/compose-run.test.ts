@@ -511,10 +511,11 @@ describe('composeRun', () => {
       startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
       webTools,
     })
-    const localSpec = (root: string, webAccess?: boolean) => ({
-      ...parseRunSpec({ name: 'l', goal: 'g', sandbox: 'local', roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }], workspaceRoot: root }),
-      ...(webAccess === undefined ? {} : { webAccess }),
-    })
+    // `undefined` is a spec without the field at all, as the CLI builds it.
+    const localSpec = (root: string, webAccess?: boolean) => {
+      const { webAccess: _parsed, ...spec } = parseRunSpec({ name: 'l', goal: 'g', sandbox: 'local', roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }], workspaceRoot: root })
+      return webAccess === undefined ? spec : { ...spec, webAccess }
+    }
 
     test('grants the run, configures each agent with its own token, and revokes on cleanup', async () => {
       const root = mkdtempSync(join(tmpdir(), 'compose-web-'))

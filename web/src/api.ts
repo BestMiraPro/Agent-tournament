@@ -191,7 +191,17 @@ export interface FullRunSpec {
   containerCpus?: number
   isolation?: 'protected' | 'shared'
   pricing: Record<string, { inPerM: number; outPerM: number; cacheReadPerM: number; cacheWritePerM: number }>
+  /** Workers get the host's web tools; the server defaults it on. */
+  webAccess?: boolean
 }
+
+/** Which provider web_search would use (mirror of src/connectors/web/config.ts); never a key. */
+export interface WebSearchStatus {
+  primary: { id: 'langsearch'; name: string; configured: boolean }
+  fallback: { id: 'exa'; name: string; mode: 'keyed' | 'keyless' }
+}
+
+export const getWebSearchStatus = (): Promise<WebSearchStatus> => fetch('/api/web-search').then(json)
 
 /** Docker capacity and this app's reservations; rejects when the server cannot read Docker. */
 export const getCapacity = (): Promise<CapacityInfo> => fetch('/api/capacity').then(json)

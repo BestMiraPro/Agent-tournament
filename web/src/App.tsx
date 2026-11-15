@@ -122,6 +122,7 @@ export function App() {
           ? { maxContainers: value.maxContainers, containerMemory: value.containerMemory, containerCpus: value.containerCpus, isolation: value.isolation }
           : {}),
         pricing,
+        webAccess: value.webAccess,
       }))
     } catch (e) {
       setSetupError(serverError(e))

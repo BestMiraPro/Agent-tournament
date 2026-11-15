@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, test } from 'vitest'
-import { DockerPlacementSummary, RunSetup } from '../../web/src/components/RunSetup.js'
+import { DockerPlacementSummary, RunSetup, WebSearchStatusLine } from '../../web/src/components/RunSetup.js'
 
 describe('docker placement choice', () => {
   test('the docker settings offer protected or shared isolation, and App sends the choice', () => {
@@ -66,5 +66,24 @@ describe('run setup form', () => {
     const src = readFileSync('web/src/components/RunSetup.tsx', 'utf8')
     expect(src).toContain('Credentials file (auth.json)')
     expect(src).not.toContain('Auth file (bind-mounted read-only)')
+  })
+})
+
+describe('web access', () => {
+  test('a real sandbox offers the toggle, on by default, and App sends it', () => {
+    const src = readFileSync('web/src/components/RunSetup.tsx', 'utf8')
+    expect(src).toContain('id="setup-web"')
+    expect(src).toContain('useState(true)')
+    expect(src).toContain('Docker workers stay offline')
+    expect(readFileSync('web/src/App.tsx', 'utf8')).toContain('webAccess: value.webAccess')
+  })
+
+  test('the status line names the configured provider and the Exa fallback mode', () => {
+    const line = (status: Parameters<typeof WebSearchStatusLine>[0]['status']) => renderToStaticMarkup(createElement(WebSearchStatusLine, { status }))
+    expect(line({ primary: { id: 'langsearch', name: 'LangSearch', configured: true }, fallback: { id: 'exa', name: 'Exa', mode: 'keyless' } }))
+      .toContain('LangSearch (key configured), falling back to Exa without a key')
+    expect(line({ primary: { id: 'langsearch', name: 'LangSearch', configured: false }, fallback: { id: 'exa', name: 'Exa', mode: 'keyed' } }))
+      .toContain('Exa with your key only — set LANGSEARCH_API_KEY for LangSearch')
+    expect(line(null)).toContain('could not be read')
   })
 })

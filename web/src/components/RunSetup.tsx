@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import { DEFAULT_CONFIG } from '../../../src/core/types.js'
-import { getCapacity, listModels } from '../api.js'
+import { getCapacity, getWebSearchStatus, listModels, type WebSearchStatus } from '../api.js'
 import { setupEstimate, type CapacityInfo, type PlacementPlan } from '../lib/placement.js'
 import type { RosterEntry } from '../lib/roster.js'
 import { RosterBuilder } from './RosterBuilder.js'
@@ -25,6 +25,16 @@ export interface RunSetupValue {
   containerCpus: number
   isolation: 'protected' | 'shared'
   pricingText: string
+  webAccess: boolean
+}
+
+/** Which search provider the web tools would use: the primary with its key, or the Exa fallback. */
+export function WebSearchStatusLine({ status }: { status: WebSearchStatus | null }) {
+  if (!status) return <p className="help">Search provider: could not be read from the server.</p>
+  const exa = status.fallback.mode === 'keyed' ? 'Exa with your key' : 'Exa without a key'
+  return status.primary.configured
+    ? <p className="help">Search provider: {status.primary.name} (key configured), falling back to {exa}.</p>
+    : <p className="help">Search provider: {exa} only — set LANGSEARCH_API_KEY for {status.primary.name}, the primary (see the operator guide).</p>
 }
 
 /** Before Start: which agents share which container, the summed ceilings, and the estimated fit. */
@@ -81,6 +91,18 @@ export function RunSetup({ busy, error, onCreate }: {
     getCapacity().then(
       (c) => { if (alive) setCapacity(c) },
       () => { if (alive) setCapacity(null) },
+    )
+    return () => { alive = false }
+  }, [sandbox])
+  const [webAccess, setWebAccess] = useState(true)
+  // Read when a real sandbox is chosen; a failed read stays null and the line says so.
+  const [webSearch, setWebSearch] = useState<WebSearchStatus | null>(null)
+  useEffect(() => {
+    if (sandbox === 'mock') return
+    let alive = true
+    getWebSearchStatus().then(
+      (s) => { if (alive) setWebSearch(s) },
+      () => { if (alive) setWebSearch(null) },
     )
     return () => { alive = false }
   }, [sandbox])
@@ -173,6 +195,12 @@ export function RunSetup({ busy, error, onCreate }: {
             <label htmlFor="setup-root">Workspace root</label>
             <input id="setup-root" value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} disabled={busy} />
             <p className="help">Absolute folder where agents work. Leave blank to use the app&apos;s default.</p>
+            <label htmlFor="setup-web" className="check">
+              <input id="setup-web" type="checkbox" checked={webAccess} onChange={(e) => setWebAccess(e.target.checked)} disabled={busy} />
+              Web access
+            </label>
+            <p className="help">Agents can search the web and read pages through the host&apos;s web tools. Every call is recorded as evidence and limited per agent; search keys never reach the agents. Applies to local runs in this version: Docker workers stay offline.</p>
+            <WebSearchStatusLine status={webSearch} />
           </>
         )}
         {sandbox === 'docker' && (
@@ -259,6 +287,7 @@ export function RunSetup({ busy, error, onCreate }: {
           containerCpus: Number(containerCpus),
           isolation,
           pricingText,
+          webAccess,
         })}
       >
         {busy ? 'Creating…' : 'Create run'}

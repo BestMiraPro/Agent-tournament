@@ -363,6 +363,7 @@ textarea:focus-visible, .cell--selectable:focus-visible {
 .setup section { display: grid; gap: .5rem; }
 .setup h2 { font-size: .74rem; margin: .85rem 0 0; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); }
 .setup .help { font-size: .74rem; color: var(--text-faint); margin: 0; }
+.setup .check { display: flex; align-items: center; gap: .45rem; }
 .setup fieldset { margin: 0; display: grid; gap: .5rem; }
 .setup fieldset legend { font-weight: 600; font-size: .78rem; padding: 0 .35rem; color: var(--text-dim); }
 .setup details { display: grid; gap: .5rem; }

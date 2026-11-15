@@ -21,6 +21,7 @@ import { buildCsvRows, buildJsonDump, buildMarkdownReport } from './export.js'
 import { submissionView } from './submission-view.js'
 import { ActivityCache, type ActivitySnapshot } from './activity.js'
 import { AuditCollector, readRoundAudit } from '../engine/audit.js'
+import { readWebSearchKeys, webSearchStatus, type WebSearchStatus } from '../connectors/web/config.js'
 import { buildJudgingEnvelope, evidenceFromAudit, type JudgeCallRecord } from '../judge/audit.js'
 import type { HostCapacity } from '../runtime/docker/capacity.js'
 
@@ -61,6 +62,8 @@ export interface ApiDeps {
   hasLiveBudget?: (runId: string) => boolean
   /** Docker's capacity reading and what this process has reserved, for setup estimates. */
   capacity?: () => Promise<{ host: HostCapacity; reserved: { memoryBytes: number; cpus: number } }>
+  /** Which web search provider would answer; defaults to reading the keys from env / `.env`. */
+  webSearchStatus?: () => WebSearchStatus
 }
 
 /** Bridge callbacks that report upstream stream health as its own event, never as agent state. */
@@ -206,6 +209,8 @@ export function specForResume(run: RunRow, defaults?: SpecDefaults): RunSpec {
     seedStrategiesDir: null,
     serverUrl: defaults?.serverUrl ?? null,
     criteria: run.initialCriteria,
+    // A config from before the toggle ran without web tools, and resumes that way.
+    webAccess: cfg.webAccess === true,
   }
 }
 
@@ -608,6 +613,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
     }
   })
+
+  // Which provider web_search would use, never a key: for the setup form's status line.
+  app.get('/api/web-search', async () => (deps.webSearchStatus ?? (() => webSearchStatus(readWebSearchKeys())))())
 
   // Totals only: per-container names belong to whatever else runs on this Docker host.
   app.get('/api/capacity', async (_req, reply) => {

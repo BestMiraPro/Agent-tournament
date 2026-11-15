@@ -63,6 +63,8 @@ const schema = z.object({
   seedStrategiesDir: z.string().nullable().default(null),
   serverUrl: z.string().nullable().default(null),
   criteria: z.string().nullable().default(null),
+  // On by default: this is a research tool. Wired for local runs; Docker workers stay offline.
+  webAccess: z.boolean().default(true),
 })
 
 export type RunSpecInput = z.input<typeof schema>
@@ -93,7 +95,7 @@ export interface RunSpec {
   seedStrategiesDir: string | null
   serverUrl: string | null
   criteria: string | null
-  /** Workers get the host's web tools (local runs). Absent means off, as for the CLI. */
+  /** Workers get the host's web tools (local runs). Parsed specs default it on; absent means off, as for the CLI. */
   webAccess?: boolean
 }
 
@@ -196,5 +198,6 @@ export function parseRunSpec(input: unknown): RunSpec {
     seedStrategiesDir,
     serverUrl: p.serverUrl,
     criteria: p.criteria,
+    webAccess: p.webAccess,
   }
 }
