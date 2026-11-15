@@ -53,6 +53,21 @@ export interface GrantSpec {
   onEvent: (event: ConnectorEvent) => void
   /** Closes the run's upstreams; called once, on revoke. */
   close: () => Promise<void>
+  /**
+   * Credentials that may sit inside a worker (a Claude setup token in a protected container) and must never leave
+   * it through a tool call: a call whose arguments carry one, plainly or in a common encoding, is refused.
+   */
+  guardedSecrets?: () => Promise<readonly string[]>
+}
+
+/** The spellings a credential is most likely to be smuggled in: as is, percent-encoded, and base64 / base64url. */
+export function carriesSecret(text: string, secrets: readonly string[]): boolean {
+  return secrets.some((secret) => {
+    if (secret.length < 16) return false
+    const b64 = Buffer.from(secret).toString('base64').replace(/=+$/, '')
+    const forms = [secret, encodeURIComponent(secret), b64, b64.replace(/\+/g, '-').replace(/\//g, '_')]
+    return forms.some((form) => text.includes(form))
+  })
 }
 
 /** What one agent's runner needs to reach one connector: a URL and the headers to send. Runner-agnostic. */
@@ -190,6 +205,11 @@ export class ToolBridge {
     if (!state.allowed.get(connectorId)?.has(tool)) {
       record({ outcome: 'denied', status: 'refused', responseBytes: 0, error: 'tool not exposed to agents' })
       return errorResult(`The tool ${tool} is not available through the ${connector.title} connector.`)
+    }
+    const secrets = (await state.spec.guardedSecrets?.().catch(() => [])) ?? []
+    if (secrets.length > 0 && carriesSecret(JSON.stringify(args), secrets)) {
+      record({ outcome: 'denied', status: 'refused', responseBytes: 0, error: 'request carried a protected credential' })
+      return errorResult('Refused: this request contains a credential this run protects.')
     }
     const used = state.calls.get(caller.agentId) ?? 0
     if (used >= state.spec.maxCallsPerAgent) {

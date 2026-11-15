@@ -45,6 +45,7 @@ export async function planRunConnectors(opts: {
   grantId: string
   runId: () => string
   maxCallsPerAgent?: number
+  guardedSecrets?: () => Promise<readonly string[]>
 }): Promise<ConnectorRunPlan> {
   const resolved = opts.wanted.map((w) => {
     const c = opts.resolver.resolve(w.id)
@@ -127,6 +128,7 @@ export async function planRunConnectors(opts: {
       }
     },
     close: closeAll,
+    ...(opts.guardedSecrets ? { guardedSecrets: opts.guardedSecrets } : {}),
   })
 
   const manifest: ManifestConnector[] = grantConnectors.map((g) => {

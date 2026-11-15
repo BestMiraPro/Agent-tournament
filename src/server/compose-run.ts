@@ -711,6 +711,11 @@ export async function composeRun(
         bridge: toolBridge.bridge,
         grantId: reservationId,
         runId,
+        // A Claude setup token handed to a worker's CLI must never leave through a tool call.
+        guardedSecrets: async () => {
+          const token = await s.subscriptions?.claudeTokens.read().catch(() => null)
+          return token ? [token] : []
+        },
         // A team shares one identity (below), so it gets the whole team's allowance.
         ...(team ? { maxCallsPerAgent: TOOL_CALLS_PER_AGENT * Math.max(1, config.populationSize) } : {}),
       })
