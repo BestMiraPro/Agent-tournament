@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { attachServer, createLineScanner, parseServerPort, startServer } from '../../../src/runtime/opencode/server.js'
+import { configureHostOpencode, resetHostOpencode } from '../../../src/runtime/opencode/pinned.js'
 
 const spawned = vi.hoisted(() => ({ children: [] as ChildProcess[], options: [] as unknown[] }))
 
@@ -528,6 +529,18 @@ describe('startServer process ownership', () => {
         if (value === undefined) delete process.env[name]
         else process.env[name] = value
       }
+    }
+  }, 15_000)
+
+  test('launches with the configured host env, e.g. the private data folder of bridged credentials', async () => {
+    configureHostOpencode({ env: { XDG_DATA_HOME: '/arena/secrets/opencode' } })
+    try {
+      await expect(startServer({ ...exiterCommand(), startupTimeoutMs: 5000 })).rejects.toThrow('process exited with code')
+      const env = (spawned.options[0] as { env?: NodeJS.ProcessEnv }).env
+      expect(env?.XDG_DATA_HOME).toBe('/arena/secrets/opencode')
+      expect(process.env.XDG_DATA_HOME).not.toBe('/arena/secrets/opencode')
+    } finally {
+      resetHostOpencode()
     }
   }, 15_000)
 })
