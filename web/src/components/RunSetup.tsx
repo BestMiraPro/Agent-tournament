@@ -1,13 +1,14 @@
 import { useEffect, useId, useState } from 'react'
 import { DEFAULT_CONFIG } from '../../../src/core/types.js'
 import { getCapacity, listModels } from '../api.js'
-import { setupEstimate, type CapacityInfo, type PlacementPlan } from '../lib/placement.js'
+import { setupEstimate, teamSetupEstimate, type CapacityInfo, type PlacementPlan } from '../lib/placement.js'
 import type { RosterEntry } from '../lib/roster.js'
 import { RosterBuilder } from './RosterBuilder.js'
 
 export interface RunSetupValue {
   name: string
   goal: string
+  workflow: 'collaboration' | 'tournament'
   sandbox: 'mock' | 'local' | 'docker'
   roster: RosterEntry[]
   judgeModel: string
@@ -45,6 +46,20 @@ export function DockerPlacementSummary({ capacity, concurrency, ...plan }: Place
   )
 }
 
+/** Before Start: a collaboration team's one container, its summed ceilings and the estimated fit. */
+export function TeamContainerSummary({ capacity, ...plan }: { population: number; memory: string; cpus: number; capacity: CapacityInfo | null }) {
+  const estimate = teamSetupEstimate(plan, capacity)
+  return (
+    <div className="placement-summary" aria-live="polite">
+      <p className="help">The whole team works in one protected container: no credentials inside, an internal-only network, model calls through the relay. Its limits are one agent&apos;s per member.</p>
+      <p className="help">Ceilings: {estimate.ceilings}. These are limits, not memory set aside at launch.</p>
+      <p className="help">The container restarts between rounds; the team&apos;s folder (output/, CHANNEL.md, scratch) carries over.</p>
+      <p className={estimate.fit.state === 'does_not_fit' ? 'error' : 'help'}>{estimate.fit.message}</p>
+      {estimate.memoryNote && <p className="help">{estimate.memoryNote}</p>}
+    </div>
+  )
+}
+
 export function RunSetup({ busy, error, onCreate }: {
   busy: boolean
   error: string | null
@@ -52,6 +67,8 @@ export function RunSetup({ busy, error, onCreate }: {
 }) {
   const [name, setName] = useState('arena')
   const [goal, setGoal] = useState('Produce the best possible answer.')
+  const [workflow, setWorkflow] = useState<RunSetupValue['workflow']>(DEFAULT_CONFIG.workflow)
+  const collaboration = workflow === 'collaboration'
   const [sandbox, setSandbox] = useState<RunSetupValue['sandbox']>('mock')
   const [roster, setRoster] = useState<RosterEntry[]>([{ modelId: 'mock/model', count: 4, temperature: 0.7 }])
   const [judgeModel, setJudgeModel] = useState(DEFAULT_CONFIG.judge.modelId)
@@ -109,6 +126,21 @@ export function RunSetup({ busy, error, onCreate }: {
         <label htmlFor="setup-name">Run name</label>
         <input id="setup-name" value={name} onChange={(e) => setName(e.target.value)} disabled={busy} />
         <p className="help">A short name for this run.</p>
+        <label htmlFor="setup-workflow">Workflow</label>
+        <select
+          id="setup-workflow"
+          value={workflow}
+          onChange={(e) => setWorkflow(e.target.value as RunSetupValue['workflow'])}
+          disabled={busy}
+        >
+          <option value="collaboration">collaboration (one team, one shared output folder)</option>
+          <option value="tournament">tournament (agents compete, the best are bred)</option>
+        </select>
+        <p className="help">
+          {collaboration
+            ? 'The agents work as one team in one shared folder, talk through CHANNEL.md, and build output/ together; that folder is judged as one piece of work. Nobody is cloned or removed, and the folder carries over between rounds.'
+            : 'Each agent works alone and is judged on its own SUBMISSION.md; the best are cloned and bred, the worst removed.'}
+        </p>
         <label htmlFor="setup-goal">Goal</label>
         <textarea id="setup-goal" value={goal} rows={3} onChange={(e) => setGoal(e.target.value)} disabled={busy} />
         <p className="help">What the agents are trying to do — scored every round.</p>
@@ -126,7 +158,7 @@ export function RunSetup({ busy, error, onCreate }: {
         <h2 id="setup-h-population">Population</h2>
         <fieldset>
           <legend>Roster</legend>
-          <p className="help">Which models compete, and how many agents each gets.</p>
+          <p className="help">{collaboration ? 'Which models are on the team, and how many agents each gets. Four is what one container fits on the reference machine.' : 'Which models compete, and how many agents each gets.'}</p>
           <RosterBuilder value={roster} onChange={setRoster} models={models ?? []} disabled={busy} />
         </fieldset>
       </section>
@@ -149,7 +181,7 @@ export function RunSetup({ busy, error, onCreate }: {
         <p className="help">How the judge reads submissions — auto picks for you.</p>
         <label htmlFor="setup-reflect-model">Reflect model</label>
         <input id="setup-reflect-model" type="text" list={modelListId} value={reflectModel} onChange={(e) => setReflectModel(e.target.value)} disabled={busy} />
-        <p className="help">Reflection rewrites each survivor's strategy — the mutation operator.</p>
+        <p className="help">{collaboration ? "Reflection rewrites each agent's strategy from the team's score and its own part in the work." : "Reflection rewrites each survivor's strategy — the mutation operator."}</p>
         <datalist id={modelListId}>
           {(models ?? []).map((m) => <option key={m} value={m} />)}
         </datalist>
@@ -180,15 +212,30 @@ export function RunSetup({ busy, error, onCreate }: {
             <label htmlFor="setup-auth">Credentials file (auth.json)</label>
             <input id="setup-auth" value={authFile} onChange={(e) => setAuthFile(e.target.value)} disabled={busy} />
             <p className="help">Your provider credentials file, mounted read-only into containers. Not for context — use Context folder above for that. Leave blank to use your OpenCode login.</p>
-            <label htmlFor="setup-containers">Containers</label>
-            <input id="setup-containers" type="number" min={1} max={64} step={1} value={maxContainers} onChange={(e) => setMaxContainers(e.target.value)} disabled={busy} />
-            <p className="help">How many containers the agents are spread across. With fewer containers than agents, agents share one and can reach each other&apos;s files, so their results cannot be certified untouched. Match the agent count for full isolation.</p>
-            <label htmlFor="setup-container-memory">Memory per container</label>
+            {!collaboration && (
+              <>
+                <label htmlFor="setup-containers">Containers</label>
+                <input id="setup-containers" type="number" min={1} max={64} step={1} value={maxContainers} onChange={(e) => setMaxContainers(e.target.value)} disabled={busy} />
+                <p className="help">How many containers the agents are spread across. With fewer containers than agents, agents share one and can reach each other&apos;s files, so their results cannot be certified untouched. Match the agent count for full isolation.</p>
+              </>
+            )}
+            <label htmlFor="setup-container-memory">{collaboration ? 'Memory per agent' : 'Memory per container'}</label>
             <input id="setup-container-memory" value={containerMemory} onChange={(e) => setContainerMemory(e.target.value)} disabled={busy} />
-            <p className="help">For example 768m or 1g; 512m is accepted but ran out of memory in measured research work. Containers times memory has to fit in the memory Docker has free.</p>
-            <label htmlFor="setup-container-cpus">CPUs per container</label>
+            <p className="help">{collaboration
+              ? 'For example 768m or 1g; the team container gets this much per agent. 512m is accepted but ran out of memory in measured research work.'
+              : 'For example 768m or 1g; 512m is accepted but ran out of memory in measured research work. Containers times memory has to fit in the memory Docker has free.'}</p>
+            <label htmlFor="setup-container-cpus">{collaboration ? 'CPUs per agent' : 'CPUs per container'}</label>
             <input id="setup-container-cpus" type="number" min={0.25} max={64} step={0.25} value={containerCpus} onChange={(e) => setContainerCpus(e.target.value)} disabled={busy} />
-            <p className="help">Containers times CPUs cannot exceed this machine&apos;s CPU count.</p>
+            <p className="help">{collaboration ? 'Agents times CPUs cannot exceed this machine\'s CPU count.' : 'Containers times CPUs cannot exceed this machine\'s CPU count.'}</p>
+            {collaboration && (
+              <TeamContainerSummary
+                population={roster.reduce((n, r) => n + r.count, 0)}
+                memory={containerMemory.trim()}
+                cpus={Number(containerCpus)}
+                capacity={capacity}
+              />
+            )}
+            {!collaboration && (<>
             <label htmlFor="setup-isolation">Isolation</label>
             <select
               id="setup-isolation"
@@ -209,11 +256,14 @@ export function RunSetup({ busy, error, onCreate }: {
               concurrency={Number(concurrency)}
               capacity={capacity}
             />
+            </>)}
           </>
         )}
       </section>
       <details>
         <summary>Advanced</summary>
+        {collaboration && <p className="help">Collaboration never selects or breeds, so elites, bands and crossover do not apply, and every agent runs at once.</p>}
+        {!collaboration && (<>
         <label htmlFor="setup-elite">Elites (kept verbatim)</label>
         <input id="setup-elite" type="number" min={0} step={1} value={eliteCount} onChange={(e) => setEliteCount(e.target.value)} disabled={busy} />
         <p className="help">Top agents copied unchanged into the next round.</p>
@@ -229,6 +279,7 @@ export function RunSetup({ busy, error, onCreate }: {
         <label htmlFor="setup-concurrency">Max parallel agents</label>
         <input id="setup-concurrency" type="number" min={1} max={64} step={1} value={concurrency} onChange={(e) => setConcurrency(e.target.value)} disabled={busy} />
         <p className="help">How many agents run at once (1–64).</p>
+        </>)}
         <label htmlFor="setup-pricing">Price table (optional)</label>
         <textarea id="setup-pricing" value={pricingText} rows={3} placeholder="mymodel 2.5 10 0.5 2" onChange={(e) => setPricingText(e.target.value)} disabled={busy} />
         <p className="help">One `modelId inPerM outPerM cacheReadPerM cacheWritePerM` per line — used for the spending display.</p>
@@ -244,7 +295,7 @@ export function RunSetup({ busy, error, onCreate }: {
       <button
         disabled={busy || name.trim().length === 0 || goal.trim().length === 0}
         onClick={() => onCreate({
-          name, goal, sandbox, roster, judgeModel, judgeMode, reflectModel,
+          name, goal, workflow, sandbox, roster, judgeModel, judgeMode, reflectModel,
           workspaceRoot, authFile, contextDir, seedStrategiesDir,
           criteria: criteria.trim() === '' ? null : criteria,
           selection: {

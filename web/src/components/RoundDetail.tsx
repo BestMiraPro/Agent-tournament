@@ -182,6 +182,12 @@ export function RoundDetail({ runId, rounds, busy, lastRoundIdx, refreshKey }: {
               </span>
             </p>
             {detail.metaDigest !== null && <Markdown text={detail.metaDigest} />}
+            {detail.team && (
+              <div className="rounddetail__team">
+                <p><strong>Team score: {detail.team.score.toFixed(2)}</strong> <span className="badge">{detail.team.status}</span> <span className="muted">every member&apos;s entry below is this one score</span></p>
+                <Markdown text={detail.team.rationaleMd} />
+              </div>
+            )}
           </div>
           <form className="rounddetail__rejudge" onSubmit={(e) => { e.preventDefault(); void handleRejudge() }}>
             <input
