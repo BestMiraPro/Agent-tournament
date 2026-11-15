@@ -116,6 +116,42 @@ CREATE TABLE IF NOT EXISTS channel_messages (
   UNIQUE(round_id, seq)
 );
 
+-- Collaboration: the sealed snapshot of a round's output/ and CHANNEL.md, captured once at the
+-- round-wide barrier. Text files are stored (bounded); binary and oversized ones only listed.
+CREATE TABLE IF NOT EXISTS round_outputs (
+  round_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error_text TEXT,
+  digest TEXT NOT NULL,
+  sealed INTEGER NOT NULL,
+  hashes_complete INTEGER NOT NULL,
+  file_count INTEGER NOT NULL,
+  total_bytes INTEGER NOT NULL,
+  manifest_json TEXT NOT NULL,
+  channel_md TEXT,
+  channel_sha256 TEXT,
+  contributions_json TEXT NOT NULL DEFAULT '{}',
+  captured_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS round_output_files (
+  round_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  content TEXT NOT NULL,
+  PRIMARY KEY (round_id, path)
+);
+
+-- Collaboration: the one team score per round (mirrored into each member's scores row).
+CREATE TABLE IF NOT EXISTS team_scores (
+  round_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  score REAL NOT NULL,
+  rationale_md TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_genomes_agent ON genomes(agent_id, round_idx);
 CREATE INDEX IF NOT EXISTS idx_scores_round ON scores(round_id, rank);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);

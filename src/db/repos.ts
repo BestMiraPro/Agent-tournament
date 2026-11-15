@@ -34,6 +34,55 @@ export interface ChannelMessageRow {
   observedAt: number
 }
 
+/** One file of a collaboration round's sealed output folder, as captured. */
+export interface TeamFileEntry {
+  path: string
+  bytes: number
+  /** Null when the folder was too large to hash within the team budget. */
+  sha256: string | null
+  /** Not valid text (a NUL or an invalid UTF-8 sequence): listed and hashed, never shown. */
+  binary: boolean
+  /** Whether its text is stored with the snapshot (bounded per file and per round). */
+  stored: boolean
+}
+
+/** Who did what in a collaboration round, from the frozen activity and the channel. */
+export interface TeamContribution {
+  label: string
+  /** Workspace paths this member wrote or edited, as its activity reported them. */
+  files: string[]
+  posts: number
+  toolCalls: number
+}
+
+export interface TeamOutputRow {
+  roundId: string
+  runId: string
+  /** `ok`: something to judge. `no_submission`: output/ was empty. `error`: over the team quota. */
+  status: SubmissionStatus
+  errorText: string | null
+  /** sha256 over the manifest and the channel: the seal the grader's copy is checked against. */
+  digest: string
+  /** Captured after every member was confirmed stopped, so nothing could still be writing. */
+  sealed: boolean
+  hashesComplete: boolean
+  fileCount: number
+  totalBytes: number
+  files: TeamFileEntry[]
+  channelMd: string | null
+  channelSha256: string | null
+  contributions: Record<string, TeamContribution>
+  capturedAt: number
+}
+
+export interface TeamScoreRow {
+  roundId: string
+  runId: string
+  score: number
+  rationaleMd: string
+  status: string
+}
+
 export interface RoundRow {
   id: string
   runId: string
@@ -370,6 +419,64 @@ export function makeRepos(db: Db) {
           id: r.id as number, roundId: r.round_id as string, createdAt: r.created_at as number,
           payload: JSON.parse(r.payload_json),
         }))
+      },
+    },
+
+    /** Collaboration: each round's sealed output folder. Written once, at capture. */
+    teamOutputs: {
+      insert(row: TeamOutputRow, contents: ReadonlyMap<string, string>): void {
+        db.exec('BEGIN')
+        try {
+          db.prepare(
+            'INSERT INTO round_outputs (round_id, run_id, status, error_text, digest, sealed, hashes_complete, file_count, total_bytes, manifest_json, channel_md, channel_sha256, contributions_json, captured_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          ).run(
+            row.roundId, row.runId, row.status, row.errorText, row.digest, row.sealed ? 1 : 0, row.hashesComplete ? 1 : 0,
+            row.fileCount, row.totalBytes, JSON.stringify(row.files), row.channelMd, row.channelSha256,
+            JSON.stringify(row.contributions), row.capturedAt,
+          )
+          const file = db.prepare('INSERT INTO round_output_files (round_id, path, content) VALUES (?,?,?)')
+          for (const [path, content] of contents) file.run(row.roundId, path, content)
+          db.exec('COMMIT')
+        } catch (e) {
+          db.exec('ROLLBACK')
+          throw e
+        }
+      },
+      setContributions(roundId: string, contributions: Record<string, TeamContribution>): void {
+        db.prepare('UPDATE round_outputs SET contributions_json = ? WHERE round_id = ?').run(JSON.stringify(contributions), roundId)
+      },
+      get(roundId: string): TeamOutputRow | null {
+        const r = db.prepare('SELECT * FROM round_outputs WHERE round_id = ?').get(roundId) as any
+        if (!r) return null
+        return {
+          roundId: r.round_id, runId: r.run_id, status: r.status, errorText: r.error_text, digest: r.digest,
+          sealed: r.sealed === 1, hashesComplete: r.hashes_complete === 1, fileCount: r.file_count, totalBytes: r.total_bytes,
+          files: JSON.parse(r.manifest_json), channelMd: r.channel_md, channelSha256: r.channel_sha256,
+          contributions: JSON.parse(r.contributions_json), capturedAt: r.captured_at,
+        }
+      },
+      /** A stored file's text; null when it is not stored (binary, too large) or not in the snapshot. */
+      file(roundId: string, path: string): string | null {
+        const r = db.prepare('SELECT content FROM round_output_files WHERE round_id = ? AND path = ?').get(roundId, path) as any
+        return r ? r.content : null
+      },
+      /** Every stored file of a round, for the grader's copy and a rejudge. */
+      files(roundId: string): { path: string; content: string }[] {
+        const rows = db.prepare('SELECT path, content FROM round_output_files WHERE round_id = ? ORDER BY path').all(roundId) as any[]
+        return rows.map((r) => ({ path: r.path, content: r.content }))
+      },
+    },
+
+    /** Collaboration: one team score per round. */
+    teamScores: {
+      insert(row: TeamScoreRow): void {
+        db.prepare('INSERT INTO team_scores (round_id, run_id, score, rationale_md, status, created_at) VALUES (?,?,?,?,?,?)')
+          .run(row.roundId, row.runId, row.score, row.rationaleMd, row.status, now())
+      },
+      forRound(roundId: string): TeamScoreRow | null {
+        const r = db.prepare('SELECT * FROM team_scores WHERE round_id = ?').get(roundId) as any
+        if (!r) return null
+        return { roundId: r.round_id, runId: r.run_id, score: r.score, rationaleMd: r.rationale_md, status: r.status }
       },
     },
 

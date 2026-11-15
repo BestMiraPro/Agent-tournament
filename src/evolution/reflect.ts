@@ -3,7 +3,7 @@ import { capStrategy } from '../core/genome.js'
 import type { Genome, RunConfig } from '../core/types.js'
 import { parseWithRepair } from '../judge/parse.js'
 import type { Provider } from '../runtime/provider.js'
-import { buildReflectPrompt, type ReflectInput } from './prompts.js'
+import { buildReflectPrompt, buildTeamReflectPrompt, type ReflectInput, type TeamReflectInput } from './prompts.js'
 import { recombineStrategies } from './recombine.js'
 import { REFLECT_JSON_SCHEMA } from './schemas.js'
 
@@ -19,6 +19,11 @@ export type ReflectRequest = Omit<ReflectInput, 'strategyCharCap'> & {
   currentTemperature: number
 }
 
+export type TeamReflectRequest = Omit<TeamReflectInput, 'strategyCharCap'> & {
+  currentModelId: string
+  currentTemperature: number
+}
+
 export type ModelRejectionListener = (e: { agentModel: string; requested: string }) => void
 
 export class Reflector {
@@ -30,8 +35,18 @@ export class Reflector {
   ) {}
 
   async reflect(req: ReflectRequest): Promise<Genome> {
-    const prompt = buildReflectPrompt({ ...req, strategyCharCap: this.cfg.strategyCharCap })
+    return this.rewrite(buildReflectPrompt({ ...req, strategyCharCap: this.cfg.strategyCharCap }), req)
+  }
 
+  /** A collaboration member's rewrite: same model, schema, caps and fallback as `reflect`. */
+  async reflectTeam(req: TeamReflectRequest): Promise<Genome> {
+    return this.rewrite(buildTeamReflectPrompt({ ...req, strategyCharCap: this.cfg.strategyCharCap }), req)
+  }
+
+  private async rewrite(
+    prompt: string,
+    req: { ownStrategy: string; ownNotes: string; currentModelId: string; currentTemperature: number },
+  ): Promise<Genome> {
     const fallback: Genome = {
       strategyMd: req.ownStrategy,
       notesMd: req.ownNotes,
