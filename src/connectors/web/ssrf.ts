@@ -29,7 +29,7 @@ export interface ResolvedAddress {
 export type LookupFn = (hostname: string) => Promise<ResolvedAddress[]>
 
 export const systemLookup: LookupFn = async (hostname) => {
-  const answers = await dnsLookup(hostname, { all: true, verbatim: true })
+  const answers = await dnsLookup(hostname, { all: true, order: 'verbatim' })
   return answers.map((a) => ({ address: a.address, family: a.family === 6 ? 6 : 4 }))
 }
 
