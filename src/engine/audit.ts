@@ -115,6 +115,17 @@ const MAX_DETAIL_BYTES = 2048
 /** OpenCode 1.18.21's wording when a permission rule refused a tool call (seen September 15). */
 const RULE_REFUSAL = 'The user has specified a rule which prevents you from using this specific tool call'
 
+/**
+ * Claude Code 2.1.325's wordings for the same thing: a deny rule, and a call that would have needed
+ * an approval nobody can give (`--permission-prompts=none`). Seen against a fake upstream on
+ * 2026-11-15 (test/fixtures/claude-code-2.1.325/fake-upstream-tools.jsonl).
+ */
+const CLAUDE_CODE_REFUSALS = ['denied by your permission settings', 'Permission for this tool use was denied']
+
+function isRuleRefusal(output: string): boolean {
+  return output.includes(RULE_REFUSAL) || CLAUDE_CODE_REFUSALS.some((w) => output.includes(w))
+}
+
 type Draft = Pick<AuditEvidence, 'sessionId' | 'observedAt' | 'source' | 'kind' | 'summary' | 'outcome' | 'detail'>
 
 interface AgentState {
@@ -363,7 +374,7 @@ export class AuditCollector {
     if (item.status === 'completed' || item.status === 'error') {
       state.openTools.delete(key)
       state.settledTools.add(key)
-      const refused = item.status === 'error' && (item.output ?? '').includes(RULE_REFUSAL)
+      const refused = item.status === 'error' && isRuleRefusal(item.output ?? '')
       this.persist(state, agentId, {
         ...draft,
         ...(refused ? { source: 'policy' as const, outcome: 'denied' as const } : { outcome: item.status === 'completed' ? 'completed' as const : 'failed' as const }),

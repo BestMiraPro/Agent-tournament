@@ -25,6 +25,7 @@ import { RunManager } from './run-manager.js'
 import { disposeRunRecord, RunRegistry } from './runs.js'
 import { EventBroadcaster } from './ws.js'
 import { serveUi } from './static-ui.js'
+import { subscriptionServices } from './subscriptions.js'
 
 export interface DashboardOptions {
   dbPath?: string
@@ -46,6 +47,8 @@ export interface DashboardOptions {
   dockerSandbox?: boolean
   /** How docker runs reach their containers; `bridge` when this app itself runs in a container. */
   dockerReach?: DockerReach
+  /** Where the `claude setup-token` value is kept (0600); `runs/secrets/claude-subscription.json` by default. */
+  claudeTokenFile?: string
 }
 
 /** Why a docker run is refused when `dockerSandbox` is false. */
@@ -124,7 +127,10 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
   // Real-mode composition for spec POSTs. Per-spec values win; anything omitted
   // falls back to the process-level defaults, and the seams are the same ones the
   // CLI uses so local/docker compose identically.
-  const seams = opts.dockerReach === 'bridge' ? bridgeSeams(defaultSeams) : defaultSeams
+  // One set of subscription services for the API and every run, so a token pasted in the
+  // dashboard is what the next run uses.
+  const subscriptions = subscriptionServices({ ...(opts.claudeTokenFile ? { tokenFile: opts.claudeTokenFile } : {}) })
+  const seams = { ...(opts.dockerReach === 'bridge' ? bridgeSeams(defaultSeams) : defaultSeams), subscriptions }
   const composeWith = (spec: RunSpec, o?: { runIdHolder?: RunIdHolder }): Promise<ComposedRun> =>
     opts.dockerSandbox === false && spec.sandbox === 'docker'
       ? Promise.reject(new Error(DOCKER_SANDBOX_OFF))
@@ -171,6 +177,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     activityFor: (runId) => defaultActivity.get(runId)?.snapshot() ?? null,
     hasLiveBudget: (runId) => engine.budgetStatus(runId) !== null,
     capacity: async () => ({ host: await readHostCapacity(), reserved: processLedger.totals() }),
+    subscriptions,
     sweepWith: (cfg, runId, onWarning, workspaceRoot) => {
       // Every registered docker run owns live containers; excluding only the new run
       // would let its sweep destroy a concurrent run mid-tournament.

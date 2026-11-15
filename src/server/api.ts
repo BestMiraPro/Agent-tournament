@@ -23,6 +23,7 @@ import { ActivityCache, type ActivitySnapshot } from './activity.js'
 import { AuditCollector, readRoundAudit } from '../engine/audit.js'
 import { buildJudgingEnvelope, evidenceFromAudit, type JudgeCallRecord } from '../judge/audit.js'
 import type { HostCapacity } from '../runtime/docker/capacity.js'
+import { subscriptionStatus, type SubscriptionServices } from './subscriptions.js'
 
 export interface SpecDefaults {
   workspaceRoot?: string | null
@@ -61,6 +62,8 @@ export interface ApiDeps {
   hasLiveBudget?: (runId: string) => boolean
   /** Docker's capacity reading and what this process has reserved, for setup estimates. */
   capacity?: () => Promise<{ host: HostCapacity; reserved: { memoryBytes: number; cpus: number } }>
+  /** The Claude and ChatGPT subscription logins; absent where the server offers no sign-in. */
+  subscriptions?: SubscriptionServices
 }
 
 /** Bridge callbacks that report upstream stream health as its own event, never as agent state. */
@@ -521,6 +524,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         engine.observe(e)
         emit(e)
       }
+      // Claude Code agents report their own activity; it joins the audit and the live cache the same way.
+      const detachActivity = composed.attachActivity?.(runId, bridgeEmit)
+      if (detachActivity) record.bridges.push({ stop: detachActivity })
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
@@ -605,6 +611,34 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     } catch (e) {
       return reply.code(502).send({ error: e instanceof Error ? e.message : String(e) })
     }
+  })
+
+  // Sign-in state for both subscriptions. Nothing here ever returns, logs or stores a token
+  // anywhere but the 0600 secrets file.
+  app.get('/api/subscriptions', async (_req, reply) => {
+    if (!deps.subscriptions) return reply.code(503).send({ error: 'Subscriptions are not available from this server.' })
+    return subscriptionStatus(deps.subscriptions, deps.specDefaults?.authFile ?? null)
+  })
+
+  app.put('/api/subscriptions/claude', async (req, reply) => {
+    if (!deps.subscriptions) return reply.code(503).send({ error: 'Subscriptions are not available from this server.' })
+    const body = req.body as { token?: unknown } | null
+    if (!body || typeof body.token !== 'string' || body.token.length === 0 || body.token.length > 8192) {
+      return reply.code(400).send({ error: 'Send { "token": "<the value claude setup-token printed>" }.' })
+    }
+    try {
+      await deps.subscriptions.claudeTokens.set(body.token)
+    } catch (e) {
+      // The store's messages are fixed text; they never repeat what was sent.
+      return reply.code(400).send({ error: e instanceof Error ? e.message : 'Could not store the token.' })
+    }
+    return subscriptionStatus(deps.subscriptions, deps.specDefaults?.authFile ?? null)
+  })
+
+  app.delete('/api/subscriptions/claude', async (_req, reply) => {
+    if (!deps.subscriptions) return reply.code(503).send({ error: 'Subscriptions are not available from this server.' })
+    await deps.subscriptions.claudeTokens.clear()
+    return subscriptionStatus(deps.subscriptions, deps.specDefaults?.authFile ?? null)
   })
 
   // Totals only: per-container names belong to whatever else runs on this Docker host.
@@ -1022,6 +1056,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         engine.observe(e)
         emit(e)
       }
+      // Claude Code agents report their own activity; it joins the audit and the live cache the same way.
+      const detachActivity = composed.attachActivity?.(runId, bridgeEmit)
+      if (detachActivity) record.bridges.push({ stop: detachActivity })
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
