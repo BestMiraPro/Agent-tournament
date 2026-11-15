@@ -23,6 +23,7 @@ import { ActivityCache, type ActivitySnapshot } from './activity.js'
 import { AuditCollector, readRoundAudit } from '../engine/audit.js'
 import { buildJudgingEnvelope, evidenceFromAudit, type JudgeCallRecord } from '../judge/audit.js'
 import type { HostCapacity } from '../runtime/docker/capacity.js'
+import { registerConnectorRoutes, type ConnectorRouteDeps } from './connectors-api.js'
 
 export interface SpecDefaults {
   workspaceRoot?: string | null
@@ -61,6 +62,8 @@ export interface ApiDeps {
   hasLiveBudget?: (runId: string) => boolean
   /** Docker's capacity reading and what this process has reserved, for setup estimates. */
   capacity?: () => Promise<{ host: HostCapacity; reserved: { memoryBytes: number; cpus: number } }>
+  /** The Connectors page's routes; absent in harnesses that do not need them. */
+  connectors?: ConnectorRouteDeps
 }
 
 /** Bridge callbacks that report upstream stream health as its own event, never as agent state. */
@@ -400,6 +403,7 @@ function roundDetail(repos: Repos, round: RoundRow) {
 
 export function buildApi(deps: ApiDeps): FastifyInstance {
   const app = Fastify({ logger: false })
+  if (deps.connectors) registerConnectorRoutes(app, deps.connectors)
 
   /**
    * Model discovery, cached 60s on success only.

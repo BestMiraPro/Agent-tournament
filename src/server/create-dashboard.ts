@@ -1,3 +1,4 @@
+import { homedir } from 'node:os'
 import { WebSocketServer } from 'ws'
 import type { FastifyInstance } from 'fastify'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
@@ -182,6 +183,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     activityFor: (runId) => defaultActivity.get(runId)?.snapshot() ?? null,
     hasLiveBudget: (runId) => engine.budgetStatus(runId) !== null,
     capacity: async () => ({ host: await readHostCapacity(), reserved: processLedger.totals() }),
+    connectors: { store: connectorStore, home: homedir(), cwd: process.cwd() },
     sweepWith: (cfg, runId, onWarning, workspaceRoot) => {
       // Every registered docker run owns live containers; excluding only the new run
       // would let its sweep destroy a concurrent run mid-tournament.
