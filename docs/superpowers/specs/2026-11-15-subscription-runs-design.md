@@ -1,5 +1,7 @@
 # Subscription runs: Claude Pro/Max and ChatGPT Plus/Pro
 
+Verified end to end without a real model or token (2026-11-15): `ClaudeCodeAgentRunner` → `docker exec` into the agent image (uid 1000, read-only root) → Claude Code 2.1.325 → this repo's provider relay → a scripted fake Anthropic upstream. The upstream saw only `/v1/messages?beta=true` with the swapped-in setup token, the agent wrote `SUBMISSION.md`, and quiesce confirmed the process group gone.
+
 Date: 2026-11-15. Branch: `phase8-subscription-runs`.
 
 Agents, the judge and the reflector can run on the owner's Claude and ChatGPT subscriptions instead of
@@ -155,7 +157,7 @@ OpenCode 1.18.21 (read from the binary in the agent image):
   `runs/secrets/claude-subscription.json` with mode 0600 (directory 0700). It is never written to
   SQLite, exports, logs, events or argv: locally it goes to the CLI on fd 3; in a shared Docker
   container through `docker exec -e CLAUDE_CODE_OAUTH_TOKEN` (the value comes from the docker
-  client's environment, not its argv). Token mode uses a private `CLAUDE_CONFIG_DIR` per run.
+  client's environment, not its argv). Locally, token mode uses a private `CLAUDE_CONFIG_DIR` per run in the OS temp folder (outside the workspace root, so no runtime-folder sweep can remove it mid-run); in a container the CLI uses the container's own home, recycled every round.
 - `host` mode: the machine's own Claude Code login (`claude auth login`), used when no token is
   stored and `claude auth status` reports `loggedIn` with `authMethod: claude.ai`. Local runs only:
   a container has no access to the host's keychain.
