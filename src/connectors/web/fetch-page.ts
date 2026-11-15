@@ -3,7 +3,7 @@ import { request as httpsRequest } from 'node:https'
 import { pipeline, Readable } from 'node:stream'
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib'
 import { htmlToText } from './html-to-text.js'
-import { BlockedTargetError, parseTargetUrl, pinnedLookup, resolvePublicAddress, systemLookup, type LookupFn } from './ssrf.js'
+import { parseTargetUrl, pinnedLookup, resolvePublicAddress, systemLookup, type LookupFn } from './ssrf.js'
 
 /**
  * `web_fetch`: one page, read for an agent. Every hop is validated, resolved once, checked and
@@ -252,4 +252,3 @@ export async function fetchPage(rawUrl: string, deps: FetchDeps = {}, limits: Pa
   }
 }
 
-export { BlockedTargetError }
