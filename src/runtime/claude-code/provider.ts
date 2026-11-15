@@ -18,7 +18,7 @@ export interface ClaudeCodeProviderOptions {
   launcher: ClaudeLauncher
   credentials: () => Promise<ClaudeCredentials>
   /** A private CLI config folder (token mode), or null for the host's. */
-  configDir?: () => Promise<string | null>
+  configDir?: (credentials: ClaudeCredentials) => Promise<string | null>
   /** Working directory of every call: an empty folder of the run's. */
   directory: string
   /** The run's context folder, readable by grading calls only. */
@@ -58,7 +58,7 @@ export class ClaudeCodeProvider implements Provider {
     const blocked = this.gate.blocked()
     if (blocked) fail(blocked.message)
     const credentials = await this.opts.credentials()
-    const configDir = (await this.opts.configDir?.()) ?? null
+    const configDir = (await this.opts.configDir?.(credentials)) ?? null
     const readable = GRADING.includes(req.purpose) && this.opts.contextDir ? [this.opts.contextDir] : []
     const args = providerArgs({
       model, systemPrompt: PROVIDER_SYSTEM_PROMPT, readableDirs: readable,

@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import type { Provider } from '../runtime/provider.js'
@@ -57,6 +57,19 @@ import {
 import { CONTAINER_CONTEXT_PATH, removeContainer } from '../runtime/docker/cli.js'
 import { sweepOrphanContainers, type SweepOptions } from '../runtime/docker/sweep.js'
 import { DockerSandbox } from '../runtime/docker/sandbox.js'
+import type { EventSink } from '../engine/events.js'
+import { ClaudeCodeAgentRunner, type ClaudeActivity } from '../runtime/claude-code/agent-runner.js'
+import { folderRule } from '../runtime/claude-code/argv.js'
+import { resolveClaudeCredentials } from '../runtime/claude-code/credentials.js'
+import type { ClaudeCredentials } from '../runtime/claude-code/env.js'
+import { CLAUDE_SUBSCRIPTION_PROVIDER, claudeModelOf, isClaudeAlias, isClaudeSubscriptionModel } from '../runtime/claude-code/model-id.js'
+import { dockerExecLauncher, localLauncher } from '../runtime/claude-code/process.js'
+import { ClaudeCodeProvider } from '../runtime/claude-code/provider.js'
+import { chatGptLoginOf } from '../runtime/chatgpt-oauth.js'
+import { DispatchingAgentRunner, RoutingProvider } from '../runtime/dispatch.js'
+import type { AgentFailure } from '../core/failure.js'
+import type { AgentHandle } from '../runtime/sandbox.js'
+import { subscriptionServices, type SubscriptionServices } from './subscriptions.js'
 import type { RunSpec } from './run-spec.js'
 
 export interface ComposeSeams {
@@ -102,6 +115,8 @@ export interface ComposeSeams {
   readTextFile: (path: string) => Promise<string>
   createShardNetworkFn: (runId: string, shardIndex: number) => Promise<string>
   removeShardNetworkFn: (name: string, onWarning: (message: string) => void) => Promise<boolean>
+  /** The Claude and ChatGPT subscription logins: token store, CLI, host login, ChatGPT refresh. */
+  subscriptions: SubscriptionServices
 }
 
 export type PathKind = 'file' | 'directory' | 'missing'
@@ -144,6 +159,7 @@ export const defaultSeams: ComposeSeams = {
   readTextFile: (path) => readFile(path, 'utf8'),
   createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
   removeShardNetworkFn: (name, onWarning) => removeShardNetwork(name, onWarning),
+  subscriptions: subscriptionServices(),
 }
 
 /**
@@ -225,14 +241,81 @@ async function planRelay(spec: RunSpec, config: RunConfig, s: ComposeSeams): Pro
     throw new Error(`The host model catalogue ${modelsFile} is not valid JSON; let OpenCode refresh it, or choose shared isolation.`)
   }
   const providers = [...new Set(config.roster.map((r) => providerOf(r.modelId)))]
-  const { upstreams, unsupported } = relayUpstreamsFromAuth(await read(spec.authFile, 'credentials file'), catalog, providers)
+  // The CLI resolves an alias to a full id before its request, so the relay could not match it.
+  const aliases = [...new Set(config.roster.map((r) => claudeModelOf(r.modelId)).filter((m): m is string => m !== null && isClaudeAlias(m)))]
+  if (aliases.length > 0) {
+    throw new Error(
+      `Protected isolation needs full Claude model ids, not aliases (${aliases.map((a) => `claude-subscription/${a}`).join(', ')}): ` +
+        'the relay checks each request against the roster, and Claude Code sends the resolved id. Use e.g. claude-subscription/claude-opus-5-5.',
+    )
+  }
+  const claudeToken = providers.includes(CLAUDE_SUBSCRIPTION_PROVIDER) ? await s.subscriptions.claudeTokens.read() : null
+  const { upstreams, unsupported } = relayUpstreamsFromAuth(await read(spec.authFile, 'credentials file'), catalog, providers, {
+    claudeToken,
+    chatgpt: s.subscriptions.chatGptLogin(spec.authFile),
+  })
   if (unsupported.length > 0) {
     throw new Error(
       `Protected isolation routes model calls through the relay, which cannot carry: ${unsupported.map((u) => u.reason).join('; ')}. ` +
         'Fix those, or choose shared isolation, where workers use the credentials file directly.',
     )
   }
-  return { upstreams, providers, catalogJson }
+  return {
+    upstreams,
+    // Claude Code talks to the relay itself; only OpenCode's providers go in the worker's config.
+    providers: providers.filter((p) => p !== CLAUDE_SUBSCRIPTION_PROVIDER),
+    catalogJson: upstreams.some((u) => u.kind === 'chatgpt') ? withFreeProvider(catalog, 'openai') : catalogJson,
+  }
+}
+
+/**
+ * The catalogue with one provider's prices at zero. A protected worker runs `openai` as a key behind
+ * the relay, so without this it would price ChatGPT subscription calls at API rates; OpenCode's own
+ * ChatGPT plugin zeroes them the same way.
+ */
+export function withFreeProvider(catalog: Record<string, CatalogProvider>, providerId: string): string {
+  const copy = JSON.parse(JSON.stringify(catalog)) as Record<string, { models?: Record<string, { cost?: Record<string, unknown> }> }>
+  for (const model of Object.values(copy[providerId]?.models ?? {})) {
+    if (model && typeof model === 'object') model.cost = { input: 0, output: 0, cache_read: 0, cache_write: 0 }
+  }
+  return JSON.stringify(copy)
+}
+
+/**
+ * What Claude subscription agents and grading calls need before anything starts: valid model ids,
+ * the CLI on this host wherever the host runs it, credentials the runtime can use, and a context
+ * folder a permission rule can hold. Refused with what to do, never discovered mid-round.
+ */
+async function preflightClaude(spec: RunSpec, config: RunConfig, s: ComposeSeams): Promise<void> {
+  const workers = [...new Set(config.roster.map((r) => r.modelId).filter(isClaudeSubscriptionModel))]
+  const graders = [...new Set([config.judge.modelId, config.reflect.modelId].filter(isClaudeSubscriptionModel))]
+  if (workers.length === 0 && graders.length === 0) return
+  const invalid = [...workers, ...graders].filter((m) => claudeModelOf(m) === null)
+  if (invalid.length > 0) {
+    throw new Error(`Not valid Claude subscription model ids: ${invalid.join(', ')}. Use claude-subscription/<model>, e.g. claude-subscription/claude-opus-5-5.`)
+  }
+  const onHost = graders.length > 0 || (workers.length > 0 && spec.sandbox !== 'docker')
+  if (onHost && s.subscriptions.findClaudeCli() === null) {
+    throw new Error(
+      `The Claude Code CLI is not installed on this machine, and ${[...(spec.sandbox !== 'docker' ? workers : []), ...graders].join(', ')} run through it here. ` +
+        'Install it (https://claude.com/claude-code) or set CLAUDE_CLI_PATH.',
+    )
+  }
+  const tokens = s.subscriptions.claudeTokens
+  if (workers.length > 0 && spec.sandbox === 'docker' && !(await tokens.has())) {
+    throw new Error(
+      'Claude subscription agents in Docker need a `claude setup-token` value: run `claude setup-token` and paste the token under Subscriptions. ' +
+        "The machine's own Claude login is not available inside containers.",
+    )
+  }
+  if (onHost) await resolveClaudeCredentials({ store: tokens, hostLogin: s.subscriptions.claudeHostLogin, allowHost: true })
+  if (workers.length > 0 && spec.contextDir && spec.sandbox !== 'docker') {
+    try {
+      folderRule(spec.contextDir)
+    } catch {
+      throw new Error(`Context folder ${spec.contextDir} has parentheses in its path, which a Claude Code permission rule cannot hold; move or rename it.`)
+    }
+  }
 }
 
 export interface ShardServer {
@@ -276,6 +359,12 @@ export interface ComposedRun {
   placement?: () => Placement[]
   sessionMap: Map<string, string>
   sessionHook: (agentId: string, sessionId: string) => void
+  /**
+   * Where activity the runners report themselves goes: Claude Code agents stream it on stdout
+   * rather than through an OpenCode server, so it reaches the dashboard and the audit through the
+   * sink attached here, beside the OpenCode bridges. Returns a detach function.
+   */
+  attachActivity?: (runId: string, emit: EventSink) => () => void
   warnings: string[]
   capacity: { committed: number; maxContainers: number } | null
   /**
@@ -447,8 +536,48 @@ export async function composeRun(
     config.contextDir = contextDir
     assertContextFolder(contextDir, workspaceRoot, s.inspectPath)
   }
+  await preflightClaude(spec, config, s)
   // Host reads only, before capacity or any server: a protected run the relay cannot carry is refused now.
   const relayPlan = spec.sandbox === 'docker' && config.isolation === 'protected' ? await planRelay(spec, config, s) : null
+  if (spec.sandbox === 'docker' && config.isolation === 'shared' && spec.authFile && config.roster.some((r) => providerOf(r.modelId) === 'openai')) {
+    const chat = await s.readTextFile(spec.authFile).then((t) => chatGptLoginOf(JSON.parse(t)), () => null)
+    if (chat) {
+      onWarning(
+        'Shared containers mount the credentials file read-only, so OpenCode inside them cannot save a refreshed ChatGPT token: ' +
+          `if the ChatGPT access token expires during a round (it expires ${chat.expires ? new Date(chat.expires).toISOString() : 'at an unknown time'}), ` +
+          'its calls fail. Protected isolation refreshes it on the host.',
+      )
+    }
+  }
+
+  // Activity Claude Code agents report on their own stdout, sent where `attachActivity` points.
+  let activitySink: { runId: string; emit: EventSink } | null = null
+  const activityHook = (agentId: string, activity: ClaudeActivity) => {
+    const target = activitySink
+    if (!target) return
+    target.emit({ type: 'agent.activity', runId: target.runId, agentId, kind: activity.kind, detail: activity.detail, item: activity.item })
+  }
+  const attachActivity = (runId: string, emit: EventSink) => {
+    const entry = { runId, emit }
+    activitySink = entry
+    return () => { if (activitySink === entry) activitySink = null }
+  }
+  // Token mode runs the CLI with a private config folder: no host settings, history or login are
+  // used or touched. Outside the workspace root, so no sweep of runtime folders can remove it mid-run.
+  let claudeConfigRoot: string | null = null
+  const claudeConfigDir = async (credentials: ClaudeCredentials, name: string): Promise<string | null> => {
+    if (credentials.mode !== 'token') return null
+    claudeConfigRoot ??= await mkdtemp(join(tmpdir(), 'arena-claude-'))
+    const dir = join(claudeConfigRoot, name.replace(/[^A-Za-z0-9._-]/g, '_'))
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    return dir
+  }
+  const removeClaudeConfig = async () => {
+    if (claudeConfigRoot) await rm(claudeConfigRoot, { recursive: true, force: true }).catch(() => {})
+    claudeConfigRoot = null
+  }
+  const claudeCredentials = (allowHost: boolean) => () =>
+    resolveClaudeCredentials({ store: s.subscriptions.claudeTokens, hostLogin: s.subscriptions.claudeHostLogin, allowHost })
   // Each protected shard also runs a gateway, and its ceilings are part of what the run reserves.
   const companion = relayPlan ? { extraMemoryBytes: GATEWAY_MEMORY_BYTES, extraCpus: GATEWAY_CPUS } : {}
   // Per composition: the live run id does not exist until after this returns.
@@ -480,9 +609,21 @@ export async function composeRun(
   // Set once this run holds a relay grant; revoked first on every way out.
   let revokeRelay = (): void => {}
   try {
-    const provider = new OpenCodeProvider(server.client, workspaceRoot, {
-      timeoutMs: config.agentTimeoutMs,
-      graderDirectory,
+    const provider = new RoutingProvider({
+      other: new OpenCodeProvider(server.client, workspaceRoot, {
+        timeoutMs: config.agentTimeoutMs,
+        graderDirectory,
+      }),
+      // Grading and reflection on claude-subscription models run on this host, never in a container.
+      claude: new ClaudeCodeProvider({
+        launcher: localLauncher({ cliPath: () => s.subscriptions.findClaudeCli() }),
+        credentials: claudeCredentials(true),
+        configDir: (c) => claudeConfigDir(c, 'provider'),
+        directory: graderDirectory,
+        contextDir: spec.contextDir ?? null,
+        timeoutMs: config.agentTimeoutMs,
+        limitGate: s.subscriptions.claudeLimitGate,
+      }),
     })
     // validateRosterModels only throws on a fatal outcome (judge/reflect unusable,
     // every worker unusable); partial worker failures come back through onWarning,
@@ -598,7 +739,8 @@ export async function composeRun(
         try {
           const catalog = await readRuntimeCatalog(s.createShardClient(baseUrl, 10_000))
           shardCatalogs.set(baseUrl, { shardIndex, catalog })
-          const missing = missingModels(catalog, config.roster.map((r) => r.modelId))
+          // Claude subscription agents run through Claude Code, not this OpenCode catalogue.
+          const missing = missingModels(catalog, config.roster.map((r) => r.modelId).filter((m) => !isClaudeSubscriptionModel(m)))
           const runtime = `OpenCode ${catalog.version ?? 'version unknown'}`
           const noCredentials = missing.filter((m) => !hasProvider(catalog, providerOf(m)))
           const notListed = missing.filter((m) => hasProvider(catalog, providerOf(m)))
@@ -727,31 +869,51 @@ export async function composeRun(
       })
       const resolveClient = makeClientResolver(sandbox, server.client, (baseUrl) =>
         s.createShardClient(baseUrl, CONTROL_REQUEST_TIMEOUT_MS))
-      const runner = new OpenCodeAgentRunner(
+      // Only the daemon's own record counts as evidence of an OOM kill. Without it the
+      // failure stays what the runner saw; CPU throttling has no such record here and is
+      // never inferred.
+      const resourceFailure = async (handle: AgentHandle): Promise<AgentFailure | null> => {
+        const name = sandbox.containerNameFor(handle.agentId)
+        if (!name) return null
+        const state = await s.inspectContainer(name)
+        if (!state?.oomKilled) return null
+        return {
+          code: 'CONTAINER_OOM',
+          message:
+            `Container ${name} was stopped for exceeding its ${config.containerMemory} memory limit; ` +
+            'this is a resource limit, not a model failure. Raise Memory per container, or give each agent less to hold in memory.',
+        }
+      }
+      // Termination of a retained invocation resolves against the invocation's
+      // original container ID — never the current plan's reusable name.
+      const runtimeState = (handle: AgentHandle) => s.runtimeStateOf(handle.runtimeId ?? '')
+      // Claude subscription agents run the image's Claude Code CLI in their own shard. Protected:
+      // through the relay with the run token. Shared: with the setup token, which `docker exec`
+      // takes from its own environment, never its command line.
+      const claudeRunner = new ClaudeCodeAgentRunner(sandbox, {
+        launcher: dockerExecLauncher({ containerFor: (handle) => sandbox.containerNameFor(handle.agentId) }),
+        credentials: relayPlan
+          ? async () => ({ mode: 'relay', baseUrl: `http://${GATEWAY_ALIAS}:${GATEWAY_RELAY_PORT}/${CLAUDE_SUBSCRIPTION_PROVIDER}`, token: relayToken! })
+          : claudeCredentials(false),
+        tokenTransport: 'env',
+        readableDirs: [...(spec.contextDir ? [CONTAINER_CONTEXT_PATH] : []), TOOLS_MOUNT],
+        contextPath: spec.contextDir ? CONTAINER_CONTEXT_PATH : null,
+        toolsPath: `${TOOLS_MOUNT}/TOOLS.md`,
+        onSessionCreated: sessionHook,
+        onActivity: activityHook,
+        limitGate: s.subscriptions.claudeLimitGate,
+        resourceFailure,
+        runtimeState,
+      })
+      const openCodeRunner = new OpenCodeAgentRunner(
         resolveClient,
         sandbox,
         {
           onSessionCreated: sessionHook,
           contextPath: spec.contextDir ? CONTAINER_CONTEXT_PATH : null,
           toolsPath: `${TOOLS_MOUNT}/TOOLS.md`,
-          // Only the daemon's own record counts as evidence of an OOM kill. Without it the
-          // failure stays what the runner saw; CPU throttling has no such record here and is
-          // never inferred.
-          resourceFailure: async (handle) => {
-            const name = sandbox.containerNameFor(handle.agentId)
-            if (!name) return null
-            const state = await s.inspectContainer(name)
-            if (!state?.oomKilled) return null
-            return {
-              code: 'CONTAINER_OOM',
-              message:
-                `Container ${name} was stopped for exceeding its ${config.containerMemory} memory limit; ` +
-                'this is a resource limit, not a model failure. Raise Memory per container, or give each agent less to hold in memory.',
-            }
-          },
-          // Termination of a retained invocation resolves against the invocation's
-          // original container ID — never the current plan's reusable name.
-          runtimeState: (handle) => s.runtimeStateOf(handle.runtimeId ?? ''),
+          resourceFailure,
+          runtimeState,
           // Per agent rather than per roster entry: agents added or bred mid-run carry
           // models the roster check at shard start never saw.
           modelUnavailable: (handle, modelId) => {
@@ -764,6 +926,7 @@ export async function composeRun(
           },
         },
       )
+      const runner = new DispatchingAgentRunner({ claude: claudeRunner, other: openCodeRunner })
       // The in-flight per-round recycling, joined by repeated or concurrent calls.
       let releaseInFlight: Promise<void> | null = null
       /**
@@ -833,7 +996,7 @@ export async function composeRun(
         serverHandle: server, shardServers,
         onShardServer,
         toolchainId,
-        sessionMap, sessionHook, warnings,
+        sessionMap, sessionHook, attachActivity, warnings,
         capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
         releasePopulation,
         cleanup: async () => {
@@ -846,25 +1009,41 @@ export async function composeRun(
           }
           await removeToolManifests()
           await server.stop().catch(() => {})
+          await removeClaudeConfig()
           s.ledger.release(reservationId)
         },
       }
     }
 
     const sandbox = new LocalSandbox(workspaceRoot)
+    const claudeRunner = new ClaudeCodeAgentRunner(sandbox, {
+      launcher: localLauncher({ cliPath: () => s.subscriptions.findClaudeCli() }),
+      credentials: claudeCredentials(true),
+      tokenTransport: 'fd',
+      configDirFor: (handle, credentials) => claudeConfigDir(credentials, handle.agentId),
+      readableDirs: spec.contextDir ? [spec.contextDir] : [],
+      contextPath: spec.contextDir,
+      onSessionCreated: sessionHook,
+      onActivity: activityHook,
+      limitGate: s.subscriptions.claudeLimitGate,
+    })
     return {
       config, sandbox, provider,
-      runner: new OpenCodeAgentRunner(server.client, sandbox, {
-        onSessionCreated: sessionHook,
-        contextPath: spec.contextDir,
+      runner: new DispatchingAgentRunner({
+        claude: claudeRunner,
+        other: new OpenCodeAgentRunner(server.client, sandbox, {
+          onSessionCreated: sessionHook,
+          contextPath: spec.contextDir,
+        }),
       }),
       planFor: null,
       serverHandle: server,
       shardServers: [{ baseUrl: '' }],
-      sessionMap, sessionHook, warnings,
+      sessionMap, sessionHook, attachActivity, warnings,
       capacity: null,
       cleanup: async () => {
         await server.stop().catch(() => {})
+        await removeClaudeConfig()
       },
     }
   } catch (e) {
@@ -872,6 +1051,7 @@ export async function composeRun(
     // process: stop it, then propagate so the caller can refuse the run.
     revokeRelay()
     await server.stop().catch(() => {})
+    await removeClaudeConfig()
     s.ledger.release(reservationId)
     throw e
   }

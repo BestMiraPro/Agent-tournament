@@ -27,7 +27,7 @@ export interface ClaudeCodeRunnerOptions {
   /** `fd` for host processes; `env` for `docker exec`. */
   tokenTransport: 'fd' | 'env'
   /** A private CLI config folder for the attempt (token and relay modes), or null for the host's. */
-  configDirFor?: (handle: AgentHandle) => Promise<string | null> | string | null
+  configDirFor?: (handle: AgentHandle, credentials: ClaudeCredentials) => Promise<string | null> | string | null
   /** Folders the agent may read but not change, as the CLI sees them. */
   readableDirs?: readonly string[]
   /** As `AgentRunnerOptions.contextPath` / `toolsPath`: named in the GOAL prompt. */
@@ -148,7 +148,7 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
       return refuse({ code: CLAUDE_FAILURE_CODES.authExpired, message: (e as Error).message.slice(0, 300) })
     }
     try {
-      configDir = (await this.options.configDirFor?.(handle)) ?? null
+      configDir = (await this.options.configDirFor?.(handle, credentials)) ?? null
     } catch (e) {
       return refuse(failureFromText(`Could not prepare the Claude config folder: ${(e as Error).message}`, CLAUDE_FAILURE_CODES.error))
     }
