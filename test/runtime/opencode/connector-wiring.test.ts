@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import { serializeCompetitorProfile } from '../../../src/core/genome.js'
 import { MockSandbox } from '../../../src/runtime/mock-sandbox.js'
-import { OpenCodeAgentRunner } from '../../../src/runtime/opencode/agent-runner.js'
+import { MCP_CONNECT_ATTEMPTS, OpenCodeAgentRunner } from '../../../src/runtime/opencode/agent-runner.js'
 import { opencodeMcpConfig, OPENCODE_MCP_TIMEOUT_MS, PROJECT_CONFIG_FILE } from '../../../src/runtime/opencode/mcp-config.js'
 import { buildToolManifest, renderToolsMarkdown, type ImageInventory } from '../../../src/runtime/tool-manifest.js'
 import type { PromptResponse } from '../../../src/runtime/opencode/client.js'
@@ -45,6 +45,52 @@ describe('the runner writes the agent\'s project config before its session start
     }
     await new OpenCodeAgentRunner(client as never, sb, { projectConfig: (handle) => `config for ${handle.agentId}` }).run(h, ctx)
     expect(order).toEqual(['session:config for a1'])
+  })
+
+  test('a server whose first connect failed is connected again before the session starts', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    const order: string[] = []
+    const statuses = [{ arena: { status: 'failed', error: 'Failed to get tools' }, gh: { status: 'connected' } }, { arena: { status: 'connected' }, gh: { status: 'connected' } }]
+    const client = {
+      async mcpStatus(dir: string) { order.push(`status:${dir === h.workspacePath}`); return statuses.shift() },
+      async mcpConnect(name: string) { order.push(`connect:${name}`) },
+      async createSession() { order.push('session'); return { id: 'ses_1' } },
+      async prompt() { return ok },
+      async abort() {},
+    }
+    await new OpenCodeAgentRunner(client as never, sb, { projectConfig: () => '{}' }).run(h, ctx)
+    expect(order).toEqual(['status:true', 'connect:arena', 'status:true', 'session'])
+  })
+
+  test('reconnects stop after a bounded number of tries, and a status read that fails does not stop the agent', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    let connects = 0
+    let sessions = 0
+    const stuck = {
+      async mcpStatus() { return { arena: { status: 'failed' } } },
+      async mcpConnect() { connects++ },
+      async createSession() { sessions++; return { id: 'ses_1' } },
+      async prompt() { return ok },
+      async abort() {},
+    }
+    await new OpenCodeAgentRunner(stuck as never, sb, { projectConfig: () => '{}' }).run(h, ctx)
+    expect(connects).toBe(MCP_CONNECT_ATTEMPTS)
+    expect(sessions).toBe(1)
+
+    const broken = { ...stuck, async mcpStatus() { throw new Error('ECONNRESET') } }
+    await new OpenCodeAgentRunner(broken as never, sb, { projectConfig: () => '{}' }).run(h, ctx)
+    expect(sessions).toBe(2)
+  })
+
+  test('without connectors the MCP status is never read', async () => {
+    const sb = new MockSandbox()
+    const h = await sb.provision('a1', {})
+    let reads = 0
+    const client = { async mcpStatus() { reads++; return {} }, async createSession() { return { id: 's' } }, async prompt() { return ok }, async abort() {} }
+    await new OpenCodeAgentRunner(client as never, sb).run(h, ctx)
+    expect(reads).toBe(0)
   })
 
   test('a config that cannot be built fails the agent before any session', async () => {

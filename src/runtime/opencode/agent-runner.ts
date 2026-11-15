@@ -7,7 +7,7 @@ import type { AgentHandle, Sandbox } from '../sandbox.js'
 import { buildTeamPrompt, buildTeamSteeringPrompt } from '../team-prompt.js'
 import { OpenCodeTimeoutError, type OpenCodeClient } from './client.js'
 import { splitModelId } from './model-id.js'
-import { PROJECT_CONFIG_FILE } from './mcp-config.js'
+import { OPENCODE_MCP_TIMEOUT_MS, PROJECT_CONFIG_FILE } from './mcp-config.js'
 
 export const SUBMISSION_FILE = 'SUBMISSION.md'
 
@@ -341,8 +341,9 @@ export class OpenCodeAgentRunner implements AgentRunner {
       return { status: 'error', errorText: failure.message, failure, ...zero, durationMs: Date.now() - started }
     }
 
+    let projectConfig: string | null = null
     try {
-      const projectConfig = this.options.projectConfig?.(handle) ?? null
+      projectConfig = this.options.projectConfig?.(handle) ?? null
       if (projectConfig !== null) await this.sandbox.writeFile(handle, PROJECT_CONFIG_FILE, projectConfig)
     } catch (e) {
       // Nothing is dispatched yet, so the zero usage below is observed, not assumed.
@@ -378,6 +379,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
     this.live.set(ctx.agentId, tracked)
 
     try {
+      if (projectConfig !== null) await connectMcpServers(client, handle.workspacePath)
       const session = await client.createSession(handle.workspacePath, `agent-${ctx.agentId}`)
       tracked.sessionId = session.id
       try {
@@ -535,6 +537,31 @@ function workspaceKey(directory: string): string {
 /** Docker's short-ID convention for naming a container in a message. */
 function shortRuntimeId(id: string): string {
   return id.length > 12 ? id.slice(0, 12) : id
+}
+
+/** How many times a folder's MCP servers are checked, and the failed ones connected again, before the session starts. */
+export const MCP_CONNECT_ATTEMPTS = 3
+
+/**
+ * OpenCode connects a folder's MCP servers once, when the folder's instance starts, and never
+ * retries. A tool listing that fails then leaves the agent without its connector and web tools for
+ * the whole session (2 of 20 fresh connects while agents were working, opencode 1.18.21, 15
+ * November 2026). Reading the status waits for that first attempt; each server reported failed is
+ * connected again. Best effort: an agent whose tools stay unavailable still runs.
+ */
+async function connectMcpServers(client: OpenCodeClient, directory: string): Promise<void> {
+  // Each request can wait out one MCP connect (OpenCode's own per-server timeout), plus margin.
+  const timeoutMs = OPENCODE_MCP_TIMEOUT_MS + 10_000
+  try {
+    for (let attempt = 0; attempt < MCP_CONNECT_ATTEMPTS; attempt++) {
+      const status = await client.mcpStatus(directory, timeoutMs)
+      const failed = Object.entries(status).filter(([, s]) => s?.status === 'failed').map(([name]) => name)
+      if (failed.length === 0) return
+      for (const name of failed) await client.mcpConnect(name, directory, timeoutMs)
+    }
+  } catch {
+    /* a status or connect request that fails must not stop the agent; it runs without those tools */
+  }
 }
 
 /** Total grace for confirmed termination, including any abort request time. */
