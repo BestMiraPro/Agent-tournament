@@ -106,7 +106,8 @@ describe('CLI web access', () => {
       toolBridge: async () => ({ bridge, port: 1, host: '127.0.0.1' }),
     })
     expect(composed.onConnectorEvent).toBeTypeOf('function')
-    const options = (composed.runner as unknown as { options: { projectConfig: (h: { agentId: string }) => string } }).options
+    const opencode = (composed.runner as unknown as { runnerFor?: (m: string) => unknown }).runnerFor?.('w/m') ?? composed.runner
+    const options = (opencode as { options: { projectConfig: (h: { agentId: string }) => string } }).options
     const token = (JSON.parse(options.projectConfig({ agentId: 'agent-1' })) as { mcp: { arena: { headers: { Authorization: string } } } })
       .mcp.arena.headers.Authorization.replace(/^Bearer /, '')
     expect(bridge.authenticate(token)).not.toBeNull()

@@ -142,7 +142,7 @@ export class Judge {
 
   /** What actually graded: the configured model and the runtime that answered, for the record. */
   evaluator(): { modelId: string; runtime: string } {
-    return { modelId: this.cfg.modelId, runtime: this.provider.describe?.() ?? 'unknown' }
+    return { modelId: this.cfg.modelId, runtime: this.provider.describe?.(this.cfg.modelId) ?? 'unknown' }
   }
 
   async resolveCriteria(

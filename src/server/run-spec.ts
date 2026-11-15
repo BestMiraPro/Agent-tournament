@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { DEFAULT_CONFIG, type RunConnector } from '../core/types.js'
 import { assertConnectorId } from '../connectors/types.js'
 import { MIN_CONTAINER_MEMORY, MIN_CONTAINER_MEMORY_BYTES, parseMemoryLimit } from '../core/memory.js'
+import { claudeModelOf, isClaudeSubscriptionModel } from '../runtime/claude-code/model-id.js'
 
 const rosterEntry = z.object({
   modelId: z.string().min(1),
@@ -123,6 +124,12 @@ export interface RunSpec {
  */
 export function parseRunSpec(input: unknown): RunSpec {
   const p = schema.parse(input)
+  // A claude-subscription model reaches a command line, so a malformed one is refused here, not at run time.
+  for (const modelId of [...p.roster.map((r) => r.modelId), p.judge.modelId, p.reflect.modelId]) {
+    if (modelId !== undefined && isClaudeSubscriptionModel(modelId) && claudeModelOf(modelId) === null) {
+      throw new Error(`${JSON.stringify(modelId)} is not a valid Claude subscription model id: use claude-subscription/<model>, e.g. claude-subscription/claude-opus-5-5`)
+    }
+  }
   if (p.sandbox === 'docker' && !p.workspaceRoot) {
     throw new Error('docker sandbox requires workspaceRoot')
   }

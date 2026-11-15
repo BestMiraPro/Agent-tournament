@@ -108,6 +108,46 @@ Spawns an opencode server (60s success-only cache) to discover models.
 Read from the app's keys (environment, else the repository `.env`) on every request; never returns a key.
 - `200` `{ primary: { id: "langsearch", name: "LangSearch", configured: boolean }, fallback: { id: "exa", name: "Exa", mode: "keyed" | "keyless" } }`
 
+Claude subscription models (`claude-subscription/<model>`) are not OpenCode models and are not listed here; `GET /api/subscriptions` lists them.
+
+## Subscriptions
+
+None of these ever returns, logs or stores a token anywhere but the 0600 secrets file (`runs/secrets/claude-subscription.json` by default).
+
+### `GET /api/subscriptions` — sign-in state
+
+- `200`
+```json
+{
+  "claude": {
+    "cli": { "found": true, "version": "2.1.325 (Claude Code)" },
+    "tokenSet": false,                 // a `claude setup-token` value is stored
+    "hostLogin": true,                 // this machine's Claude Code is signed in to a subscription
+    "mode": "host",                    // what runs use: "token" | "host" | null
+    "usage": null,                     // last rate-limit reading: { status, rateLimitType, resetsAt, utilization }
+    "models": ["claude-subscription/claude-opus-5-5", "..."]
+  },
+  "chatgpt": {
+    "credentialsFile": "/home/me/.local/share/opencode/auth.json",
+    "signedIn": true,                  // an `openai` ChatGPT Plus/Pro login is in the file
+    "expired": false,                  // its access token has expired (refreshed on the next call)
+    "expiresAt": 1800000000000,
+    "modelPrefix": "openai/"
+  }
+}
+```
+- `503` — the server offers no subscription sign-in.
+
+### `PUT /api/subscriptions/claude` — store the Claude setup token
+
+Body: `{ "token": "<what claude setup-token printed>" }` (line breaks and indentation from a wrapped terminal are removed).
+- `200` — the new status, as above.
+- `400` — not a token; the message never repeats what was sent.
+
+### `DELETE /api/subscriptions/claude` — remove it
+
+- `200` — the new status; runs fall back to the host login, if any.
+
 ## Rounds
 
 ### `POST /api/runs/:id/rounds` — start the next round

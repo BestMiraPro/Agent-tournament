@@ -87,6 +87,9 @@ function seams(over: Record<string, unknown> = {}) {
 
 let bridge = new ToolBridge()
 
+/** Real runs dispatch by model; the OpenCode runner serves every non-Claude agent. */
+const openCodeRunner = (runner: unknown) => ((runner as { runnerFor?: (m: string) => unknown }).runnerFor?.('w/m') ?? runner)
+
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
     const full = join(dir, name)
@@ -96,7 +99,7 @@ function walk(dir: string): string[] {
 
 /** The runner's per-agent OpenCode config, as it would write it into the agent's workspace. */
 const projectConfigOf = (runner: unknown, agentId: string): string | null =>
-  ((runner as { options: { projectConfig?: (h: { agentId: string }) => string | null } }).options.projectConfig?.({ agentId }) ?? null)
+  ((openCodeRunner(runner) as { options: { projectConfig?: (h: { agentId: string }) => string | null } }).options.projectConfig?.({ agentId }) ?? null)
 
 describe('a run with connectors', () => {
   test('protected docker: workers reach the bridge through the gateway with their own token, and hold no credential', async () => {

@@ -83,6 +83,7 @@ def main():
             {"name": "node", "version": version_of(["node", "--version"]), "executable": executable("node")},
             {"name": "git", "version": version_of(["git", "--version"]), "executable": executable("git")},
             {"name": "opencode", "version": version_of(["opencode", "--version"]), "executable": executable("opencode")},
+            {"name": "claude", "version": version_of(["claude", "--version"]), "executable": executable("claude")},
             {"name": "rg", "version": version_of(["rg", "--version"]), "executable": executable("rg")},
             {"name": "pytest", "version": metadata.version("pytest"), "executable": executable("pytest")},
         ],

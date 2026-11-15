@@ -14,8 +14,11 @@ import { z } from 'zod'
  * the run is disposed. The file is an inventory and a guide, never a copy of the tools.
  */
 
-/** `rg` included: OpenCode's grep tool needs it, and an offline worker cannot download it. */
-export const REQUIRED_TOOLS = ['python3', 'node', 'git', 'opencode', 'rg'] as const
+/**
+ * `rg` included: OpenCode's grep tool needs it, and an offline worker cannot download it.
+ * `claude`: claude-subscription agents run the Claude Code CLI inside the container.
+ */
+export const REQUIRED_TOOLS = ['python3', 'node', 'git', 'opencode', 'rg', 'claude'] as const
 
 /** Everything that defines the image. Its identity is a hash of exactly these files. */
 export const TOOLCHAIN_FILES = [
@@ -23,6 +26,8 @@ export const TOOLCHAIN_FILES = [
   'docker/research-requirements.in',
   'docker/research-requirements.lock',
   'docker/toolchain-manifest.py',
+  'docker/claude-code/package.json',
+  'docker/claude-code/package-lock.json',
 ] as const
 
 export const IMAGE_INVENTORY_PATH = '/opt/arena/toolchain.json'

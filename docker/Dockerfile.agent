@@ -21,6 +21,15 @@ RUN apt-get update \
 RUN npm install -g opencode-ai@1.18.21 \
     && npm cache clean --force
 
+# The Claude Code CLI, for claude-subscription agents (src/runtime/claude-code/). Installed from
+# an integrity-locked lockfile: npm ci refuses any tarball whose sha512 differs from the lock, and
+# installs only this platform's native package.
+COPY claude-code/package.json claude-code/package-lock.json /opt/claude-code/
+RUN cd /opt/claude-code \
+    && npm ci --no-audit --no-fund \
+    && ln -s /opt/claude-code/node_modules/.bin/claude /usr/local/bin/claude \
+    && npm cache clean --force
+
 # Installed once, from exact versions with verified hashes, binary wheels only: no build
 # scripts run, and nothing is resolved at build time that the lock did not name.
 COPY research-requirements.in research-requirements.lock toolchain-manifest.py /opt/arena/build/

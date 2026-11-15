@@ -28,6 +28,7 @@ import { OUTPUT_README } from '../runtime/team-prompt.js'
 import { teamOutputView, teamScoreView } from './team-views.js'
 import { registerConnectorRoutes, type ConnectorRouteDeps } from './connectors-api.js'
 import { allowedHostsFor, registerLocalOriginGuard } from './local-origin.js'
+import { subscriptionStatus, type SubscriptionServices } from './subscriptions.js'
 
 export interface SpecDefaults {
   workspaceRoot?: string | null
@@ -72,6 +73,8 @@ export interface ApiDeps {
   connectors?: ConnectorRouteDeps
   /** Which web search provider would answer; defaults to reading the keys from env / `.env`. */
   webSearchStatus?: () => WebSearchStatus
+  /** The Claude and ChatGPT subscription logins; absent where the server offers no sign-in. */
+  subscriptions?: SubscriptionServices
 }
 
 /** Bridge callbacks that report upstream stream health as its own event, never as agent state. */
@@ -548,7 +551,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         engine.observe(e)
         emit(e)
       }
-      // The host's web tool calls take the same path as bridge evidence.
+      // Claude Code agents report their own activity; it joins the audit and the live cache the same way.
+      const detachActivity = composed.attachActivity?.(runId, bridgeEmit)
+      if (detachActivity) record.bridges.push({ stop: detachActivity })
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
@@ -639,6 +644,34 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
 
   // Which provider web_search would use, never a key: for the setup form's status line.
   app.get('/api/web-search', async () => (deps.webSearchStatus ?? (() => webSearchStatus(readWebSearchKeys())))())
+
+  // Sign-in state for both subscriptions. Nothing here ever returns, logs or stores a token
+  // anywhere but the 0600 secrets file.
+  app.get('/api/subscriptions', async (_req, reply) => {
+    if (!deps.subscriptions) return reply.code(503).send({ error: 'Subscriptions are not available from this server.' })
+    return subscriptionStatus(deps.subscriptions, deps.specDefaults?.authFile ?? null)
+  })
+
+  app.put('/api/subscriptions/claude', async (req, reply) => {
+    if (!deps.subscriptions) return reply.code(503).send({ error: 'Subscriptions are not available from this server.' })
+    const body = req.body as { token?: unknown } | null
+    if (!body || typeof body.token !== 'string' || body.token.length === 0 || body.token.length > 8192) {
+      return reply.code(400).send({ error: 'Send { "token": "<the value claude setup-token printed>" }.' })
+    }
+    try {
+      await deps.subscriptions.claudeTokens.set(body.token)
+    } catch (e) {
+      // The store's messages are fixed text; they never repeat what was sent.
+      return reply.code(400).send({ error: e instanceof Error ? e.message : 'Could not store the token.' })
+    }
+    return subscriptionStatus(deps.subscriptions, deps.specDefaults?.authFile ?? null)
+  })
+
+  app.delete('/api/subscriptions/claude', async (_req, reply) => {
+    if (!deps.subscriptions) return reply.code(503).send({ error: 'Subscriptions are not available from this server.' })
+    await deps.subscriptions.claudeTokens.clear()
+    return subscriptionStatus(deps.subscriptions, deps.specDefaults?.authFile ?? null)
+  })
 
   // Totals only: per-container names belong to whatever else runs on this Docker host.
   app.get('/api/capacity', async (_req, reply) => {
@@ -1135,6 +1168,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         engine.observe(e)
         emit(e)
       }
+      // Claude Code agents report their own activity; it joins the audit and the live cache the same way.
+      const detachActivity = composed.attachActivity?.(runId, bridgeEmit)
+      if (detachActivity) record.bridges.push({ stop: detachActivity })
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',

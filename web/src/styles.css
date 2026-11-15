@@ -313,6 +313,7 @@ textarea:focus-visible, .cell--selectable:focus-visible {
   border: 1px solid var(--line-strong);
 }
 .badge--user { color: var(--accent); border-color: var(--accent-dim); }
+.badge--subscription { color: var(--done); border-color: var(--line-strong); margin-left: .4rem; }
 .badge--generated { color: var(--text-faint); }
 
 .muted { color: var(--text-dim); font-size: .8rem; }

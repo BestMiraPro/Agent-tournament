@@ -36,6 +36,7 @@ import { composeRun } from './server/compose-run.js'
 import type { RunSpec } from './server/run-spec.js'
 import type { EventSink } from './engine/events.js'
 import type { ConnectorEvent } from './connectors/bridge.js'
+import { isClaudeSubscriptionModel } from './runtime/claude-code/model-id.js'
 import { buildMarkdownReport } from './server/export.js'
 
 export interface CliOptions {
@@ -135,6 +136,8 @@ export async function validateRosterModels(
   const seen = new Set<string>()
   const probes: { modelId: string; role: ModelRole }[] = []
   const addProbe = (modelId: string, role: ModelRole) => {
+    // Claude subscription models run through Claude Code, not OpenCode; composition checks them.
+    if (isClaudeSubscriptionModel(modelId)) return
     const key = `${modelId} ${role}`
     if (seen.has(key)) return
     seen.add(key)

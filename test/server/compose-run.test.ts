@@ -23,7 +23,7 @@ const inventoryFixture = {
   schemaVersion: 1 as const,
   toolchainId: TOOLCHAIN,
   python: { version: '3.11.2', venv: '/opt/arena/venv', executable: '/opt/arena/venv/bin/python' },
-  tools: ['python3', 'node', 'git', 'opencode', 'rg'].map((name) => ({ name, version: '1.0', executable: `/usr/bin/${name}` })),
+  tools: ['python3', 'node', 'git', 'opencode', 'rg', 'claude'].map((name) => ({ name, version: '1.0', executable: `/usr/bin/${name}` })),
   pythonPackages: [{ name: 'numpy', version: '2.3.3' }],
 }
 
@@ -528,6 +528,9 @@ describe('composeRun', () => {
     })
   })
 
+  /** Real runs dispatch by model; the OpenCode runner serves every non-Claude agent. */
+  const openCodeRunner = (runner: unknown) => ((runner as { runnerFor?: (m: string) => unknown }).runnerFor?.('w/m') ?? runner)
+
   describe('web access', () => {
     const seamsWithBridge = (bridge: ToolBridge) => ({
       ...mockSeams(),
@@ -540,7 +543,7 @@ describe('composeRun', () => {
       return webAccess === undefined ? spec : { ...spec, webAccess }
     }
     const projectConfigOf = (runner: unknown, agentId: string) =>
-      JSON.parse((runner as { options: AgentRunnerOptions }).options.projectConfig!({ agentId } as never)!) as {
+      JSON.parse((openCodeRunner(runner) as { options: AgentRunnerOptions }).options.projectConfig!({ agentId } as never)!) as {
         mcp: Record<string, { url: string; headers: Record<string, string> }>
       }
 
@@ -550,7 +553,7 @@ describe('composeRun', () => {
       try {
         const c = await composeRun(localSpec(root, true), seamsWithBridge(bridge) as never)
         expect(c.config.webAccess).toBe(true)
-        const options = (c.runner as unknown as { options: AgentRunnerOptions }).options
+        const options = (openCodeRunner(c.runner) as { options: AgentRunnerOptions }).options
         const a1 = projectConfigOf(c.runner, 'agent-1').mcp.arena!
         const a2 = projectConfigOf(c.runner, 'agent-2').mcp.arena!
         expect(a1.url).toBe('http://127.0.0.1:45679/mcp/arena')
@@ -573,7 +576,7 @@ describe('composeRun', () => {
         const a1 = projectConfigOf(c.runner, 'agent-1').mcp.arena!
         const a2 = projectConfigOf(c.runner, 'agent-2').mcp.arena!
         expect(a1.headers.Authorization).toBe(a2.headers.Authorization)
-        expect((c.runner as unknown as { options: AgentRunnerOptions }).options.webToolsNote).toContain('2000 searches and 5000 page fetches')
+        expect((openCodeRunner(c.runner) as { options: AgentRunnerOptions }).options.webToolsNote).toContain('2000 searches and 5000 page fetches')
         await c.cleanup()
       } finally {
         rmSync(root, { recursive: true, force: true })
@@ -588,7 +591,7 @@ describe('composeRun', () => {
           const c = await composeRun(localSpec(root, webAccess), s as never)
           expect(s.toolBridge).not.toHaveBeenCalled()
           expect(c.config.webAccess).toBe(false)
-          const options = (c.runner as unknown as { options: AgentRunnerOptions }).options
+          const options = (openCodeRunner(c.runner) as { options: AgentRunnerOptions }).options
           expect(options.projectConfig).toBeUndefined()
           expect(options.webToolsNote).toBeUndefined()
           await c.cleanup()

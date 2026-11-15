@@ -25,6 +25,8 @@ export interface ProtectedRuntimeSpec {
   toolsPort: number
   /** The relay's (and tool bridge's) address as the gateway reaches it; the host's loopback when unset. */
   relayHost?: string
+  /** The gateway also carries Claude Code's CONNECT egress to api.anthropic.com (runs with Claude subscription agents). */
+  claudeEgress?: boolean
 }
 
 export interface ShardContainerSpec {
@@ -316,6 +318,7 @@ async function startProtectedShard(
         relayPort: runtime.relayPort,
         toolsPort: runtime.toolsPort,
         ...(runtime.relayHost ? { relayHost: runtime.relayHost } : {}),
+        ...(runtime.claudeEgress ? { claudeEgress: true } : {}),
       }),
       120_000,
     )

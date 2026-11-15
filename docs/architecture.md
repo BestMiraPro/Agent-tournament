@@ -146,12 +146,25 @@ Design: `docs/superpowers/specs/2026-11-15-connectors-design.md`.
 - **MCP** (`mcp-server.ts`): `createWebMcpServer(deps)` builds the tools for one agent of one run; `webConnector()` keeps one limiter per run for many agents. `stdio.ts` serves the same tools over stdio for a host-side client.
 - **Through the bridge** (`builtin.ts`): registered as the built-in connector `arena`, so every sandbox reaches the tools at the tool bridge with the bridge's per-agent tokens (one shared identity for a collaboration team, with the run-wide allowance), limits and sealed `tool_bridge` evidence. The competitor profile allows `arena_*`; OpenCode's own `websearch` stays denied.
 
+## Agent runners and subscriptions
+
+An `AgentRunner` (`src/runtime/agent-runner.ts`) runs one agent attempt on a sandbox handle. Real runs compose a `DispatchingAgentRunner` (`src/runtime/dispatch.ts`) that routes each agent by its model: `claude-subscription/*` to `ClaudeCodeAgentRunner` (`src/runtime/claude-code/`), everything else to `OpenCodeAgentRunner`. Mixed rosters run side by side; round admission, abort and quiesce consult both.
+
+- **ClaudeCodeAgentRunner** runs `claude -p` headless with streamed JSON in and out: in the agent's workspace as a host process (local), or through `docker exec` in the agent's shard as a recorded process group (docker). The GOAL is the first streamed message; the steering message and the optional `send(handle, text)` (the seam for live messages) follow at the agent's next step. `stream.ts` translates the CLI's stream into the same `agent.activity` items the OpenCode bridge emits, plus usage (cost always 0) and failures (`CLAUDE_AUTH_EXPIRED`, `SUBSCRIPTION_LIMIT`, `CLAUDE_CLI_MISSING`). Because its activity comes from stdout rather than an OpenCode server, a run exposes `ComposedRun.attachActivity`, which the API points at the same audit-and-cache sink as the OpenCode bridges.
+- **Credentials**: a `claude setup-token` value in a 0600 file (`ClaudeTokenStore`), handed to the CLI on descriptor 3 locally or as a `docker exec` environment variable; or the host's own Claude login (local only). The CLI's environment is stripped of every `ANTHROPIC_*`/`CLAUDE*` variable first. `src/server/subscriptions.ts` holds these services and the status the dashboard shows.
+- **Protected Claude agents** hold the setup token in their own unmodified `claude` process (passed through a 0600 `docker exec --env-file` the launcher removes) and leave through `HTTPS_PROXY`: a CONNECT route on the shard gateway (`src/runtime/docker/gateway.ts`, port 8789) that tunnels to exactly `api.anthropic.com:443`, started only for runs with Claude agents. The relay never holds, matches or injects a Claude token (Anthropic's terms forbid intermediating one).
+- **ChatGPT Plus/Pro** stays on OpenCode: local and shared runs use OpenCode's own login in `auth.json`. In protected runs the relay carries that one OAuth login: `ChatGptLogin` (`src/runtime/chatgpt-oauth.ts`) re-reads `auth.json` per request, refreshes under a lock and writes the rotated pair back atomically, and the relay forwards to the Codex backend with the account headers, moving the system prompt into `instructions` as OpenCode does under OAuth.
+
+Design and verified CLI facts: `docs/superpowers/specs/2026-11-15-subscription-runs-design.md`.
+
 ## The provider abstraction
 
-`src/runtime/provider.ts` — `complete(prompt, opts)` returns the LLM response. Two implementations:
+`src/runtime/provider.ts` — `complete(prompt, opts)` returns the LLM response. Implementations:
 
 - **MockProvider** — deterministic keyword-scoring, no LLM. Used by tests + mock mode.
 - **OpenCodeProvider** — calls the opencode server's `/complete` endpoint (which proxies to the configured model).
+- **ClaudeCodeProvider** (`src/runtime/claude-code/provider.ts`) — one `claude -p --output-format=json` per call on the Claude subscription, `--json-schema` when the caller has a schema.
+- **RoutingProvider** (`src/runtime/dispatch.ts`) — what real runs use: `claude-subscription/*` calls to Claude Code, the rest to OpenCode. `describe(modelId)` names the runtime that graded, for the grading audit.
 
 The Judge and Reflector take a `Provider` in their constructor; they don't know which one.
 
@@ -183,5 +196,6 @@ The codebase was built via subagent-driven development (SDD) in phases:
 - **Phase 4k** — documentation (this file + operator guide + API reference + AGENTS.md).
 - **Phase 8** — collaboration workflow (shared team workspace, channel, sealed team output, team judging), now the default; see `docs/superpowers/specs/2026-11-15-collaboration-mode-design.md`.
 - **Phase 8** — web search and page fetch for agents, served through the connectors tool bridge.
+- **Phase 8** — subscription runs: Claude Pro/Max through the unmodified Claude Code CLI (in protected mode with the token in the container and a CONNECT egress route), ChatGPT Plus/Pro through OpenCode's login (relayed in protected mode).
 
 Specs live in `docs/superpowers/specs/`, plans in `docs/superpowers/plans/`. The local SDD ledger (`.superpowers/sdd/<phase>/progress.md`) is gitignored.
