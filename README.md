@@ -117,20 +117,20 @@ npm run typecheck   # tsc --noEmit, strict mode with noUncheckedIndexedAccess
 npm run web:build   # Vite production build of the dashboard
 ```
 
-The suite has **1,646 test cases in 136 files**. Some are platform-specific or opt-in, so the pass/skip split depends on where it runs (macOS measured 15 November 2026; Linux has the same POSIX-only skips; the Windows row is not re-measured: the 21 September measurement plus the platform-neutral cases added since, with four more POSIX-only cases skipped):
+The suite has **1,984 test cases in 164 files**. Some are platform-specific or opt-in, so the pass/skip split depends on where it runs (macOS measured 15 November 2026; Linux has the same POSIX-only skips; the Windows row is not re-measured: the 21 September measurement plus the platform-neutral cases added since, with four more POSIX-only cases skipped):
 
 | Environment | Passed | Skipped |
 |---|---|---|
-| macOS (Node 26) | 1,631 | 15 |
-| Linux (Node 24, as in CI) | 1,631 | 15 |
-| Windows 11 (Node 24, estimated) | 1,623 | 23 |
+| macOS (Node 26) | 1,968 | 16 |
+| Linux (Node 24, as in CI) | 1,968 | 16 |
+| Windows 11 (Node 24, estimated) | 1,960 | 24 |
 
 The skipped cases are:
 - Four opt-in end-to-end suites that need real services: a real provider (`ARENA_E2E=1`), Docker (`ARENA_DOCKER_E2E=1`), the real dashboard (`ARENA_DASHBOARD_E2E=1`), and the protected-container policy check (also `ARENA_DOCKER_E2E=1`).
 - Process-termination tests for the other OS, and on Windows the POSIX-only Claude Code process-group and read-only-file tests.
 - On Windows without symlink privileges, file-symlink escape tests.
 
-Coverage includes the engine and selection logic, the Claude Code stream translation (against recorded CLI streams), the ChatGPT relay and the Claude egress allowlist, judge parsing and anonymisation, the provider relay's allow/deny decisions, Docker argument construction, workspace path-escape and symlink attacks, SQLite migrations and restart recovery, the HTTP/WebSocket API, and the dashboard's pure state reducers.
+Coverage includes the engine and selection logic, collaboration rounds (team workspace, channel delivery, sealed team output), the connectors tool bridge (read-only locks, per-agent tokens, the credential guard), the web tools' SSRF guard and search fallback, the dashboard's Host/Origin guard, the Claude Code stream translation (against recorded CLI streams), the ChatGPT relay and the Claude egress allowlist, judge parsing and anonymisation, the provider relay's allow/deny decisions, Docker argument construction, workspace path-escape and symlink attacks, SQLite migrations and restart recovery, the HTTP/WebSocket API, and the dashboard's pure state reducers.
 
 ## Repository layout
 

@@ -7,18 +7,18 @@ Guidance for AI agents (and humans) working in this repo.
 Run all three before claiming work is done. All must pass.
 
 ```powershell
-npm test           # vitest run — 1,646 cases; see the platform split below
+npm test           # vitest run — 1,984 cases; see the platform split below
 npm run typecheck  # tsc --noEmit — expect exit 0, no output
 npm run web:build  # vite build — expect exit 0
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same three gates on Ubuntu with Node 24.
 
-- 10 skips are the opt-in suites needing real services: `test/e2e/real-tournament.test.ts` (`ARENA_E2E=1`), `test/e2e/docker-tournament.test.ts` and `test/e2e/container-policy.test.ts` (`ARENA_DOCKER_E2E=1`), and `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`).
+- 11 skips are the opt-in suites needing real services (the container-policy suite includes the connectors bridge check): `test/e2e/real-tournament.test.ts` (`ARENA_E2E=1`), `test/e2e/docker-tournament.test.ts` and `test/e2e/container-policy.test.ts` (`ARENA_DOCKER_E2E=1`), and `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`).
 - 8 are the file-symlink cases in `test/runtime/workspace-links.test.ts`. Creating a file symlink on Windows needs SeCreateSymbolicLink (Developer Mode or admin); without it the probe gets EPERM and those 8 skip. Directory-junction coverage runs regardless. On Linux they RUN — if they skip there, the capability probe is broken, not the platform.
 - `test/runtime/opencode/server.test.ts` has one POSIX-only termination test (skipped on win32) and five win32-only taskkill tests (skipped on POSIX).
 - `test/runtime/claude-code/process.test.ts` has three POSIX-only local-launch tests (a shebang fake CLI, process groups) and `test/runtime/chatgpt-oauth.test.ts` one POSIX-only read-only-file test; all four skip on win32.
-- Baseline at 2026-11-15, 1,646 total cases on every platform: **Linux and macOS 1,631 passed / 15 skipped; Windows (not re-measured) 1,623 passed / 23 skipped.** (macOS measured on Node 26; Linux has the same POSIX-only skips and CI checks it; the Windows figure is the 2026-09-21 measurement plus the platform-neutral cases since and the four POSIX-only cases above.) If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
+- Baseline at 2026-11-15 (phase 8 integrated: collaboration, connectors, web tools, subscriptions), 1,984 total cases on every platform: **Linux and macOS 1,968 passed / 16 skipped; Windows (not re-measured) 1,960 passed / 24 skipped.** (macOS measured on Node 26; Linux has the same POSIX-only skips and CI checks it; the Windows figure is the 2026-09-21 measurement plus the platform-neutral cases since and the four POSIX-only cases above.) If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
 - There is no separate lint script — `typecheck` is the type gate.
 
 ## Stack
