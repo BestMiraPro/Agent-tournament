@@ -90,12 +90,25 @@ runs       id, name, goal, status, config (JSON), createdAt
 - **MockSandbox** — in-memory, no real processes. Used by tests + mock mode.
 - **Local** — agents are host opencode processes against one shared server (`src/runtime/opencode/`). Workspaces are subdirs under `workspaceRoot`.
 - **Docker** — agents run in resource-capped containers (`src/runtime/docker/`), each running its own OpenCode server. Two isolation policies:
-  - **protected** (dashboard default) — one agent per container, read-only root, unprivileged user, no credentials inside, and an internal-only network whose one exit is a gateway container. Model calls go through the host-side provider relay (`src/runtime/provider-relay.ts`), which swaps a per-run token for the real key and only allows roster models within a request limit.
+  - **protected** (dashboard default) — one agent per container, read-only root, unprivileged user, no credentials inside, and an internal-only network whose one exit is a gateway container with three fixed routes. Model calls go through the host-side provider relay (`src/runtime/provider-relay.ts`), which swaps a per-run token for the real key and only allows roster models within a request limit. Connector tool calls go through the host tool bridge (below).
   - **shared** — several agents may share a container, `auth.json` is bind-mounted read-only, and containers have ordinary network access.
 
   See the operator guide's isolation section for the full list of what each policy enforces.
 
 The engine doesn't know which sandbox it's using — it calls `sandbox.run(handle, ...)` and `sandbox.readFile(handle, ...)`.
+
+## Connectors and the tool bridge
+
+`src/connectors/` gives agents MCP tools from GitHub, Slack, Gmail, imported Claude Code servers and built-in servers, without giving them credentials.
+
+- **Registry** (`store.ts`, `types.ts`): connectors in `connectors.json`, credentials in an owner-only `secrets.json`, both in `--connectors-dir`. Never in SQLite.
+- **Policy** (`policy.ts`, `presets.ts`): which tools an agent may list and call. Slack and Gmail are locked to a code-defined read allowlist; others expose tools annotated read-only, plus write tools the connector permits and the run opts into.
+- **Upstreams** (`upstream.ts`, `resolve.ts`): the MCP SDK client over stdio, Streamable HTTP/SSE or an in-memory transport (the in-house Slack and Gmail servers in `slack/` and `gmail/`, and built-ins registered with `registerBuiltinConnector`, `builtins.ts`).
+- **Bridge** (`bridge.ts`, `bridge-server.ts`, `bridge-process.ts`): one Streamable HTTP MCP endpoint per process at `/mcp/<connector>`, started on first use like the relay. A run's grant (`run-plan.ts`, made in `compose-run.ts`) opens its upstreams, lists their tools and mints one token per agent. Every `tools/call` is checked against the policy, the per-agent call limit, a timeout and a result cap, and emits an `agent.connector` event: the audit collector stores it as `tool_bridge` evidence, the activity cache shows it as a tool item. Revoked first when the run stops.
+- **Reaching it**: `grant.endpointsFor(agentId, baseUrl)` returns `{ id, title, url, headers }` per connector, runner-agnostic. The OpenCode runner writes it to `.opencode/opencode.json` in the agent's workspace (`runtime/opencode/mcp-config.ts`) right before the session; the competitor profile allows `"<id>_*"`; TOOLS.md lists the tools. Protected workers use the gateway's tools route (`GATEWAY_TOOLS_PORT`, 8788).
+- **API and UI**: `src/server/connectors-api.ts` (presets, Claude Code import from `claude-import.ts`, connection tests, Google and MCP OAuth with the callback on the dashboard's own origin) and `web/src/components/Connectors.tsx`.
+
+Design: `docs/superpowers/specs/2026-11-15-connectors-design.md`.
 
 ## The provider abstraction
 
@@ -112,7 +125,7 @@ The engine emits `EngineEvent`s (round.status, agent.status, agent.usage, round.
 
 ## Config + reconfiguration
 
-`RunConfig` (in `src/core/types.ts`) holds: roster, budget, judge, reflect, selection, concurrency, pricing, sandbox, container caps. `PATCH /api/runs/:id/config` merges a partial into the config and calls `engine.reconfigure()` between rounds — the next round reads the new config fresh. The budget tracker is updated in place (keeps accumulated spend). The busy guard ensures no round is in flight during a PATCH.
+`RunConfig` (in `src/core/types.ts`) holds: roster, budget, judge, reflect, selection, concurrency, pricing, sandbox, container caps, and the run's connectors (ids and write opt-ins only; fixed at creation). `PATCH /api/runs/:id/config` merges a partial into the config and calls `engine.reconfigure()` between rounds — the next round reads the new config fresh. The budget tracker is updated in place (keeps accumulated spend). The busy guard ensures no round is in flight during a PATCH.
 
 ## SDD phase history
 
