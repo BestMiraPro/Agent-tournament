@@ -57,6 +57,12 @@ export interface AgentRunner {
    * orchestrator stopped waiting, not that the agent stopped writing.
    */
   quiesce?(handle: AgentHandle): Promise<QuiesceStatus>
+  /**
+   * Delivers a message to a running agent; it reaches the agent at its next step, without
+   * interrupting the current one. Rejects when the agent is not running or cannot take messages.
+   * Optional: runners without a live channel do not offer it.
+   */
+  send?(handle: AgentHandle, text: string): Promise<void>
 }
 
 /**
