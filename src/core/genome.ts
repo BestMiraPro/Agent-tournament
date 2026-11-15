@@ -42,7 +42,7 @@ export function serializeGenome(g: Genome, opts: { label: string }): string {
  */
 export function serializeCompetitorProfile(
   g: Genome,
-  opts: { label: string; readableDirs?: readonly string[] },
+  opts: { label: string; readableDirs?: readonly string[]; connectorIds?: readonly string[] },
 ): string {
   const dirs = opts.readableDirs ?? []
   return [
@@ -62,6 +62,10 @@ export function serializeCompetitorProfile(
     '    "*.env": deny',
     '    "*.env.*": deny',
     '    "*.env.example": allow',
+    // Connector tools are named `<connector>_<tool>` and OpenCode asks permission per tool name. Allowed here by
+    // connector, never per tool: what each connector exposes is decided host-side by the tool bridge, and a tool
+    // the bridge does not expose is not listed at all. Connector ids cannot prefix a built-in permission.
+    ...[...new Set(opts.connectorIds ?? [])].sort().map((id) => `  ${JSON.stringify(`${id}_*`)}: allow`),
     '---',
     '',
   ].join('\n')

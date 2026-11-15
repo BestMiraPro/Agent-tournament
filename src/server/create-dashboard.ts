@@ -25,6 +25,8 @@ import { RunManager } from './run-manager.js'
 import { disposeRunRecord, RunRegistry } from './runs.js'
 import { EventBroadcaster } from './ws.js'
 import { serveUi } from './static-ui.js'
+import { ConnectorStore } from '../connectors/store.js'
+import { connectorResolver } from '../connectors/resolve.js'
 
 export interface DashboardOptions {
   dbPath?: string
@@ -46,6 +48,11 @@ export interface DashboardOptions {
   dockerSandbox?: boolean
   /** How docker runs reach their containers; `bridge` when this app itself runs in a container. */
   dockerReach?: DockerReach
+  /**
+   * The connector store's folder (connectors and their credentials, owner-only). Unset: no stored connectors, and
+   * only built-in ones can be enabled.
+   */
+  connectorsDir?: string | null
 }
 
 /** Why a docker run is refused when `dockerSandbox` is false. */
@@ -59,6 +66,8 @@ export interface Dashboard {
   manager: RunManager
   registry: RunRegistry
   broadcaster: EventBroadcaster
+  /** Stored connectors and their credentials; null when the dashboard was started without a store. */
+  connectorStore: ConnectorStore | null
   /** Rounds recovered from an interrupted previous process. */
   recovered: number
   /** Attaches the websocket server to the HTTP server. Call before `listen`. */
@@ -124,7 +133,9 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
   // Real-mode composition for spec POSTs. Per-spec values win; anything omitted
   // falls back to the process-level defaults, and the seams are the same ones the
   // CLI uses so local/docker compose identically.
-  const seams = opts.dockerReach === 'bridge' ? bridgeSeams(defaultSeams) : defaultSeams
+  const connectorStore = opts.connectorsDir ? new ConnectorStore(opts.connectorsDir) : null
+  const resolver = connectorResolver(connectorStore)
+  const seams = { ...(opts.dockerReach === 'bridge' ? bridgeSeams(defaultSeams) : defaultSeams), connectors: () => resolver }
   const composeWith = (spec: RunSpec, o?: { runIdHolder?: RunIdHolder }): Promise<ComposedRun> =>
     opts.dockerSandbox === false && spec.sandbox === 'docker'
       ? Promise.reject(new Error(DOCKER_SANDBOX_OFF))
@@ -206,6 +217,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     manager,
     registry,
     broadcaster,
+    connectorStore,
     recovered,
     attachWebSocket() {
       wss ??= new WebSocketServer({ server: app.server, path: '/ws' })

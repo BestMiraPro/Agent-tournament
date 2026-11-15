@@ -36,14 +36,25 @@ import {
   startShardContainer,
   type ProtectedRuntimeSpec,
 } from '../runtime/docker/container.js'
-import { GATEWAY_ALIAS, GATEWAY_CPUS, GATEWAY_MEMORY_BYTES, GATEWAY_RELAY_PORT } from '../runtime/docker/gateway.js'
+import {
+  GATEWAY_ALIAS,
+  GATEWAY_CPUS,
+  GATEWAY_MEMORY_BYTES,
+  GATEWAY_RELAY_PORT,
+  GATEWAY_TOOLS_PORT,
+  HOST_RELAY_ADDRESS,
+} from '../runtime/docker/gateway.js'
 import { createShardNetwork, removeShardNetwork } from '../runtime/docker/network.js'
 import { relayProviderConfig } from '../runtime/opencode/relay-config.js'
 import type { RelayPolicy, RelayUpstream } from '../runtime/provider-relay.js'
 import { relayUpstreamsFromAuth, type CatalogProvider } from '../runtime/relay-credentials.js'
 import { processRelay } from '../runtime/relay-process.js'
-import type { ToolBridge } from '../connectors/bridge.js'
+import type { ConnectorEvent, ToolBridge } from '../connectors/bridge.js'
 import { processToolBridge } from '../connectors/bridge-process.js'
+import type { ConnectorResolver } from '../connectors/resolve.js'
+import { planRunConnectors, type ConnectorRunPlan } from '../connectors/run-plan.js'
+import { assertStoreOutside } from '../connectors/store.js'
+import { opencodeMcpConfig } from '../runtime/opencode/mcp-config.js'
 import { RUNTIME_DIR } from '../runtime/runtime-dirs.js'
 import type { Placement } from '../runtime/docker/shard.js'
 import {
@@ -105,6 +116,8 @@ export interface ComposeSeams {
    * third route forwards. `host` is its listening address; `gatewayHost` as for the relay.
    */
   toolBridge: () => Promise<{ bridge: ToolBridge; port: number; host: string; gatewayHost?: string }>
+  /** The connectors a run may enable, with their stored credentials; null where there are none (the CLI). */
+  connectors: () => ConnectorResolver | null
   /** Reads a host file the protected runtime needs (credentials, catalogue) as text. */
   readTextFile: (path: string) => Promise<string>
   createShardNetworkFn: (runId: string, shardIndex: number) => Promise<string>
@@ -149,6 +162,7 @@ export const defaultSeams: ComposeSeams = {
   runtimeStateOf: (id) => inspectRuntimeState(id),
   relay: () => processRelay(),
   toolBridge: () => processToolBridge(),
+  connectors: () => null,
   readTextFile: (path) => readFile(path, 'utf8'),
   createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
   removeShardNetworkFn: (name, onWarning) => removeShardNetwork(name, onWarning),
@@ -289,6 +303,8 @@ export interface ComposedRun {
   onShardServer?: (listener: (event: ShardServerEvent) => void) => () => void
   /** Docker only: each container in the current plan, its agents, and whether they share it. */
   placement?: () => Placement[]
+  /** Subscribes to the run's connector tool calls, for the audit and the live dashboard; absent without connectors. */
+  onConnectorEvent?: (sink: (event: ConnectorEvent) => void) => () => void
   sessionMap: Map<string, string>
   sessionHook: (agentId: string, sessionId: string) => void
   warnings: string[]
@@ -331,6 +347,7 @@ export function runConfigFor(spec: RunSpec): RunConfig {
     pricing: { ...DEFAULT_CONFIG.pricing, ...spec.pricing },
     seedDir: spec.seedDir,
     contextDir: spec.contextDir ?? null,
+    connectors: (spec.connectors ?? []).map((c) => ({ id: c.id, writeTools: [...c.writeTools] })),
   }
 }
 
@@ -462,6 +479,15 @@ export async function composeRun(
     config.contextDir = contextDir
     assertContextFolder(contextDir, workspaceRoot, s.inspectPath)
   }
+  // Connector credentials live in the store; no folder a run writes, mounts or copies may reach it.
+  const connectorResolver = s.connectors()
+  if (connectorResolver?.storeDir) {
+    assertStoreOutside(connectorResolver.storeDir, { workspaceRoot, contextDir: spec.contextDir, seedDir: spec.seedDir })
+  }
+  const wantedConnectors = spec.connectors ?? []
+  if (wantedConnectors.length > 0 && !connectorResolver) {
+    throw new Error('Connectors are not available here: start the run from the dashboard, which holds them.')
+  }
   // Host reads only, before capacity or any server: a protected run the relay cannot carry is refused now.
   const relayPlan = spec.sandbox === 'docker' && config.isolation === 'protected' ? await planRelay(spec, config, s) : null
   // Each protected shard also runs a gateway, and its ceilings are part of what the run reserves.
@@ -494,6 +520,8 @@ export async function composeRun(
   }
   // Set once this run holds a relay grant; revoked first on every way out.
   let revokeRelay = (): void => {}
+  // Likewise for the run's connector grant.
+  let revokeTools = async (): Promise<void> => {}
   try {
     const provider = new OpenCodeProvider(server.client, workspaceRoot, {
       timeoutMs: config.agentTimeoutMs,
@@ -504,6 +532,26 @@ export async function composeRun(
     // so a throw here is the fatal case — let it stop the server via the catch below.
     await s.validateModels(server.client, workspaceRoot, config, onWarning)
 
+    // Opened and granted on the host before any worker exists; a connector that cannot connect refuses the run.
+    let connectorPlan: ConnectorRunPlan | null = null
+    let toolBridge: Awaited<ReturnType<ComposeSeams['toolBridge']>> | null = null
+    if (wantedConnectors.length > 0) {
+      toolBridge = await s.toolBridge()
+      connectorPlan = await planRunConnectors({
+        wanted: wantedConnectors,
+        resolver: connectorResolver!,
+        bridge: toolBridge.bridge,
+        grantId: reservationId,
+        runId: () => opts.runIdHolder?.value || reservationId,
+      })
+      const granted = connectorPlan
+      revokeTools = () => granted.revoke()
+    }
+    /** The agent's own OpenCode config: each connector at the bridge, as `base` reaches it, with its token. */
+    const connectorConfig = (base: string) => connectorPlan
+      ? (handle: { agentId: string }) => opencodeMcpConfig(connectorPlan!.grant.endpointsFor(handle.agentId, base))
+      : undefined
+
     if (spec.sandbox === 'docker') {
       // Granted before any container work, so every failure below revokes it.
       let relayToken: string | null = null
@@ -512,7 +560,7 @@ export async function composeRun(
       let toolsPort = 0
       if (relayPlan) {
         // The gateway's third route always exists, so its port is needed whether or not the run enables connectors.
-        toolsPort = (await s.toolBridge()).port
+        toolsPort = (toolBridge ?? await s.toolBridge()).port
         const relay = await s.relay()
         relayToken = randomBytes(24).toString('hex')
         relayPort = relay.port
@@ -568,6 +616,7 @@ export async function composeRun(
           data,
           // Nothing below the agent blocks installation yet; the manifest must not claim it does.
           packageInstall: 'not_enforced',
+          ...(connectorPlan ? { connectors: connectorPlan.manifest } : {}),
         })
         await writeFile(join(dir, 'tools.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
         await writeFile(join(dir, 'TOOLS.md'), renderToolsMarkdown(manifest), 'utf8')
@@ -771,6 +820,13 @@ export async function composeRun(
           // Termination of a retained invocation resolves against the invocation's
           // original container ID — never the current plan's reusable name.
           runtimeState: (handle) => s.runtimeStateOf(handle.runtimeId ?? ''),
+          // Protected workers reach the bridge through their gateway; shared ones through the host alias, or the
+          // app's own bridge address when the app runs in a container.
+          ...(toolBridge ? {
+            projectConfig: connectorConfig(relayPlan
+              ? `http://${GATEWAY_ALIAS}:${GATEWAY_TOOLS_PORT}`
+              : `http://${toolBridge.gatewayHost ?? HOST_RELAY_ADDRESS}:${toolBridge.port}`),
+          } : {}),
           // Per agent rather than per roster entry: agents added or bred mid-run carry
           // models the roster check at shard start never saw.
           modelUnavailable: (handle, modelId) => {
@@ -851,13 +907,15 @@ export async function composeRun(
         placement: () => sandbox.placement(),
         serverHandle: server, shardServers,
         onShardServer,
+        ...(connectorPlan ? { onConnectorEvent: connectorPlan.subscribe } : {}),
         toolchainId,
         sessionMap, sessionHook, warnings,
         capacity: { committed: Math.min(config.maxContainers, spec.population), maxContainers: config.maxContainers },
         releasePopulation,
         cleanup: async () => {
-          // First: from here on this run's workers can make no further model calls.
+          // First: from here on this run's workers can make no further model calls or tool calls.
           revokeRelay()
+          await revokeTools()
           await (sandbox as DockerSandbox).disposeAll?.().catch(() => {}) as never
           // Networks and files only once the containers attached to or mounting them are gone.
           for (const network of [...shardNetworks]) {
@@ -876,13 +934,17 @@ export async function composeRun(
       runner: new OpenCodeAgentRunner(server.client, sandbox, {
         onSessionCreated: sessionHook,
         contextPath: spec.contextDir,
+        // Local agents run on this host and reach the bridge where it listens.
+        ...(toolBridge ? { projectConfig: connectorConfig(`http://${toolBridge.host}:${toolBridge.port}`) } : {}),
       }),
       planFor: null,
       serverHandle: server,
       shardServers: [{ baseUrl: '' }],
       sessionMap, sessionHook, warnings,
       capacity: null,
+      ...(connectorPlan ? { onConnectorEvent: connectorPlan.subscribe } : {}),
       cleanup: async () => {
+        await revokeTools()
         await server.stop().catch(() => {})
       },
     }
@@ -890,6 +952,7 @@ export async function composeRun(
     // Anything that fails after the host server starts must not leak the
     // process: stop it, then propagate so the caller can refuse the run.
     revokeRelay()
+    await revokeTools()
     await server.stop().catch(() => {})
     s.ledger.release(reservationId)
     throw e

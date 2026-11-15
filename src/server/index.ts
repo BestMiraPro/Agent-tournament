@@ -53,6 +53,7 @@ async function start(o: StartOptions): Promise<void> {
     uiDir: o.uiDir,
     dockerSandbox: o.dockerSandbox,
     dockerReach: o.dockerReach,
+    connectorsDir: o.connectorsDir,
   })
   if (dashboard.recovered > 0) {
     console.log(`recovered ${dashboard.recovered} interrupted round(s)`)
@@ -79,6 +80,7 @@ async function start(o: StartOptions): Promise<void> {
   console.log('')
   console.log(`  data         ${o.dbPath}`)
   console.log(`  workspaces   ${o.workspaceRoot}`)
+  console.log(`  connectors   ${o.connectorsDir}`)
   console.log(
     `  credentials  ${o.authFile ?? 'none found (docker runs will be refused; run `opencode auth login`)'}`,
   )

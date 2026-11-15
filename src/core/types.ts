@@ -71,6 +71,12 @@ export interface RosterEntry {
   temperature: number
 }
 
+/** One connector enabled for a run, and the write tools the run opts into (only ever ones the connector permits). */
+export interface RunConnector {
+  id: string
+  writeTools: string[]
+}
+
 export interface RunConfig {
   populationSize: number
   concurrency: number
@@ -102,6 +108,11 @@ export interface RunConfig {
   seedDir: string | null
   /** Read-only reference folder for worker agents and the grader; null when the run has none. */
   contextDir: string | null
+  /**
+   * Connectors whose tools this run's agents get through the host tool bridge, with the write tools the run opts
+   * into. Ids and tool names only: credentials never live in a run's config. Absent on runs from before connectors.
+   */
+  connectors?: RunConnector[]
   roster: RosterEntry[]
   judge: {
     modelId: string
