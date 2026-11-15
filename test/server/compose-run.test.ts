@@ -17,8 +17,6 @@ const catalogJson = JSON.stringify({
 const authJson = JSON.stringify({ w: { type: 'api', key: 'FAKE-W-KEY' }, wandb: { type: 'api', key: 'FAKE-WANDB-KEY' } })
 import { parseRunSpec } from '../../src/server/run-spec.js'
 import type { AgentRunnerOptions } from '../../src/runtime/opencode/agent-runner.js'
-import type { WebCallRecord } from '../../src/connectors/web/evidence.js'
-import type { EngineEvent } from '../../src/engine/events.js'
 
 const TOOLCHAIN = 'abc123def4567890'
 const inventoryFixture = {
@@ -530,64 +528,69 @@ describe('composeRun', () => {
     })
   })
 
-  describe('web access (local runs)', () => {
-    const webSeam = () => {
-      const grant = {
-        tokenFor: vi.fn((agentId: string) => `tok-${agentId}`),
-        attach: vi.fn((_runId: string, _evidence: (record: WebCallRecord) => void) => {}),
-        revoke: vi.fn(),
-      }
-      return { grant, webTools: vi.fn(async () => ({ host: { grant: () => grant }, url: 'http://127.0.0.1:5555/mcp' })) }
-    }
-    const seamsWith = (webTools: unknown) => ({
+  describe('web access', () => {
+    const seamsWithBridge = (bridge: ToolBridge) => ({
       ...mockSeams(),
       startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
-      webTools,
+      toolBridge: vi.fn(async () => ({ bridge, port: 45679, host: '127.0.0.1' })),
     })
-    // `undefined` is a spec without the field at all, as the CLI builds it.
-    const localSpec = (root: string, webAccess?: boolean) => {
-      const { webAccess: _parsed, ...spec } = parseRunSpec({ name: 'l', goal: 'g', sandbox: 'local', roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }], workspaceRoot: root })
+    // `undefined` is a spec without the field at all, as an old config decodes.
+    const localSpec = (root: string, webAccess?: boolean, workflow: 'tournament' | 'collaboration' = 'tournament') => {
+      const { webAccess: _parsed, ...spec } = parseRunSpec({ name: 'l', goal: 'g', sandbox: 'local', workflow, roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }], workspaceRoot: root })
       return webAccess === undefined ? spec : { ...spec, webAccess }
     }
+    const projectConfigOf = (runner: unknown, agentId: string) =>
+      JSON.parse((runner as { options: AgentRunnerOptions }).options.projectConfig!({ agentId } as never)!) as {
+        mcp: Record<string, { url: string; headers: Record<string, string> }>
+      }
 
-    test('grants the run, configures each agent with its own token, and revokes on cleanup', async () => {
+    test('reaches agents through the tool bridge as the built-in web connector, each with its own token, revoked on cleanup', async () => {
       const root = mkdtempSync(join(tmpdir(), 'compose-web-'))
-      const web = webSeam()
+      const bridge = new ToolBridge()
       try {
-        const c = await composeRun(localSpec(root, true), seamsWith(web.webTools) as never)
+        const c = await composeRun(localSpec(root, true), seamsWithBridge(bridge) as never)
         expect(c.config.webAccess).toBe(true)
         const options = (c.runner as unknown as { options: AgentRunnerOptions }).options
-        const config = JSON.parse(options.opencodeConfig!('agent-1')) as { mcp: Record<string, unknown> }
-        expect(config.mcp).toEqual({
-          arena: { type: 'remote', url: 'http://127.0.0.1:5555/mcp', headers: { Authorization: 'Bearer tok-agent-1' }, oauth: false, timeout: 60_000 },
-        })
+        const a1 = projectConfigOf(c.runner, 'agent-1').mcp.arena!
+        const a2 = projectConfigOf(c.runner, 'agent-2').mcp.arena!
+        expect(a1.url).toBe('http://127.0.0.1:45679/mcp/arena')
+        expect(a1.headers.Authorization).not.toBe(a2.headers.Authorization)
         expect(options.webToolsNote).toContain('arena_web_search')
         expect(options.webToolsNote).toContain('200 searches and 500 page fetches')
-
-        const events: EngineEvent[] = []
-        c.attachWebEvidence!('run-9', (e) => events.push(e))
-        expect(web.grant.attach).toHaveBeenCalledWith('run-9', expect.any(Function))
-        const forward = web.grant.attach.mock.calls[0]![1]
-        forward({ id: 'W1', runId: 'run-9', agentId: 'agent-1', tool: 'web_fetch', target: 'e.example/a', outcome: 'completed', status: 200, bytes: 10, startedAt: 7, durationMs: 1 })
-        expect(events).toEqual([expect.objectContaining({ type: 'agent.web', runId: 'run-9', agentId: 'agent-1', callId: 'W1', at: 7 })])
-
+        const token = a1.headers.Authorization!.replace(/^Bearer /, '')
+        expect(bridge.authenticate(token)).not.toBeNull()
         await c.cleanup()
-        expect(web.grant.revoke).toHaveBeenCalledTimes(1)
+        expect(bridge.authenticate(token)).toBeNull()
       } finally {
         rmSync(root, { recursive: true, force: true })
       }
     })
 
-    test('without web access nothing is granted or configured', async () => {
+    test('a collaboration team shares one bridge identity with the run-wide web allowance', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-web-'))
+      try {
+        const c = await composeRun(localSpec(root, true, 'collaboration'), seamsWithBridge(new ToolBridge()) as never)
+        const a1 = projectConfigOf(c.runner, 'agent-1').mcp.arena!
+        const a2 = projectConfigOf(c.runner, 'agent-2').mcp.arena!
+        expect(a1.headers.Authorization).toBe(a2.headers.Authorization)
+        expect((c.runner as unknown as { options: AgentRunnerOptions }).options.webToolsNote).toContain('2000 searches and 5000 page fetches')
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('without web access, and without connectors, no bridge is used', async () => {
       const root = mkdtempSync(join(tmpdir(), 'compose-web-'))
       try {
         for (const webAccess of [false, undefined]) {
-          const web = webSeam()
-          const c = await composeRun(localSpec(root, webAccess), seamsWith(web.webTools) as never)
-          expect(web.webTools).not.toHaveBeenCalled()
-          expect(c.attachWebEvidence).toBeUndefined()
+          const s = seamsWithBridge(new ToolBridge())
+          const c = await composeRun(localSpec(root, webAccess), s as never)
+          expect(s.toolBridge).not.toHaveBeenCalled()
           expect(c.config.webAccess).toBe(false)
-          expect((c.runner as unknown as { options: AgentRunnerOptions }).options.opencodeConfig).toBeUndefined()
+          const options = (c.runner as unknown as { options: AgentRunnerOptions }).options
+          expect(options.projectConfig).toBeUndefined()
+          expect(options.webToolsNote).toBeUndefined()
           await c.cleanup()
         }
       } finally {

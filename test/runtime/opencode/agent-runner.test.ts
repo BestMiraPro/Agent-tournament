@@ -66,7 +66,7 @@ describe('OpenCodeAgentRunner workspace config', () => {
       return { id: 'ses_1' }
     }
     const runner = new OpenCodeAgentRunner(c as never, sb, {
-      opencodeConfig: (agentId) => `{"for":"${agentId}"}`,
+      projectConfig: (handle) => `{"for":"${handle.agentId}"}`,
       webToolsNote: 'Web access: tools here.',
     })
     await runner.run(h, ctx('s'))

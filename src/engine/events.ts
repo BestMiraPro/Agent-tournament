@@ -133,22 +133,6 @@ export type EngineEvent =
     } & ({ call: ConnectorCall; note?: undefined } | { note: ConnectorNote; call?: undefined }))
   | {
       /**
-       * A call to a host-side web tool (`web_search`, `web_fetch`), recorded by the host as it
-       * served it. Summary and detail are already reduced to allowlisted metadata and redacted.
-       */
-      type: 'agent.web'
-      runId: string
-      agentId: string
-      /** `W<n>` within the run. */
-      callId: string
-      tool: 'web_search' | 'web_fetch'
-      outcome: 'completed' | 'denied' | 'failed'
-      summary: string
-      detail: string
-      at: number
-    }
-  | {
-      /**
        * The agent's terminal usage totals, sent at most once per attempt and only when
        * they were actually observed. Consumers set these values; they never add them up.
        */

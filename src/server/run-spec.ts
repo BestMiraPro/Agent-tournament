@@ -73,7 +73,7 @@ const schema = z.object({
     }))
     .max(16)
     .default([]),
-  // On by default: this is a research tool. Wired for local runs; Docker workers stay offline.
+  // On by default: this is a research tool. Local and docker workers reach the tools through the tool bridge.
   webAccess: z.boolean().default(true),
 })
 
@@ -109,7 +109,7 @@ export interface RunSpec {
   criteria: string | null
   /** Connectors enabled for the run; absent means none. */
   connectors?: RunConnector[]
-  /** Workers get the host's web tools (local runs). Parsed specs default it on; absent means off. */
+  /** Workers get the host's web tools (local and docker runs). Parsed specs default it on; absent means off. */
   webAccess?: boolean
 }
 

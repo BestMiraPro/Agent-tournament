@@ -23,8 +23,7 @@ export const AUDIT_EVIDENCE_EVENT = 'audit.evidence'
 export const AUDIT_LATE_EVENT = 'audit.late'
 export const AUDIT_FROZEN_EVENT = 'audit.frozen'
 
-/** `host_tool`: a call a host-side tool served and recorded itself (the web tools). */
-export type AuditSource = 'runtime' | 'policy' | 'provider_stream' | 'capture' | 'tool_bridge' | 'host_tool'
+export type AuditSource = 'runtime' | 'policy' | 'provider_stream' | 'capture' | 'tool_bridge'
 export type AuditKind = 'tool' | 'file' | 'permission' | 'network' | 'integrity' | 'failure' | 'gap'
 export type AuditOutcome = 'allowed' | 'denied' | 'completed' | 'failed' | 'unknown'
 
@@ -106,7 +105,7 @@ export const AUDIT_SENSORS: Record<string, string> = {
   permission: 'Permission requests and the unattended replies to them.',
   failure: 'Attempt failures recorded by the engine and provider errors reported by the stream.',
   integrity: 'Submission capture: whether it was sealed, verified unchanged, or tampered with.',
-  network: 'Not observed directly: programs started inside a command can use whatever network the sandbox allows. Calls to the host\'s web tools (web_search, web_fetch) are recorded by the host as it serves them.',
+  network: 'Not observed directly: programs started inside a command can use whatever network the sandbox allows. Calls to the web tools (arena_web_search, arena_web_fetch) go through the tool bridge and are recorded there, with the query or page host and path.',
   connector: 'Connector tool calls as the host tool bridge recorded them: connector, tool, outcome, sizes and timing, attributed by each agent\'s own token. Argument values and results are not kept.',
   filesystem: 'Only the captured workspace manifest; file operations inside commands are not observed one by one.',
 }
@@ -357,13 +356,6 @@ export class AuditCollector {
             ...(event.note.detail !== undefined ? { detail: event.note.detail } : {}),
           })
         }
-        return
-      }
-      case 'agent.web': {
-        this.persist(state, event.agentId, {
-          sessionId: null, observedAt: event.at, source: 'host_tool', kind: 'network',
-          summary: event.summary, outcome: event.outcome, detail: event.detail,
-        })
         return
       }
       case 'bridge.status': {

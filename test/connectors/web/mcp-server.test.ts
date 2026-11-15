@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { describe, expect, test } from 'vitest'
-import { describeWebCall, fetchTarget, searchTarget, webCallEvent, type WebCallRecord } from '../../../src/connectors/web/evidence.js'
+import { describeWebCall, fetchTarget, searchTarget, type WebCallRecord } from '../../../src/connectors/web/evidence.js'
 import { WebLimiter } from '../../../src/connectors/web/limits.js'
 import { createWebMcpServer, webConnector, type WebServerDeps } from '../../../src/connectors/web/mcp-server.js'
 import { EXA_MCP_URL, LANGSEARCH_URL, type HttpPost } from '../../../src/connectors/web/search.js'
@@ -164,7 +164,7 @@ describe('evidence helpers', () => {
     expect(searchTarget('x'.repeat(500)).length).toBe(200)
   })
 
-  test('a record becomes an agent.web event with a one-line summary', () => {
+  test('a record becomes a one-line summary and a metadata detail', () => {
     const record: WebCallRecord = {
       id: 'W3', runId: 'r', agentId: 'a', tool: 'web_search', target: 'rust async', outcome: 'completed',
       provider: 'exa', fallbackReason: 'rate_limited', status: 200, bytes: 900, results: 5, startedAt: 10, durationMs: 300,
@@ -172,10 +172,6 @@ describe('evidence helpers', () => {
     expect(describeWebCall(record)).toEqual({
       summary: 'web_search "rust async" via Exa (LangSearch rate_limited): 5 results',
       detail: 'outcome=completed provider=exa fallback_reason=rate_limited status=200 bytes=900 results=5 duration_ms=300',
-    })
-    expect(webCallEvent(record)).toEqual({
-      type: 'agent.web', runId: 'r', agentId: 'a', callId: 'W3', tool: 'web_search', outcome: 'completed', at: 10,
-      ...describeWebCall(record),
     })
   })
 })

@@ -122,8 +122,8 @@ export interface RunConfig {
    */
   connectors?: RunConnector[]
   /**
-   * Whether workers get the host's web tools (`web_search`, `web_fetch`). Wired for local runs
-   * (dashboard and CLI); absent means off — configs from before the toggle ran without them.
+   * Whether workers get the host's web tools (`arena_web_search`, `arena_web_fetch`), served through the tool bridge
+   * in local and docker runs; absent means off — configs from before the toggle ran without them.
    */
   webAccess?: boolean
   roster: RosterEntry[]

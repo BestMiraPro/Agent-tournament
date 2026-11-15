@@ -21,7 +21,7 @@ Body (the full run spec; all fields except `name`+`goal`+`roster` are optional w
   "concurrency": 8,
   "pricing": { "model/id": { "inPerM": 1, "outPerM": 2, "cacheReadPerM": 0.1, "cacheWritePerM": 0.2 } },
   "connectors": [{ "id": "github", "writeTools": [] }], // local/docker only; see Connectors
-  "webAccess": true                        // optional, default true: local workers get the host's web tools
+  "webAccess": true                        // optional, default true: local and docker workers get the host's web tools
 }
 ```
 - `201` `{ runId: string, warnings?: string[] }` — roster counts must sum to `populationSize` (derived from roster).

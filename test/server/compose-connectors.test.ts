@@ -182,7 +182,7 @@ describe('a run with connectors', () => {
   test('without connectors nothing is written for them', async () => {
     const root = tempRoot()
     const c = await composeRun(parseRunSpec({
-      name: 'l', goal: 'g', sandbox: 'local', roster: [{ modelId: 'wandb/m', count: 1, temperature: 0.7 }], workspaceRoot: root,
+      name: 'l', goal: 'g', sandbox: 'local', roster: [{ modelId: 'wandb/m', count: 1, temperature: 0.7 }], workspaceRoot: root, webAccess: false,
     }), seams() as never)
     expect(projectConfigOf(c.runner, 'a1')).toBeNull()
     expect(c.onConnectorEvent).toBeUndefined()

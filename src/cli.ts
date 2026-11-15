@@ -35,6 +35,7 @@ import { type ServerHandle } from './runtime/opencode/server.js'
 import { composeRun } from './server/compose-run.js'
 import type { RunSpec } from './server/run-spec.js'
 import type { EventSink } from './engine/events.js'
+import type { ConnectorEvent } from './connectors/bridge.js'
 import { buildMarkdownReport } from './server/export.js'
 
 export interface CliOptions {
@@ -454,10 +455,10 @@ interface RealDeps {
   releasePopulation: (() => Promise<void>) | null
   /** Where the grader opens a collaboration round's sealed output. */
   sealedArtifacts: SealedArtifactWriter | null
-  /** Stops the run's runtime: for a local run its web grant first, then the server. */
+  /** Stops the run's runtime: for a local run its tool grant first, then the server. */
   stop: () => Promise<void>
-  /** Local runs with web access: where the run's web tool records go, once the run id exists. */
-  attachWebEvidence: ((runId: string, sink: EventSink) => void) | null
+  /** The run's tool bridge events (connectors and web tools), for the audit; null without a bridge. */
+  onConnectorEvent: ((sink: (event: ConnectorEvent) => void) => () => void) | null
 }
 
 /**
@@ -573,9 +574,9 @@ async function buildRealDeps(
     planFor: composed.planFor,
     releasePopulation: composed.releasePopulation ?? null,
     sealedArtifacts: composed.sealedArtifacts ?? null,
-    // A local composition's cleanup is exactly its web grant's revocation and the server's stop.
+    // A local composition's cleanup is exactly its tool grant's revocation and the server's stop.
     stop: config.sandbox === 'local' ? composed.cleanup : composed.serverHandle.stop,
-    attachWebEvidence: composed.attachWebEvidence ?? null,
+    onConnectorEvent: composed.onConnectorEvent ?? null,
   }
 }
 
@@ -605,7 +606,7 @@ export async function runTournamentCli(
     let planFor: ((agentIds: readonly string[]) => Promise<void>) | null = null
     let releasePopulation: (() => Promise<void>) | null = null
     let sealedArtifacts: SealedArtifactWriter | null = null
-    let attachWebEvidence: ((runId: string, sink: EventSink) => void) | null = null
+    let onConnectorEvent: RealDeps['onConnectorEvent'] = null
     const runIdHolder: RunIdHolder = { value: '' }
     // Read first: a wrong folder should cost no setup.
     const seedStrategies = opts.seedStrategiesDir ? await loadSeedStrategies(opts.seedStrategiesDir) : []
@@ -631,7 +632,7 @@ export async function runTournamentCli(
       planFor = built.planFor
       releasePopulation = built.releasePopulation
       sealedArtifacts = built.sealedArtifacts
-      attachWebEvidence = built.attachWebEvidence
+      onConnectorEvent = built.onConnectorEvent
       stopServer = built.stop
 
       // Pre-flight: fail fast and legibly before any agent runs or money is spent,
@@ -688,8 +689,8 @@ export async function runTournamentCli(
 
     const run = engine.createRun('cli', opts.goal)
     runIdHolder.value = run.id
-    // Web tool calls join the run's audit like bridge evidence does in the dashboard.
-    attachWebEvidence?.(run.id, (e) => engine.observe(e))
+    // Tool bridge calls (web tools, connectors) join the run's audit as they do in the dashboard.
+    onConnectorEvent?.((e) => engine.observe(e))
     disposeSandbox = () => engine.dispose(run.id)
 
     // Deliberately after createRun rather than at process start: the sweep's second safety

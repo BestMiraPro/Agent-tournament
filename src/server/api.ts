@@ -545,7 +545,6 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         emit(e)
       }
       // The host's web tool calls take the same path as bridge evidence.
-      composed.attachWebEvidence?.(runId, bridgeEmit)
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',
@@ -1132,7 +1131,6 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         engine.observe(e)
         emit(e)
       }
-      composed.attachWebEvidence?.(runId, bridgeEmit)
       if (spec.sandbox === 'local' && spec.workspaceRoot) {
         record.bridges.push(startEventBridge({
           baseUrl: composed.serverHandle?.baseUrl ?? spec.serverUrl ?? '',

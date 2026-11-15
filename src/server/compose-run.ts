@@ -51,7 +51,7 @@ import { relayProviderConfig } from '../runtime/opencode/relay-config.js'
 import type { RelayPolicy, RelayUpstream } from '../runtime/provider-relay.js'
 import { relayUpstreamsFromAuth, type CatalogProvider } from '../runtime/relay-credentials.js'
 import { processRelay } from '../runtime/relay-process.js'
-import type { ConnectorEvent, ToolBridge } from '../connectors/bridge.js'
+import { TOOL_CALLS_PER_AGENT, type ConnectorEvent, type ToolBridge } from '../connectors/bridge.js'
 import { processToolBridge } from '../connectors/bridge-process.js'
 import type { ConnectorResolver } from '../connectors/resolve.js'
 import { planRunConnectors, type ConnectorRunPlan } from '../connectors/run-plan.js'
@@ -74,10 +74,10 @@ import { sweepOrphanContainers, type SweepOptions } from '../runtime/docker/swee
 import { DockerSandbox } from '../runtime/docker/sandbox.js'
 import type { RunSpec } from './run-spec.js'
 import type { EventSink } from '../engine/events.js'
-import { webCallEvent } from '../connectors/web/evidence.js'
-import { processWebTools, type RunWebGrant } from '../connectors/web/http-server.js'
+import { connectorResolver as builtinsOnly } from '../connectors/resolve.js'
+import { TEAM_AGENT_ID, WEB_CONNECTOR_ID, endWebRun, ensureWebConnector, runHasWeb } from '../connectors/web/builtin.js'
 import { DEFAULT_WEB_LIMITS } from '../connectors/web/limits.js'
-import { webOpencodeConfig, webToolsPrompt } from '../connectors/web/opencode.js'
+import { webToolsPrompt } from '../connectors/web/opencode.js'
 
 export interface ComposeSeams {
   startHostServer: (opts: { timeoutMs: number; env?: Record<string, string> }) => Promise<ServerHandle>
@@ -129,8 +129,6 @@ export interface ComposeSeams {
   readTextFile: (path: string) => Promise<string>
   createShardNetworkFn: (runId: string, shardIndex: number) => Promise<string>
   removeShardNetworkFn: (name: string, onWarning: (message: string) => void) => Promise<boolean>
-  /** The process's web tool endpoint for local workers: grants per run, and the URL agents use. */
-  webTools: () => Promise<{ host: { grant(): RunWebGrant }; url: string }>
 }
 
 export type PathKind = 'file' | 'directory' | 'missing'
@@ -175,7 +173,6 @@ export const defaultSeams: ComposeSeams = {
   readTextFile: (path) => readFile(path, 'utf8'),
   createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
   removeShardNetworkFn: (name, onWarning) => removeShardNetwork(name, onWarning),
-  webTools: () => processWebTools(),
 }
 
 /**
@@ -330,12 +327,6 @@ export interface ComposedRun {
   channel?: Partial<ChannelLimits>
   /** Collaboration: where the grader opens a round's sealed output (absent: it is inlined). */
   sealedArtifacts?: SealedArtifactWriter
-  /**
-   * Local runs with web access: starts serving the run's web tools, with each call's record sent to
-   * `sink` as an `agent.web` event (the audit and the live view). Called once the run id exists;
-   * calls before it are refused. Absent when the run has no web tools.
-   */
-  attachWebEvidence?: (runId: string, sink: EventSink) => void
   cleanup: () => Promise<void>
 }
 
@@ -515,8 +506,11 @@ export async function composeRun(
   if (connectorResolver?.storeDir) {
     assertStoreOutside(connectorResolver.storeDir, { workspaceRoot, contextDir: spec.contextDir, seedDir: spec.seedDir })
   }
-  const wantedConnectors = spec.connectors ?? []
-  if (wantedConnectors.length > 0 && !connectorResolver) {
+  const ownConnectors = (spec.connectors ?? []).filter((c) => c.id !== WEB_CONNECTOR_ID)
+  const withWeb = runHasWeb({ sandbox: spec.sandbox, webAccess: spec.webAccess })
+  if (withWeb) ensureWebConnector()
+  const wantedConnectors = withWeb ? [...ownConnectors, { id: WEB_CONNECTOR_ID, writeTools: [] }] : ownConnectors
+  if (ownConnectors.length > 0 && !connectorResolver) {
     throw new Error('Connectors are not available here: start the run from the dashboard, which holds them.')
   }
   // Host reads only, before capacity or any server: a protected run the relay cannot carry is refused now.
@@ -564,24 +558,39 @@ export async function composeRun(
     await s.validateModels(server.client, workspaceRoot, config, onWarning)
 
     // Opened and granted on the host before any worker exists; a connector that cannot connect refuses the run.
+    const team = config.workflow === 'collaboration'
     let connectorPlan: ConnectorRunPlan | null = null
     let toolBridge: Awaited<ReturnType<ComposeSeams['toolBridge']>> | null = null
     if (wantedConnectors.length > 0) {
       toolBridge = await s.toolBridge()
+      const runId = () => opts.runIdHolder?.value || reservationId
       connectorPlan = await planRunConnectors({
         wanted: wantedConnectors,
-        resolver: connectorResolver!,
+        // The web tools are built in, so they resolve the same way with or without the dashboard's store.
+        resolver: {
+          storeDir: connectorResolver?.storeDir ?? null,
+          resolve: (id) => (id === WEB_CONNECTOR_ID ? builtinsOnly(null).resolve(id) : connectorResolver?.resolve(id) ?? null),
+        },
         bridge: toolBridge.bridge,
         grantId: reservationId,
-        runId: () => opts.runIdHolder?.value || reservationId,
+        runId,
+        // A team shares one identity (below), so it gets the whole team's allowance.
+        ...(team ? { maxCallsPerAgent: TOOL_CALLS_PER_AGENT * Math.max(1, config.populationSize) } : {}),
       })
       const granted = connectorPlan
-      revokeTools = () => granted.revoke()
+      revokeTools = async () => {
+        await granted.revoke()
+        if (withWeb) endWebRun(runId())
+      }
     }
-    /** The agent's own OpenCode config: each connector at the bridge, as `base` reaches it, with its token. */
+    /**
+     * The agent's own OpenCode config: each connector at the bridge, as `base` reaches it, with its token. A team
+     * works in one folder and so shares one config: its agents share one identity on the bridge.
+     */
     const connectorConfig = (base: string) => connectorPlan
-      ? (handle: { agentId: string }) => opencodeMcpConfig(connectorPlan!.grant.endpointsFor(handle.agentId, base))
+      ? (handle: { agentId: string }) => opencodeMcpConfig(connectorPlan!.grant.endpointsFor(team ? TEAM_AGENT_ID : handle.agentId, base))
       : undefined
+    const webToolsNote = withWeb ? webToolsPrompt(team ? { ...DEFAULT_WEB_LIMITS, searchesPerAgent: DEFAULT_WEB_LIMITS.searchesPerRun, fetchesPerAgent: DEFAULT_WEB_LIMITS.fetchesPerRun } : DEFAULT_WEB_LIMITS) : null
 
     if (spec.sandbox === 'docker') {
       // Granted before any container work, so every failure below revokes it.
@@ -842,6 +851,7 @@ export async function composeRun(
           onSessionCreated: sessionHook,
           contextPath: spec.contextDir ? CONTAINER_CONTEXT_PATH : null,
           toolsPath: `${TOOLS_MOUNT}/TOOLS.md`,
+          ...(webToolsNote ? { webToolsNote } : {}),
           // Only the daemon's own record counts as evidence of an OOM kill. Without it the
           // failure stays what the runner saw; CPU throttling has no such record here and is
           // never inferred.
@@ -972,10 +982,6 @@ export async function composeRun(
       }
     }
 
-    // Local workers reach the web only through the host's audited tools: a grant on the process's
-    // loopback endpoint, and a per-agent token in each workspace's OpenCode config.
-    const web = spec.webAccess ? await s.webTools() : null
-    const grant = web ? web.host.grant() : null
     const sandbox = new LocalSandbox(workspaceRoot)
     return {
       config, sandbox, provider,
@@ -983,13 +989,9 @@ export async function composeRun(
         onSessionCreated: sessionHook,
         contextPath: spec.contextDir,
         // Local agents run on this host and reach the bridge where it listens.
+        // The web tools come through the same bridge, so local workers reach the web only through audited calls.
         ...(toolBridge ? { projectConfig: connectorConfig(`http://${toolBridge.host}:${toolBridge.port}`) } : {}),
-        ...(web && grant
-          ? {
-              opencodeConfig: (agentId: string) => webOpencodeConfig(web.url, grant.tokenFor(agentId)),
-              webToolsNote: webToolsPrompt(DEFAULT_WEB_LIMITS),
-            }
-          : {}),
+        ...(webToolsNote ? { webToolsNote } : {}),
       }),
       planFor: null,
       serverHandle: server,
@@ -998,10 +1000,8 @@ export async function composeRun(
       capacity: null,
       sealedArtifacts: sealedArtifactWriter(graderDirectory),
       ...(connectorPlan ? { onConnectorEvent: connectorPlan.subscribe } : {}),
-      ...(grant ? { attachWebEvidence: (runId: string, sink: EventSink) => grant.attach(runId, (record) => sink(webCallEvent(record))) } : {}),
       cleanup: async () => {
-        // First: from here on this run's agents can make no further web calls.
-        grant?.revoke()
+        // First: from here on this run's agents can make no further tool or web calls.
         await revokeTools()
         await server.stop().catch(() => {})
       },

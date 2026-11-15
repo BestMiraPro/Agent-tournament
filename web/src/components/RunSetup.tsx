@@ -293,7 +293,7 @@ export function RunSetup({ busy, error, onCreate }: {
               <input id="setup-web" type="checkbox" checked={webAccess} onChange={(e) => setWebAccess(e.target.checked)} disabled={busy} />
               Web access
             </label>
-            <p className="help">Agents can search the web and read pages through the host&apos;s web tools. Every call is recorded as evidence and limited per agent; search keys never reach the agents. Applies to local runs in this version: Docker workers stay offline.</p>
+            <p className="help">Agents can search the web and read pages through the host&apos;s web tools. Every call is recorded as evidence and limited per agent; search keys never reach the agents. Local and docker agents reach them through the tool bridge; docker workers still have no open network.</p>
             <WebSearchStatusLine status={webSearch} />
           </>
         )}

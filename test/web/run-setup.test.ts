@@ -74,7 +74,7 @@ describe('web access', () => {
     const src = readFileSync('web/src/components/RunSetup.tsx', 'utf8')
     expect(src).toContain('id="setup-web"')
     expect(src).toContain('useState(true)')
-    expect(src).toContain('Docker workers stay offline')
+    expect(src).toContain('docker workers still have no open network')
     expect(readFileSync('web/src/App.tsx', 'utf8')).toContain('webAccess: value.webAccess')
   })
 

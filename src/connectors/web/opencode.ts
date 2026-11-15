@@ -12,23 +12,6 @@ import type { WebLimits } from './limits.js'
 
 export const WEB_MCP_SERVER = 'arena'
 export const WEB_TOOL_NAMES = [`${WEB_MCP_SERVER}_web_search`, `${WEB_MCP_SERVER}_web_fetch`] as const
-export const WEB_MCP_TIMEOUT_MS = 60_000
-
-/** The workspace's `.opencode/opencode.json` for one agent. */
-export function webOpencodeConfig(url: string, token: string): string {
-  return `${JSON.stringify({
-    $schema: 'https://opencode.ai/config.json',
-    mcp: {
-      [WEB_MCP_SERVER]: {
-        type: 'remote',
-        url,
-        headers: { Authorization: `Bearer ${token}` },
-        oauth: false,
-        timeout: WEB_MCP_TIMEOUT_MS,
-      },
-    },
-  }, null, 2)}\n`
-}
 
 /**
  * Permission rules a local competitor gets on top of its profile. OpenCode's own `websearch` is

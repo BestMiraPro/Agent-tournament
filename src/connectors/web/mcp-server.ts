@@ -10,7 +10,7 @@ import { BlockedTargetError, MAX_URL_LENGTH } from './ssrf.js'
 /**
  * The web tools as an MCP server for one agent of one run. In-process: keys, limits and evidence
  * stay in the host process that created it, whatever transport carries the protocol (the local
- * loopback endpoint now, the connectors bridge for Docker workers at integration, stdio standalone).
+ * tool bridge as the built-in `arena` connector, or stdio standalone).
  */
 
 export interface WebServerDeps {

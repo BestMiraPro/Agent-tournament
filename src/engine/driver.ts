@@ -26,6 +26,7 @@ import { deadlineTimer, type AgentRunner, type AgentRunResult } from '../runtime
 import { CONTAINER_CONTEXT_PATH } from '../runtime/docker/cli.js'
 import { runPool } from '../runtime/pool.js'
 import { TOOLS_MOUNT } from '../runtime/tool-manifest.js'
+import { agentConnectorIds } from '../connectors/web/builtin.js'
 import { localToolRules } from '../connectors/web/opencode.js'
 import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
 
@@ -362,7 +363,8 @@ export class TournamentEngine {
           serializeCompetitorProfile(p.genome, {
             label: p.agent.label,
             readableDirs: readableDirsFor(config),
-            connectorIds: (config.connectors ?? []).map((c) => c.id),
+            // The run's connectors plus the built-in web tools, which every sandbox reaches through the bridge.
+            connectorIds: agentConnectorIds(config),
             toolRules: toolRulesFor(config),
           }),
         )

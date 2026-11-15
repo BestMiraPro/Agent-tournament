@@ -1,5 +1,4 @@
 import { redactSecrets } from '../../core/redact.js'
-import type { EngineEvent } from '../../engine/events.js'
 import type { FallbackReason, SearchProviderId } from './search.js'
 
 /**
@@ -80,9 +79,4 @@ export function describeWebCall(r: WebCallRecord): { summary: string; detail: st
   ]
   const detail = fields.filter(([, v]) => v !== undefined && v !== null).map(([k, v]) => `${k}=${String(v)}`).join(' ')
   return { summary, detail }
-}
-
-/** The engine event a record becomes in the dashboard: the audit stores it, the live view shows it. */
-export function webCallEvent(r: WebCallRecord): Extract<EngineEvent, { type: 'agent.web' }> {
-  return { type: 'agent.web', runId: r.runId, agentId: r.agentId, callId: r.id, tool: r.tool, outcome: r.outcome, at: r.startedAt, ...describeWebCall(r) }
 }

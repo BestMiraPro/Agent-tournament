@@ -15,6 +15,7 @@ import {
 import { DEFAULT_CONFIG, DEFAULT_TEAM_SIZE, type RunConfig } from '../src/core/types.js'
 import type { HostCapacity } from '../src/runtime/docker/capacity.js'
 import type { SweepOptions } from '../src/runtime/docker/sweep.js'
+import { ToolBridge } from '../src/connectors/bridge.js'
 import { composeRun } from '../src/server/compose-run.js'
 
 const roomyHost: HostCapacity = {
@@ -97,16 +98,20 @@ describe('CLI web access', () => {
     expect(cliRunSpec(cliOpts, localConfig(false)).webAccess).toBe(false)
   })
 
-  test('a local CLI run composes the same audited web tools the dashboard does', async () => {
-    const grant = { tokenFor: vi.fn((id: string) => `tok-${id}`), attach: vi.fn(), revoke: vi.fn() }
+  test('a local CLI run reaches the web tools through the tool bridge, and revokes them on cleanup', async () => {
+    const bridge = new ToolBridge()
     const composed = await composeRun(cliRunSpec(cliOpts, localConfig(true)), {
       startHostServer: async () => ({ client: {}, stop: async () => {} }) as never,
       validateModels: async () => {},
-      webTools: async () => ({ host: { grant: () => grant }, url: 'http://127.0.0.1:1/mcp' }),
+      toolBridge: async () => ({ bridge, port: 1, host: '127.0.0.1' }),
     })
-    expect(composed.attachWebEvidence).toBeTypeOf('function')
+    expect(composed.onConnectorEvent).toBeTypeOf('function')
+    const options = (composed.runner as unknown as { options: { projectConfig: (h: { agentId: string }) => string } }).options
+    const token = (JSON.parse(options.projectConfig({ agentId: 'agent-1' })) as { mcp: { arena: { headers: { Authorization: string } } } })
+      .mcp.arena.headers.Authorization.replace(/^Bearer /, '')
+    expect(bridge.authenticate(token)).not.toBeNull()
     await composed.cleanup()
-    expect(grant.revoke).toHaveBeenCalledTimes(1)
+    expect(bridge.authenticate(token)).toBeNull()
   })
 
   test('the CLI defaults web access on, offers --no-web-access, feeds the audit and revokes on stop', () => {
@@ -114,7 +119,7 @@ describe('CLI web access', () => {
     expect(src).toContain('webAccess: opts.webAccess !== false')
     expect(src).toContain("'no-web-access': { type: 'boolean', default: false }")
     expect(src).toContain("webAccess: values['no-web-access'] ? false : undefined")
-    expect(src).toMatch(/engine\.createRun\('cli', opts\.goal\)\n\s+runIdHolder\.value = run\.id\n(?:\s*\/\/[^\n]*\n)*\s+attachWebEvidence\?\.\(run\.id, \(e\) => engine\.observe\(e\)\)/)
+    expect(src).toMatch(/engine\.createRun\('cli', opts\.goal\)\n\s+runIdHolder\.value = run\.id\n(?:\s*\/\/[^\n]*\n)*\s+onConnectorEvent\?\.\(\(e\) => engine\.observe\(e\)\)/)
     expect(src).toContain("stop: config.sandbox === 'local' ? composed.cleanup : composed.serverHandle.stop")
     expect(src).toContain('stopServer = built.stop')
   })
