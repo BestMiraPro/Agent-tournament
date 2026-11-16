@@ -280,8 +280,26 @@ Nothing needs configuring first. The defaults, each overridable with a flag afte
 | `--no-docker-sandbox` | docker runs are accepted; the container image sets this only when Docker's socket is not mounted |
 | `--docker-reach` | `loopback`: the app runs on the Docker host and reaches containers through ports published on `127.0.0.1`. The container image uses `bridge`: it reaches them at their addresses on Docker's default bridge, and its provider relay and tool bridge listen there for the gateways |
 | `--connectors-dir` | `runs/connectors` — connectors and their credentials (owner-only files); see Connectors |
+| `--data-dir` | none — one folder for everything a dashboard keeps; see Work and Personal profiles |
 
 To run the dashboard itself in Docker, see [Run in Docker](../README.md#run-in-docker) in the README.
+
+### Work and Personal profiles
+
+To keep work and personal runs apart, run two dashboards, each with its own `--data-dir`:
+
+```bash
+npm start -- --port 4300                         # Personal: the project's runs/ folder, as before
+npm start -- --port 4301 --data-dir runs/work    # Work
+```
+
+A data dir (relative to the project folder, or absolute) holds everything that dashboard keeps: `dashboard.db`, `workspaces/` (and the shared toolbox), `connectors/`, and `secrets/` with its Claude setup token and its OpenCode login. Nothing is shared or borrowed between them:
+
+- **Claude:** paste the profile's own `claude setup-token` under Subscriptions in that dashboard. A dashboard with a data dir never falls back to this machine's `claude auth login`, which belongs to whatever account the machine is signed in to.
+- **OpenCode providers (ChatGPT, W&B, API keys):** sign in into the profile's folder, `XDG_DATA_HOME="runs/work/secrets/opencode" npx opencode auth login`. A data dir does not use your global OpenCode login or import keys from OpenCode 2; its startup line says so when it has none.
+- **GitHub and other connectors:** add them on that dashboard's Connectors page, so a Work dashboard holds the company token and a Personal one yours.
+
+Web search keys in `.env` are shared: they are the app's, not an account's. agent-master's Work and Personal profiles can point at the two dashboards (`tournament.profiles` in its config).
 
 ### When a docker run is refused for memory
 

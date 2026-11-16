@@ -48,7 +48,8 @@ if (await probeDashboard(url)) {
  * private auth.json the pinned host server and Docker runs can use.
  */
 async function bridgeOpencode2Credentials(o: StartOptions): Promise<void> {
-  if (o.authFile) return
+  // A data dir keeps its own logins; OpenCode 2's keys belong to whoever installed it.
+  if (o.authFile || o.dataDir) return
   const dataHome = join(projectRoot, 'runs', 'secrets', 'opencode')
   const bridged = await bridgeCredentials({ dataHome, candidates: opencode2Candidates(process.env) }).catch(() => null)
   if (!bridged) return
@@ -61,6 +62,11 @@ async function bridgeOpencode2Credentials(o: StartOptions): Promise<void> {
 
 async function start(o: StartOptions): Promise<void> {
   if (o.dbPath !== ':memory:') mkdirSync(dirname(o.dbPath), { recursive: true })
+  if (o.opencodeDataHome) {
+    mkdirSync(o.opencodeDataHome, { recursive: true, mode: 0o700 })
+    // The host server reads and refreshes its logins here, so a profile's sign-in stays its own.
+    configureHostOpencode({ env: { XDG_DATA_HOME: o.opencodeDataHome } })
+  }
   await bridgeOpencode2Credentials(o)
 
   const dashboard = createDashboard({
@@ -74,6 +80,8 @@ async function start(o: StartOptions): Promise<void> {
     dockerSandbox: o.dockerSandbox,
     dockerReach: o.dockerReach,
     connectorsDir: o.connectorsDir,
+    ...(o.claudeTokenFile ? { claudeTokenFile: o.claudeTokenFile } : {}),
+    hostClaudeLogin: o.hostClaudeLogin,
   })
   if (dashboard.recovered > 0) {
     console.log(`recovered ${dashboard.recovered} interrupted round(s)`)
@@ -102,8 +110,11 @@ async function start(o: StartOptions): Promise<void> {
   console.log(`  workspaces   ${o.workspaceRoot}`)
   console.log(`  connectors   ${o.connectorsDir}`)
   console.log(
-    `  credentials  ${o.authFile ?? 'none found (docker runs will be refused; run `opencode auth login`)'}`,
+    `  credentials  ${o.authFile ?? (o.opencodeDataHome
+      ? `none in this data dir (sign in with: XDG_DATA_HOME="${o.opencodeDataHome}" npx opencode auth login)`
+      : 'none found (docker runs will be refused; run `opencode auth login`)')}`,
   )
+  if (o.claudeTokenFile) console.log(`  claude       ${o.claudeTokenFile} (setup token only; this machine's own Claude login is not used)`)
   if (!o.dockerSandbox) console.log('  docker runs  off (--no-docker-sandbox)')
   else if (o.dockerReach === 'bridge') console.log("  docker runs  from this container, over Docker's bridge network")
   console.log('')

@@ -62,6 +62,8 @@ export interface DashboardOptions {
   connectorsDir?: string | null
   /** Where the `claude setup-token` value is kept (0600); `runs/secrets/claude-subscription.json` by default. */
   claudeTokenFile?: string
+  /** Whether Claude agents may use this machine's own Claude login without a stored token; on by default. */
+  hostClaudeLogin?: boolean
 }
 
 /** Why a docker run is refused when `dockerSandbox` is false. */
@@ -147,7 +149,10 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
   const resolver = connectorResolver(connectorStore)
   // One set of subscription services for the API and every run, so a token pasted in the
   // dashboard is what the next run uses.
-  const subscriptions = subscriptionServices({ ...(opts.claudeTokenFile ? { tokenFile: opts.claudeTokenFile } : {}) })
+  const subscriptions = subscriptionServices({
+    ...(opts.claudeTokenFile ? { tokenFile: opts.claudeTokenFile } : {}),
+    allowHostLogin: opts.hostClaudeLogin !== false,
+  })
   const seams = { ...(opts.dockerReach === 'bridge' ? bridgeSeams(defaultSeams) : defaultSeams), connectors: () => resolver, subscriptions }
   const composeWith = (spec: RunSpec, o?: { runIdHolder?: RunIdHolder }): Promise<ComposedRun> =>
     opts.dockerSandbox === false && spec.sandbox === 'docker'

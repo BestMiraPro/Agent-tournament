@@ -27,14 +27,20 @@ export interface SubscriptionServices {
 
 const HOST_LOGIN_TTL_MS = 30_000
 
-export function subscriptionServices(opts: { tokenFile?: string } = {}): SubscriptionServices {
+/**
+ * `allowHostLogin: false` reports the machine's own Claude login as absent, so only a stored setup
+ * token is ever used: a profile's dashboard must not run on whatever account the machine is in.
+ */
+export function subscriptionServices(opts: { tokenFile?: string; allowHostLogin?: boolean } = {}): SubscriptionServices {
   const store = new ClaudeTokenStore(opts.tokenFile ?? defaultClaudeTokenFile())
+  const noHostLogin: HostLogin = { loggedIn: false, authMethod: null, subscriptionType: null }
   let login: { at: number; value: Promise<HostLogin> } | null = null
   let version: Promise<string | null> | null = null
   return {
     claudeTokens: store,
     findClaudeCli: () => findClaudeCli(),
     claudeHostLogin: () => {
+      if (opts.allowHostLogin === false) return Promise.resolve(noHostLogin)
       if (login && Date.now() - login.at < HOST_LOGIN_TTL_MS) return login.value
       const cli = findClaudeCli()
       const value = cli ? hostLoginStatus(cli) : Promise.resolve({ loggedIn: false, authMethod: null, subscriptionType: null })
