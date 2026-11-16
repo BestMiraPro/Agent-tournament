@@ -121,15 +121,17 @@ export async function captureSubmission(
 ): Promise<Capture> {
   const submissionMd = await sandbox.readFile(handle, SUBMISSION_FILE)
   const files = await sandbox.listFiles(handle)
+  // Installed packages are not the agent's work: listed, never read or hashed.
+  const work = files.filter((f) => !isDependencyPath(f.path))
 
   const budget = opts.hashBudget
-  const totalBytes = files.reduce((n, f) => n + f.bytes, 0)
+  const totalBytes = work.reduce((n, f) => n + f.bytes, 0)
   const withinBudget =
-    budget === undefined || (files.length <= budget.maxFiles && totalBytes <= budget.maxBytes)
+    budget === undefined || (work.length <= budget.maxFiles && totalBytes <= budget.maxBytes)
 
   const hashes: Record<string, string> = {}
   if (withinBudget) {
-    for (const f of files) {
+    for (const f of work) {
       // SUBMISSION.md is already in hand; re-reading it would open a second window in
       // which its content could change between the two reads.
       const content =
@@ -203,7 +205,7 @@ export async function verifyCapture(
   let planted: string[] = []
   if (capture.hashesComplete) {
     const known = new Set(capture.files.map((f) => f.path))
-    planted = (await sandbox.listFiles(handle)).map((f) => f.path).filter((p) => !known.has(p))
+    planted = (await sandbox.listFiles(handle)).map((f) => f.path).filter((p) => !known.has(p) && !isDependencyPath(p))
   }
 
   const detail =
@@ -240,40 +242,73 @@ export async function verifyCapture(
 }
 
 export interface Quota {
+  /** Disk an agent's workspace may use, as `diskUsage` counts it. */
   maxBytes: number
-  maxFiles: number
 }
 
 export interface QuotaVerdict {
   ok: boolean
   reason: string | null
+  /** Disk used, as `diskUsage` counts it. */
   totalBytes: number
   fileCount: number
 }
 
 /**
- * Caps what one agent may leave behind. Docker's `fsize` ulimit bounds a single file and
- * `--pids-limit` bounds processes; neither stops ONE process from creating files until the
- * filesystem runs out of inodes, so the file count is capped as well as the byte total.
+ * The least disk one file is counted as using: a filesystem allocates whole blocks, and an
+ * empty file still takes an inode. Counting every file as at least this much lets a disk limit
+ * alone also bound the file count, so no process can exhaust the inodes with empty files.
+ */
+export const MIN_FILE_BYTES = 4096
+
+/** What a set of files is counted as using on disk: each file at least `MIN_FILE_BYTES`. */
+export function diskUsage(files: readonly FileEntry[]): number {
+  return files.reduce((n, f) => n + Math.max(f.bytes, MIN_FILE_BYTES), 0)
+}
+
+/**
+ * Folders that hold installed packages or caches, not work. They count for disk like anything
+ * else, but they are not hashed, stored or judged: an agent that installs a dependency to test
+ * its code would otherwise have thousands of library files read into the orchestrator.
+ */
+export const DEPENDENCY_DIRS: ReadonlySet<string> = new Set([
+  'node_modules', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache',
+])
+
+/** Whether a workspace-relative path lies inside a dependency folder. */
+export function isDependencyPath(path: string): boolean {
+  return path.split(/[\\/]/).slice(0, -1).some((segment) => DEPENDENCY_DIRS.has(segment))
+}
+
+/**
+ * Hashing reads every hashed file into the orchestrator, so it stops past this many files:
+ * the capture is kept but left unhashed, as for a hostile agent's million files. A bound on
+ * the orchestrator's work, not a limit on agents; dependency folders do not count toward it.
+ */
+export const HASH_BUDGET_FILES = 2000
+
+/** A disk size for a message: GiB or MiB to one decimal, or whole KiB below a MiB. */
+export function formatDiskSize(bytes: number): string {
+  if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GiB`
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`
+  return `${Math.ceil(bytes / 1024)} KiB`
+}
+
+/**
+ * Caps the disk one agent's workspace may use. Docker's `fsize` ulimit bounds a single file
+ * and `--pids-limit` bounds processes; neither stops ONE process from creating files until
+ * the filesystem runs out of inodes, which `MIN_FILE_BYTES` per file closes without a
+ * separate file-count limit.
  */
 export function checkQuota(files: readonly FileEntry[], quota: Quota): QuotaVerdict {
-  const totalBytes = files.reduce((n, f) => n + f.bytes, 0)
+  const totalBytes = diskUsage(files)
   const fileCount = files.length
-
-  if (fileCount > quota.maxFiles) {
-    return {
-      ok: false,
-      totalBytes,
-      fileCount,
-      reason: `workspace holds ${fileCount} files, limit is ${quota.maxFiles}`,
-    }
-  }
   if (totalBytes > quota.maxBytes) {
     return {
       ok: false,
       totalBytes,
       fileCount,
-      reason: `workspace holds ${totalBytes} bytes, limit is ${quota.maxBytes}`,
+      reason: `workspace uses ${formatDiskSize(totalBytes)} of disk (${fileCount} files, each counted as at least 4 KiB), limit is ${formatDiskSize(quota.maxBytes)}`,
     }
   }
   return { ok: true, reason: null, totalBytes, fileCount }

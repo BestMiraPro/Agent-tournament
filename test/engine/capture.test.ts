@@ -2,6 +2,10 @@ import { describe, expect, test } from 'vitest'
 import {
   captureSubmission,
   checkQuota,
+  diskUsage,
+  formatDiskSize,
+  isDependencyPath,
+  MIN_FILE_BYTES,
   quiesceAgent,
   verifyCapture,
   workspaceIsolated,
@@ -241,29 +245,53 @@ describe('workspaceIsolated', () => {
 
 describe('checkQuota', () => {
   test('passes a workspace under the limit', () => {
-    expect(checkQuota([{ path: 'a', bytes: 100 }], { maxBytes: 1000, maxFiles: 10 }).ok).toBe(true)
+    expect(checkQuota([{ path: 'a', bytes: 100 }], { maxBytes: 10_000 }).ok).toBe(true)
   })
 
-  test('fails a workspace over the byte limit', () => {
-    const r = checkQuota([{ path: 'a', bytes: 5000 }], { maxBytes: 1000, maxFiles: 10 })
+  test('fails a workspace over the disk limit, naming both sizes', () => {
+    const r = checkQuota([{ path: 'a', bytes: 50_000 }], { maxBytes: 10_000 })
     expect(r.ok).toBe(false)
-    expect(r.reason).toMatch(/bytes|size/i)
+    expect(r.reason).toBe('workspace uses 49 KiB of disk (1 files, each counted as at least 4 KiB), limit is 10 KiB')
   })
 
-  test('fails a workspace over the file-count limit', () => {
-    const files = Array.from({ length: 50 }, (_, i) => ({ path: `f${i}`, bytes: 1 }))
-    const r = checkQuota(files, { maxBytes: 1_000_000, maxFiles: 10 })
+  test('every file counts as at least 4 KiB, so empty files cannot slip under the limit', () => {
+    const files = Array.from({ length: 50 }, (_, i) => ({ path: `f${i}`, bytes: 0 }))
+    expect(diskUsage(files)).toBe(50 * MIN_FILE_BYTES)
+    const r = checkQuota(files, { maxBytes: 100_000 })
     expect(r.ok).toBe(false)
-    expect(r.reason).toMatch(/files/i)
+    expect(r.fileCount).toBe(50)
   })
 
-  // Amendment (C): 500 files is ordinary work (an `npm install` alone exceeds it).
-  test('the default file limit tolerates a dependency install', () => {
-    expect(DEFAULT_CONFIG.maxWorkspaceFiles).toBe(2000)
-    const files = Array.from({ length: 1500 }, (_, i) => ({ path: `node_modules/f${i}`, bytes: 10 }))
-    expect(checkQuota(files, {
-      maxBytes: DEFAULT_CONFIG.maxWorkspaceBytes,
-      maxFiles: DEFAULT_CONFIG.maxWorkspaceFiles,
-    }).ok).toBe(true)
+  // The team that scored 0 for testing its code held 6,869 files, about 30 MiB as counted.
+  test('the default limit takes a dependency install with no file-count limit', () => {
+    expect(DEFAULT_CONFIG.maxWorkspaceBytes).toBe(1_073_741_824)
+    const files = Array.from({ length: 20_000 }, (_, i) => ({ path: `node_modules/p/f${i}.js`, bytes: 2000 }))
+    expect(checkQuota(files, { maxBytes: DEFAULT_CONFIG.maxWorkspaceBytes }).ok).toBe(true)
+    expect(formatDiskSize(DEFAULT_CONFIG.maxWorkspaceBytes)).toBe('1.0 GiB')
+  })
+})
+
+describe('dependency folders', () => {
+  test('a path inside one, at any depth, but not a file merely named like one', () => {
+    for (const p of ['node_modules/zod/index.js', 'agents/a/sandbox/node_modules/x.js', '.venv/bin/python', 'src/__pycache__/m.pyc', 'output/x/.pytest_cache/v']) {
+      expect(isDependencyPath(p)).toBe(true)
+    }
+    for (const p of ['node_modules', 'notes/venv.md', 'output/README.md', 'src/node_modules.ts']) {
+      expect(isDependencyPath(p)).toBe(false)
+    }
+  })
+
+  test('are listed but never hashed, and do not use up the hash budget', async () => {
+    const sb = new MockSandbox()
+    const handle = await sb.provision('a', {})
+    await sb.writeFile(handle, 'SUBMISSION.md', '# s')
+    for (let i = 0; i < 10; i++) await sb.writeFile(handle, `node_modules/p/f${i}.js`, 'x')
+    const c = await captureSubmission(sb, handle, { executionStopped: true, hashBudget: { maxFiles: 5, maxBytes: 1_000_000 } })
+    expect(c.hashesComplete).toBe(true)
+    expect(Object.keys(c.hashes).some((p) => p.startsWith('node_modules/'))).toBe(false)
+    expect(c.files.filter((f) => f.path.startsWith('node_modules/'))).toHaveLength(10)
+    // Packages installed after the capture are not reported as planted files.
+    await sb.writeFile(handle, 'node_modules/p/late.js', 'x')
+    expect((await verifyCapture(sb, handle, c, { executionStopped: true })).tampered).toBe(false)
   })
 })

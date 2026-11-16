@@ -42,6 +42,8 @@ export interface AgentRunnerOptions {
   toolsPath?: string | null
   /** What the prompt says about the run's web tools; null or absent when it has none. */
   webToolsNote?: string | null
+  /** What the prompt says about the workspace: its disk limit and the packages already installed (runtime/workspace-note.ts). */
+  workspaceNote?: string | null
   /**
    * The runtime's own evidence that an agent failed because of a resource limit — an OOM kill
    * recorded by the daemon — or null when there is none. Consulted only for runs that ended
@@ -83,6 +85,7 @@ export function buildAgentPrompt(
   contextPath: string | null = null,
   toolsPath: string | null = null,
   webTools: string | null = null,
+  workspace: string | null = null,
 ): string {
   return [
     'GOAL:',
@@ -95,6 +98,7 @@ export function buildAgentPrompt(
       ? [`The tools already installed here are listed in ${toolsPath}. Read it before you install or set anything up.`, '']
       : []),
     ...(webTools ? [webTools, ''] : []),
+    ...(workspace ? [workspace, ''] : []),
     `When you are finished, write your final answer to ${SUBMISSION_FILE} in your working directory.`,
     'Anything else you create is supporting evidence. Only ' + SUBMISSION_FILE + ' is judged.',
   ].join('\n')
@@ -400,8 +404,8 @@ export class OpenCodeAgentRunner implements AgentRunner {
         parts: [{
           type: 'text' as const,
           text: team
-            ? buildTeamPrompt(ctx.goalMd, team, this.options.contextPath ?? null, this.options.toolsPath ?? null, this.options.webToolsNote ?? null)
-            : buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null, this.options.toolsPath ?? null, this.options.webToolsNote ?? null),
+            ? buildTeamPrompt(ctx.goalMd, team, this.options.contextPath ?? null, this.options.toolsPath ?? null, this.options.webToolsNote ?? null, this.options.workspaceNote ?? null)
+            : buildAgentPrompt(ctx.goalMd, this.options.contextPath ?? null, this.options.toolsPath ?? null, this.options.webToolsNote ?? null, this.options.workspaceNote ?? null),
         }],
       }
       tracked.prompt = { model: body.model, agent: body.agent, system: body.system }

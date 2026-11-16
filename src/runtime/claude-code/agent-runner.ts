@@ -38,6 +38,8 @@ export interface ClaudeCodeRunnerOptions {
   toolsPath?: string | null
   /** What the prompt says about the run's web tools; null or absent when it has none. */
   webToolsNote?: string | null
+  /** As `AgentRunnerOptions.workspaceNote`: the disk limit and the packages already installed. */
+  workspaceNote?: string | null
   /** The bridge's MCP servers for this agent (connectors, web tools), as the CLI reaches them; none when absent. */
   mcpServers?: (handle: AgentHandle) => readonly { id: string; url: string; headers: Record<string, string> }[]
   /** The CLI's session id, the instant it is known, so live activity keys like OpenCode's. */
@@ -238,10 +240,10 @@ export class ClaudeCodeAgentRunner implements AgentRunner {
 
       if (tracked.stopRequested) this.requestKill(tracked)
       else {
-        const { contextPath = null, toolsPath = null, webToolsNote = null } = this.options
+        const { contextPath = null, toolsPath = null, webToolsNote = null, workspaceNote = null } = this.options
         const prompt = ctx.team
-          ? buildTeamPrompt(ctx.goalMd, ctx.team, contextPath, toolsPath, webToolsNote)
-          : buildAgentPrompt(ctx.goalMd, contextPath, toolsPath, webToolsNote)
+          ? buildTeamPrompt(ctx.goalMd, ctx.team, contextPath, toolsPath, webToolsNote, workspaceNote)
+          : buildAgentPrompt(ctx.goalMd, contextPath, toolsPath, webToolsNote, workspaceNote)
         void this.write(tracked, prompt).catch(() => {})
       }
       // Sent once, as on the OpenCode path; a failed send is not retried.

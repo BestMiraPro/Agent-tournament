@@ -5,9 +5,11 @@ import { describe, expect, test } from 'vitest'
 import {
   GRADER_AGENT,
   GRADER_DIR,
+  REFLECTOR_AGENT,
   SEALED_DIR,
   sealedArtifactWriter,
   serializeGraderProfile,
+  serializeReflectorProfile,
   writeGraderProfile,
 } from '../../../src/runtime/opencode/grader-profile.js'
 
@@ -41,9 +43,18 @@ describe('grader profile', () => {
       const dir = writeGraderProfile(root, null)
       expect(dir).toBe(join(root, GRADER_DIR))
       expect(readFileSync(join(dir, '.opencode', 'agents', `${GRADER_AGENT}.md`), 'utf8')).toBe(serializeGraderProfile(null))
+      expect(readFileSync(join(dir, '.opencode', 'agents', `${REFLECTOR_AGENT}.md`), 'utf8')).toBe(serializeReflectorProfile())
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('reflector profile', () => {
+  test('frontmatter only, every tool denied, so no call can wait on a permission prompt', () => {
+    const md = serializeReflectorProfile()
+    expect(md.split('\n---\n')[1] ?? '').toBe('')
+    expect(md).toBe('---\ndescription: tournament reflector\npermission:\n  "*": deny\n---\n')
   })
 })
 

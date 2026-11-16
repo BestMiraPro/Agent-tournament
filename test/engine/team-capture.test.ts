@@ -10,7 +10,7 @@ const dirs: string[] = []
 afterEach(async () => {
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true })
 })
-const quota = { maxBytes: 1_000_000, maxFiles: 100 }
+const quota = { maxBytes: 1_000_000 }
 
 describe('captureTeamOutput', () => {
   test('hashes every output file, stores text, lists binary, and seals only a stopped team', async () => {
@@ -39,9 +39,9 @@ describe('captureTeamOutput', () => {
     expect(await captureTeamOutput(sb, h, { executionStopped: true, quota })).toMatchObject({ status: 'no_submission', fileCount: 0 })
     await sb.writeFile(h, 'output/a.md', 'a')
     await sb.writeFile(h, 'output/b.md', 'b')
-    const over = await captureTeamOutput(sb, h, { executionStopped: true, quota: { maxBytes: 1000, maxFiles: 2 } })
+    const over = await captureTeamOutput(sb, h, { executionStopped: true, quota: { maxBytes: 2 * 4096 } })
     expect(over.status).toBe('error')
-    expect(over.errorText).toBe('team workspace holds 3 files, limit is 2')
+    expect(over.errorText).toBe('team workspace uses 12 KiB of disk (3 files, each counted as at least 4 KiB), limit is 8 KiB')
   })
 
   test('a channel file turned into a link is left out rather than failing the round', async (ctx) => {

@@ -3,6 +3,8 @@ import { DEFAULT_CONFIG, type RunConfig } from '../../src/core/types.js'
 import { openDb } from '../../src/db/open.js'
 import { makeRepos } from '../../src/db/repos.js'
 import { AuditCollector } from '../../src/engine/audit.js'
+import { diskUsage, MIN_FILE_BYTES } from '../../src/engine/capture.js'
+import { NPM_STOP_CONTENT, NPM_STOP_FILE } from '../../src/runtime/toolbox.js'
 import { parseChannel } from '../../src/engine/channel.js'
 import { TournamentEngine, type EngineDeps } from '../../src/engine/driver.js'
 import type { EngineEvent } from '../../src/engine/events.js'
@@ -153,18 +155,62 @@ describe('a collaboration round', () => {
     expect(profile).toContain('  websearch: deny')
   })
 
+  test('a real team folder starts with a package.json that keeps npm installs in it; one the team edited is kept', async () => {
+    const t = makeTeam({
+      population: 2,
+      config: { sandbox: 'local' },
+      wrapRunner: (inner, sandbox) => ({
+        ...inner,
+        run: async (h, c) => {
+          if (c.team?.label === 'agent-01') await sandbox.writeFile(h, NPM_STOP_FILE, '{"dependencies":{"left-pad":"1.3.0"}}')
+          return inner.run(h, c)
+        },
+        abortAll: () => inner.abortAll(),
+        quiesce: () => inner.quiesce(),
+        send: (h, text) => inner.send(h, text),
+      }),
+    })
+    const run = t.engine.createRun('team', 'g')
+    const [first] = t.repos.agents.listActive(run.id)
+    const folder = async () => (await t.sandbox.provisionTeam(run.id, [first!.id], {})).handles.get(first!.id)!
+    await t.engine.runRound(run.id, { goalMd: 'g', criteriaMd: null })
+    await t.engine.runRound(run.id, { goalMd: 'g', criteriaMd: null })
+    expect(await t.sandbox.readFile(await folder(), NPM_STOP_FILE)).toBe('{"dependencies":{"left-pad":"1.3.0"}}')
+
+    const fresh = makeTeam({ population: 2, config: { sandbox: 'local' } })
+    const freshRun = fresh.engine.createRun('team', 'g')
+    await fresh.engine.runRound(freshRun.id, { goalMd: 'g', criteriaMd: null })
+    const [member] = fresh.repos.agents.listActive(freshRun.id)
+    const h = (await fresh.sandbox.provisionTeam(freshRun.id, [member!.id], {})).handles.get(member!.id)!
+    expect(await fresh.sandbox.readFile(h, NPM_STOP_FILE)).toBe(NPM_STOP_CONTENT)
+
+    const mock = makeTeam({ population: 2 })
+    const mockRun = mock.engine.createRun('team', 'g')
+    await mock.engine.runRound(mockRun.id, { goalMd: 'g', criteriaMd: null })
+    const [m] = mock.repos.agents.listActive(mockRun.id)
+    expect(await mock.sandbox.readFile((await mock.sandbox.provisionTeam(mockRun.id, [m!.id], {})).handles.get(m!.id)!, NPM_STOP_FILE)).toBeNull()
+  })
+
   test('the seed is copied once, and seeded files do not count against the team quota', async () => {
-    const t = makeTeam({ population: 2, config: { seedDir: '/seed', maxWorkspaceFiles: 5 } })
+    // What the team leaves besides the seed, measured on an identical run; the team is then
+    // capped at exactly that, so only the exemption lets the seeded file fit.
+    const teamFiles = async (t: ReturnType<typeof makeTeam>, runId: string) => {
+      const [first] = t.repos.agents.listActive(runId)
+      const team = await t.sandbox.provisionTeam(runId, [first!.id], { seedDir: '/seed' })
+      expect(team.created).toBe(false)
+      return t.sandbox.listFiles(team.handles.get(first!.id)!)
+    }
+    const probe = makeTeam({ population: 2, config: { seedDir: '/seed' } })
+    const probeRun = probe.engine.createRun('team', 'g')
+    await probe.engine.runRound(probeRun.id, { goalMd: 'g', criteriaMd: null })
+    const work = diskUsage((await teamFiles(probe, probeRun.id)).filter((f) => f.path !== 'data/seed.csv'))
+
+    const t = makeTeam({ population: 2, config: { seedDir: '/seed', maxWorkspaceBytes: work / 2 } })
     const run = t.engine.createRun('team', 'g')
     const r = await t.engine.runRound(run.id, { goalMd: 'g', criteriaMd: null })
-    // The mock workspace holds exactly 10 files of the team's (plumbing included: the mock lists
-    // .opencode too) plus the seeded one, against a team cap of 2 x 5: only the exemption fits it.
-    const [first] = t.repos.agents.listActive(run.id)
-    const team = await t.sandbox.provisionTeam(run.id, [first!.id], { seedDir: '/seed' })
-    expect(team.created).toBe(false)
-    const files = await t.sandbox.listFiles(team.handles.get(first!.id)!)
-    expect(files).toHaveLength(11)
+    const files = await teamFiles(t, run.id)
     expect(files.filter((f) => f.path === 'data/seed.csv')).toHaveLength(1)
+    expect(diskUsage(files)).toBeGreaterThan(work)
     expect(t.repos.teamOutputs.get(r.roundId)!.status).toBe('ok')
   })
 
@@ -190,7 +236,7 @@ describe('a collaboration round', () => {
   test('a team over its quota gets an error result naming the cap', async () => {
     const t = makeTeam({
       population: 2,
-      config: { maxWorkspaceFiles: 5 },
+      config: { maxWorkspaceBytes: 5 * MIN_FILE_BYTES },
       wrapRunner: (inner, sandbox) => ({
         ...inner,
         run: async (h, c) => {
@@ -207,7 +253,7 @@ describe('a collaboration round', () => {
     const r = await t.engine.runRound(run.id, { goalMd: 'g', criteriaMd: null })
     const out = t.repos.teamOutputs.get(r.roundId)!
     expect(out.status).toBe('error')
-    expect(out.errorText).toMatch(/team workspace holds \d+ files, limit is 10/)
+    expect(out.errorText).toMatch(/^team workspace uses \d+ KiB of disk \(\d+ files, each counted as at least 4 KiB\), limit is 40 KiB$/)
     expect(t.repos.teamScores.forRound(r.roundId)!.score).toBe(0)
   })
 

@@ -20,6 +20,7 @@ export function buildTeamPrompt(
   contextPath: string | null = null,
   toolsPath: string | null = null,
   webTools: string | null = null,
+  workspace: string | null = null,
 ): string {
   const post = `${team.postCommand} ${team.label}`
   const size = team.teammates.length + 1
@@ -50,6 +51,7 @@ export function buildTeamPrompt(
       ? [`The tools already installed here are listed in ${toolsPath}. Read it before you install or set anything up.`, '']
       : []),
     ...(webTools ? [webTools, ''] : []),
+    ...(workspace ? [workspace, ''] : []),
     `When your part is done and ${OUTPUT_README} describes it, post a short summary to the channel and stop.`,
   ].join('\n')
 }

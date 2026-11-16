@@ -88,6 +88,8 @@ import type { AgentFailure } from '../core/failure.js'
 import type { AgentHandle } from '../runtime/sandbox.js'
 import { subscriptionServices, type SubscriptionServices } from './subscriptions.js'
 import type { RunSpec } from './run-spec.js'
+import { ensureToolbox, readToolboxPackages, toolboxEnv, toolboxPathEnv, type Toolbox, type ToolboxPackages } from '../runtime/toolbox.js'
+import { workspaceNote } from '../runtime/workspace-note.js'
 import { connectorResolver as builtinsOnly } from '../connectors/resolve.js'
 import { TEAM_AGENT_ID, WEB_CONNECTOR_ID, endWebRun, ensureWebConnector, runHasWeb } from '../connectors/web/builtin.js'
 import { DEFAULT_WEB_LIMITS } from '../connectors/web/limits.js'
@@ -145,6 +147,10 @@ export interface ComposeSeams {
   removeShardNetworkFn: (name: string, onWarning: (message: string) => void) => Promise<boolean>
   /** The Claude and ChatGPT subscription logins: token store, CLI, host login, ChatGPT refresh. */
   subscriptions: SubscriptionServices
+  /** The shared agent toolbox for a local run's workspace root, built when missing; null when it cannot be. */
+  toolbox: (workspaceRoot: string, onWarning: (message: string) => void) => Promise<Toolbox | null>
+  /** The toolbox's package names, for the prompt of agents that get the image's copy. */
+  toolboxPackages: () => Promise<ToolboxPackages | null>
 }
 
 export type PathKind = 'file' | 'directory' | 'missing'
@@ -190,6 +196,8 @@ export const defaultSeams: ComposeSeams = {
   createShardNetworkFn: (runId, shardIndex) => createShardNetwork(runId, shardIndex),
   removeShardNetworkFn: (name, onWarning) => removeShardNetwork(name, onWarning),
   subscriptions: subscriptionServices(),
+  toolbox: (workspaceRoot, onWarning) => ensureToolbox(workspaceRoot, { repoRoot: process.cwd(), onWarning }),
+  toolboxPackages: () => readToolboxPackages(process.cwd()).catch(() => null),
 }
 
 /**
@@ -238,11 +246,18 @@ export function bridgeSeams(
  * `~/.claude` and `~/.agents` in its prompt (seen in a local run, opencode 1.18.21, 15 November
  * 2026). The operator's own instructions and skills are not the agents' to read or to send to a
  * model provider, so both are off.
+ *
+ * Agents' commands run in `/bin/sh`. OpenCode runs zsh and bash as login shells that also source
+ * the operator's `~/.zshrc` or `~/.bashrc`: macOS's path_helper and the operator's profile then
+ * put system folders ahead of the shared toolbox, so `python3` was the system one (opencode
+ * 1.18.21, 16 November 2026), and whatever those files export reached the agents. `sh` gets a
+ * plain `-c`, which is also what Docker agents get (the image has no zsh). Not on Windows.
  */
 export const HOST_SERVER_ENV: Record<string, string> = {
   OPENCODE_ENABLE_EXA: '1',
   OPENCODE_DISABLE_CLAUDE_CODE: '1',
   OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
+  ...(process.platform === 'win32' ? {} : { OPENCODE_CONFIG_CONTENT: JSON.stringify({ shell: '/bin/sh' }) }),
 }
 
 export { RUNTIME_DIR }
@@ -660,6 +675,9 @@ export async function composeRun(
   }
   let graderDirectory: string
   let server: ServerHandle
+  // Local agents run on this host, so they get the host's toolbox; Docker agents get the image's copy.
+  const toolbox = spec.sandbox === 'local' ? await s.toolbox(workspaceRoot, onWarning) : null
+  config.toolboxDir = toolbox?.root ?? null
   try {
     try {
       graderDirectory = writeGraderProfile(workspaceRoot, spec.contextDir ?? null)
@@ -673,7 +691,7 @@ export async function composeRun(
     }
     server = spec.serverUrl
       ? await s.attachHostServer(spec.serverUrl, CONTROL_REQUEST_TIMEOUT_MS)
-      : await s.startHostServer({ timeoutMs: CONTROL_REQUEST_TIMEOUT_MS, env: HOST_SERVER_ENV })
+      : await s.startHostServer({ timeoutMs: CONTROL_REQUEST_TIMEOUT_MS, env: { ...HOST_SERVER_ENV, ...toolboxPathEnv(process.env, toolbox) } })
   } catch (e) {
     // Nothing is running, so nothing may keep holding the capacity reserved above.
     s.ledger.release(reservationId)
@@ -747,6 +765,11 @@ export async function composeRun(
     const claudeMcp = (base: string) => connectorPlan
       ? { mcpServers: (handle: { agentId: string }) => connectorPlan!.grant.endpointsFor(team ? TEAM_AGENT_ID : handle.agentId, base) }
       : {}
+    const workspaceNoteText = workspaceNote({
+      diskLimitBytes: config.maxWorkspaceBytes,
+      teamSize: team ? config.populationSize : null,
+      packages: spec.sandbox === 'local' ? toolbox : await s.toolboxPackages(),
+    })
     const webToolsNote = withWeb ? webToolsPrompt(team ? { ...DEFAULT_WEB_LIMITS, searchesPerAgent: DEFAULT_WEB_LIMITS.searchesPerRun, fetchesPerAgent: DEFAULT_WEB_LIMITS.fetchesPerRun } : DEFAULT_WEB_LIMITS) : null
 
     if (spec.sandbox === 'docker') {
@@ -1040,6 +1063,7 @@ export async function composeRun(
         contextPath: spec.contextDir ? CONTAINER_CONTEXT_PATH : null,
         toolsPath: `${TOOLS_MOUNT}/TOOLS.md`,
         ...(webToolsNote ? { webToolsNote } : {}),
+        workspaceNote: workspaceNoteText,
         // The bridge sits behind the gateway (NO_PROXY covers it), or at the host alias for shared workers.
         ...(toolBridge ? claudeMcp(relayPlan
           ? `http://${GATEWAY_ALIAS}:${GATEWAY_TOOLS_PORT}`
@@ -1058,6 +1082,7 @@ export async function composeRun(
           contextPath: spec.contextDir ? CONTAINER_CONTEXT_PATH : null,
           toolsPath: `${TOOLS_MOUNT}/TOOLS.md`,
           ...(webToolsNote ? { webToolsNote } : {}),
+          workspaceNote: workspaceNoteText,
           resourceFailure,
           runtimeState,
           // Protected workers reach the bridge through their gateway; shared ones through the host alias, or the
@@ -1176,13 +1201,15 @@ export async function composeRun(
 
     const sandbox = new LocalSandbox(workspaceRoot)
     const claudeRunner = new ClaudeCodeAgentRunner(sandbox, {
-      launcher: localLauncher({ cliPath: () => s.subscriptions.findClaudeCli() }),
+      // The toolbox's commands first on PATH, as for the OpenCode server's agents.
+      launcher: localLauncher({ cliPath: () => s.subscriptions.findClaudeCli(), baseEnv: toolboxEnv(process.env, toolbox) }),
       credentials: claudeCredentials(true),
       tokenTransport: 'fd',
       configDirFor: (handle, credentials) => claudeConfigDir(credentials, handle.agentId),
       readableDirs: spec.contextDir ? [spec.contextDir] : [],
       contextPath: spec.contextDir,
       ...(webToolsNote ? { webToolsNote } : {}),
+      workspaceNote: workspaceNoteText,
       ...(toolBridge ? claudeMcp(`http://${toolBridge.host}:${toolBridge.port}`) : {}),
       onSessionCreated: sessionHook,
       onActivity: activityHook,
@@ -1199,6 +1226,7 @@ export async function composeRun(
           // The web tools come through the same bridge, so local workers reach the web only through audited calls.
           ...(toolBridge ? { projectConfig: connectorConfig(`http://${toolBridge.host}:${toolBridge.port}`) } : {}),
           ...(webToolsNote ? { webToolsNote } : {}),
+          workspaceNote: workspaceNoteText,
         }),
       }),
       planFor: null,

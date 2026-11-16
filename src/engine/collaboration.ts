@@ -9,6 +9,7 @@ import type { AgentRunner, AgentRunResult, TeamContext } from '../runtime/agent-
 import { runPool, type PoolResult } from '../runtime/pool.js'
 import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
 import { memberDir } from '../runtime/team-prompt.js'
+import { writeNpmStop } from '../runtime/toolbox.js'
 import type { AuditCollector } from './audit.js'
 import type { BudgetBreach, BudgetTracker } from './budget.js'
 import type { QuiesceStatus } from './capture.js'
@@ -118,6 +119,8 @@ export async function runCollaborationRound(
   }
   await sandbox.writeFile(workspace, 'GOAL.md', goalMd)
   await sandbox.writeFile(workspace, POST_HELPER_PATH, POST_HELPER_SOURCE)
+  // Keeps the team's npm installs in its folder, away from the shared toolbox.
+  if (config.sandbox !== 'mock') await writeNpmStop(sandbox, workspace)
   for (const p of prepared) {
     await sandbox.writeFile(workspace, `${memberDir(p.agent.label)}/NOTES.md`, p.genome.notesMd)
     await sandbox.writeFile(
@@ -185,7 +188,7 @@ export async function runCollaborationRound(
   const n = Math.max(1, prepared.length)
   const capture = await captureTeamOutput(sandbox, workspace, {
     executionStopped,
-    quota: { maxBytes: config.maxWorkspaceBytes * n, maxFiles: config.maxWorkspaceFiles * n },
+    quota: { maxBytes: config.maxWorkspaceBytes * n },
     seeded: host.teamSeeds.get(runId),
   })
   repos.teamOutputs.insert({

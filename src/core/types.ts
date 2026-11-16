@@ -109,13 +109,20 @@ export interface RunConfig {
    * they ran as.
    */
   isolation: 'protected' | 'shared'
-  /** Ceiling on what one agent may leave in its workspace, in bytes. */
+  /**
+   * Disk one agent may use in its workspace, in bytes, each file counted as at least 4 KiB
+   * (`diskUsage` in engine/capture.ts) so empty files cannot exhaust inodes. A collaboration
+   * team gets this per member. There is no separate file-count limit.
+   */
   maxWorkspaceBytes: number
-  /** Ceiling on how many files one agent may leave behind (inode exhaustion). */
-  maxWorkspaceFiles: number
   seedDir: string | null
   /** Read-only reference folder for worker agents and the grader; null when the run has none. */
   contextDir: string | null
+  /**
+   * The shared toolbox a local run's agents may read (runtime/toolbox.ts), by its real path; null
+   * for other sandboxes, and when it could not be built. Set by the composition, never by a spec.
+   */
+  toolboxDir: string | null
   /**
    * Connectors whose tools this run's agents get through the host tool bridge, with the write tools the run opts
    * into. Ids and tool names only: credentials never live in a run's config. Absent on runs from before connectors.
@@ -209,10 +216,12 @@ export const DEFAULT_CONFIG: RunConfig = {
   containerMemory: '1g',
   containerCpus: 1,
   isolation: 'shared',
-  maxWorkspaceBytes: 52_428_800,
-  maxWorkspaceFiles: 2000,
+  // 1 GiB: room for installed packages (a Node framework is tens of MiB, a Python data stack
+  // a few hundred) on top of the work itself. Shared packages come from the toolbox, not here.
+  maxWorkspaceBytes: 1_073_741_824,
   seedDir: null,
   contextDir: null,
+  toolboxDir: null,
   roster: [
     { modelId: 'opencode/muse-spark-1.2-contributor-free', count: 5, temperature: 0.7 },
     { modelId: 'opencode/big-pickle', count: 5, temperature: 0.8 },

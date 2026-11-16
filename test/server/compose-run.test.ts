@@ -17,6 +17,10 @@ const catalogJson = JSON.stringify({
 const authJson = JSON.stringify({ w: { type: 'api', key: 'FAKE-W-KEY' }, wandb: { type: 'api', key: 'FAKE-WANDB-KEY' } })
 import { parseRunSpec } from '../../src/server/run-spec.js'
 import type { AgentRunnerOptions } from '../../src/runtime/opencode/agent-runner.js'
+import { readableDirsFor } from '../../src/engine/driver.js'
+
+/** The OpenCode runner inside a composed runner, which dispatches by model. */
+const openCodeRunnerOf = (runner: unknown) => ((runner as { runnerFor?: (m: string) => unknown }).runnerFor?.('w/m') ?? runner)
 
 const TOOLCHAIN = 'abc123def4567890'
 const inventoryFixture = {
@@ -126,7 +130,10 @@ describe('composeRun', () => {
         workspaceRoot: root, contextDir: linked,
       }), { ...seams, inspectPath: vi.fn(() => 'directory' as const) } as never)
       expect(seams.startHostServer).toHaveBeenCalledWith(expect.objectContaining({
-        env: { OPENCODE_ENABLE_EXA: '1', OPENCODE_DISABLE_CLAUDE_CODE: '1', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1' },
+        env: {
+          OPENCODE_ENABLE_EXA: '1', OPENCODE_DISABLE_CLAUDE_CODE: '1', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
+          ...(process.platform === 'win32' ? {} : { OPENCODE_CONFIG_CONTENT: '{"shell":"/bin/sh"}' }),
+        },
       }))
       const profile = join(root, '.arena-grader', '.opencode', 'agents', 'grader.md')
       expect(existsSync(profile)).toBe(true)
@@ -138,6 +145,56 @@ describe('composeRun', () => {
       rmSync(linked, { recursive: true, force: true })
       rmSync(root, { recursive: true, force: true })
       rmSync(ctx, { recursive: true, force: true })
+    }
+  })
+
+  test('a local run gets the shared toolbox: its commands on the host server\'s PATH, its folder readable, and a prompt that names it', async () => {
+    const seams = mockSeams()
+    seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
+    const root = mkdtempSync(join(tmpdir(), 'compose-toolbox-'))
+    const toolbox = { root: '/tb', binDirs: ['/tb/python/bin', '/tb/node/node_modules/.bin'], python: ['numpy'], node: ['zod'], hasPython: true }
+    const toolboxSeam = vi.fn(async () => toolbox)
+    try {
+      const c = await composeRun(parseRunSpec({
+        name: 'l', goal: 'g', sandbox: 'local', workflow: 'collaboration',
+        roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
+        workspaceRoot: root,
+      }), { ...seams, toolbox: toolboxSeam } as never)
+      expect(toolboxSeam).toHaveBeenCalledWith(root, expect.any(Function))
+      const env = (seams.startHostServer.mock.calls[0] as unknown as [{ env: Record<string, string> }])[0].env
+      const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH')!
+      expect(env[pathKey]!.startsWith(['/tb/python/bin', '/tb/node/node_modules/.bin'].join(process.platform === 'win32' ? ';' : ':'))).toBe(true)
+      expect(c.config.toolboxDir).toBe('/tb')
+      expect(readableDirsFor(c.config)).toEqual(['/tb'])
+      const note = (openCodeRunnerOf(c.runner) as { options: AgentRunnerOptions }).options.workspaceNote!
+      expect(note).toMatch(/^Disk: the team's shared folder may use up to 2\.0 GiB \(1\.0 GiB per member\)/)
+      expect(note).toContain('`python3` with numpy; the Node packages zod')
+      await c.cleanup()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a Docker run builds no host toolbox; its prompt names the image\'s packages', async () => {
+    const seams = mockSeams()
+    seams.startHostServer.mockResolvedValueOnce({ client: { id: 'host' }, stop: vi.fn(async () => {}) })
+    const root = mkdtempSync(join(tmpdir(), 'compose-toolbox-docker-'))
+    const toolboxSeam = vi.fn(async () => null)
+    writeFileSync(join(root, 'auth.json'), authJson)
+    try {
+      const c = await composeRun(parseRunSpec({
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
+        roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 1, temperature: 0.7 }],
+        workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 1,
+      }), { ...seams, toolbox: toolboxSeam, toolboxPackages: vi.fn(async () => ({ python: ['numpy'], node: ['zod'] })) } as never)
+      expect(toolboxSeam).not.toHaveBeenCalled()
+      expect(c.config.toolboxDir).toBeNull()
+      const note = (openCodeRunnerOf(c.runner) as { options: AgentRunnerOptions }).options.workspaceNote!
+      expect(note).toMatch(/^Disk: your workspace may use up to 1\.0 GiB/)
+      expect(note).toContain('`python3` with numpy; the Node packages zod')
+      await c.cleanup()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   })
 

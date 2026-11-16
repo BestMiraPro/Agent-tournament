@@ -1,7 +1,7 @@
 import type { CompleteRequest, Provider } from '../provider.js'
 import type { OpenCodeClient, PromptResponse } from './client.js'
 import { extractReasoning, extractStructured, extractText } from './client.js'
-import { GRADER_AGENT } from './grader-profile.js'
+import { GRADER_AGENT, REFLECTOR_AGENT } from './grader-profile.js'
 import { splitModelId } from './model-id.js'
 import { promptOnce } from './one-shot.js'
 
@@ -25,9 +25,10 @@ export interface OpenCodeProviderOptions {
   timeoutMs: number
   retryCount?: number
   /**
-   * Directory holding the grader profile (see grader-profile.ts). When set, criteria and
-   * judge calls run there as that profile — reading the context folder and browsing the web
-   * under its rules. Reflect calls never use it: rewriting strategies needs no tools.
+   * Directory holding the grader and reflector profiles (see grader-profile.ts). When set,
+   * criteria and judge calls run there as the grader, reading the context folder and browsing
+   * the web under its rules, and reflect calls run there as the reflector, with no tools:
+   * rewriting strategies needs none.
    */
   graderDirectory?: string
 }
@@ -36,7 +37,8 @@ export interface OpenCodeProviderOptions {
  * Structured model calls (judge, reflect, criteria) against a real OpenCode server.
  *
  * Criteria and judge calls may use read-only and web tools under the grader profile when a
- * grader directory is configured; each call is still one prompt with one final answer.
+ * grader directory is configured, and reflect calls run under the tool-less reflector profile;
+ * each call is still one prompt with one final answer.
  *
  * When the caller supplies a JSON Schema, the request uses OpenCode's `json_schema`
  * output format, which validates and retries server-side, and the validated object is
@@ -63,16 +65,14 @@ export class OpenCodeProvider implements Provider {
   async completeRich(req: CompleteRequest): Promise<{ text: string; reasoning: string | null }> {
     // A failed prompt used to leave its session live on the server, still generating and
     // still spending, and the judge's retry loop made three of them per failed call.
-    const asGrader =
-      this.opts.graderDirectory !== undefined &&
-      (req.purpose === 'criteria' || req.purpose === 'judge' || req.purpose === 'review')
+    const profiles = this.opts.graderDirectory
     const res = await promptOnce(
       this.client,
-      asGrader ? this.opts.graderDirectory! : this.directory,
+      profiles ?? this.directory,
       `${req.purpose}-call`,
       {
         model: splitModelId(req.modelId),
-        ...(asGrader ? { agent: GRADER_AGENT } : {}),
+        ...(profiles ? { agent: req.purpose === 'reflect' ? REFLECTOR_AGENT : GRADER_AGENT } : {}),
         parts: [{ type: 'text', text: req.prompt }],
         ...(req.schema
           ? { format: { type: 'json_schema' as const, schema: req.schema, retryCount: this.opts.retryCount ?? 2 } }

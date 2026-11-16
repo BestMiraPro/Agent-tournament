@@ -42,10 +42,17 @@ describe('Dockerfile.agent', () => {
   test('puts the venv first on PATH and keeps caches and thread pools bounded', async () => {
     const df = await read()
     expect(df).toContain('VIRTUAL_ENV=/opt/arena/venv')
-    expect(df).toContain('PATH="/opt/arena/venv/bin:$PATH"')
+    expect(df).toContain('PATH="/opt/arena/venv/bin:/opt/arena/node/node_modules/.bin:$PATH"')
     expect(df).toContain('MPLCONFIGDIR=/tmp/matplotlib')
     for (const v of ['OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS']) expect(df).toContain(`${v}=1`)
     expect(df).toContain('PIP_NO_INDEX=1')
+  })
+
+  test('installs the toolbox Node packages from their lock, without scripts, where imports find them', async () => {
+    const df = await read()
+    expect(df).toContain('COPY toolbox-node/package.json toolbox-node/package-lock.json /opt/arena/node/')
+    expect(df).toContain('npm ci --ignore-scripts --no-audit --no-fund')
+    expect(df).toContain('ln -s /opt/arena/node/node_modules /node_modules')
   })
 
   test('records its toolchain identity and inventory at build', async () => {
