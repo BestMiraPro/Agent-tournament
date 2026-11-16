@@ -45,8 +45,8 @@ npm run tournament -- `
   --mode real --sandbox local `
   --workspace "C:\Users\you\arena-runs" `
   --judge-model "wandb/zai-org/GLM-5.2" `
-  --reflect-model "wandb/deepseek-ai/DeepSeek-V4-Flash" `
-  --worker-models "wandb/deepseek-ai/DeepSeek-V4-Flash"
+  --reflect-model "wandb/deepseek-ai/DeepSeek-V4-Flash-0731" `
+  --worker-models "wandb/deepseek-ai/DeepSeek-V4-Flash-0731"
 ```
 
 Requires opencode `auth.json` at `~/.local/share/opencode/auth.json`. The CLI starts an opencode server, spawns agents as host processes against it, and runs rounds sequentially.
@@ -63,7 +63,7 @@ npm run tournament -- `
   --workspace "C:\Users\you\arena-runs" `
   --auth-file "$env:USERPROFILE\.local\share\opencode\auth.json" `
   --judge-model "wandb/zai-org/GLM-5.2" `
-  --worker-models "wandb/deepseek-ai/DeepSeek-V4-Flash"
+  --worker-models "wandb/deepseek-ai/DeepSeek-V4-Flash-0731"
 ```
 
 Docker mode runs agents in resource-capped containers built from the research toolchain image (`agent-arena:tc-<id>`, built automatically the first time and reused after). Requires Docker installed.
