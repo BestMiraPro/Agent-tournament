@@ -268,6 +268,24 @@ export class OpenCodeClient {
   }
 
   /**
+   * The session's retry state when OpenCode is retrying a failed model call, else null. `action`
+   * is set when the provider names something a person must do (sign in, subscribe).
+   */
+  async sessionRetry(sessionId: string, directory: string): Promise<{ attempt: number; message: string; action?: { title?: string; message?: string } } | null> {
+    const map = await this.request<Record<string, { type?: unknown; attempt?: unknown; message?: unknown; action?: { title?: unknown; message?: unknown } | null }> | null>(
+      'GET', '/session/status', { directory, timeoutMs: 5000 },
+    )
+    const entry = map && typeof map === 'object' && !Array.isArray(map) ? map[sessionId] : undefined
+    if (!entry || entry.type !== 'retry') return null
+    const text = (v: unknown) => (typeof v === 'string' ? v.slice(0, 300) : undefined)
+    return {
+      attempt: typeof entry.attempt === 'number' ? entry.attempt : 0,
+      message: text(entry.message) ?? '',
+      ...(entry.action && typeof entry.action === 'object' ? { action: { title: text(entry.action.title), message: text(entry.action.message) } } : {}),
+    }
+  }
+
+  /**
    * The MCP servers configured for a folder and whether each is connected. Reading it starts the
    * folder's instance if needed, so it returns only after that instance's first connection attempts.
    */

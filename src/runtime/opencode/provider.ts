@@ -31,6 +31,8 @@ export interface OpenCodeProviderOptions {
    * rewriting strategies needs none.
    */
   graderDirectory?: string
+  /** How a call's retries are watched (retry-watch.ts); the defaults outside tests. */
+  retryWatch?: { pollMs?: number; giveUpAttempts?: number }
 }
 
 /**
@@ -80,6 +82,7 @@ export class OpenCodeProvider implements Provider {
       },
       this.opts.timeoutMs,
       () => { this.usage.abandonedSessions++ },
+      this.opts.retryWatch,
     )
 
     this.record(res)

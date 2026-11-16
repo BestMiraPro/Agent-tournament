@@ -83,6 +83,10 @@ export interface CliOptions {
    * dashboard does. Defaults to true; `--no-web-access` turns it off. Docker runs ignore it.
    */
   webAccess?: boolean
+  /** Real runs: each agent attempt's hard limit in minutes (`--agent-timeout-minutes`); none when absent. */
+  agentTimeoutMinutes?: number
+  /** Real runs: when a still-working agent is told to wrap up, in minutes (`--steer-after-minutes`). */
+  agentSteerAfterMinutes?: number
 }
 
 export interface ValidateRosterOptions {
@@ -252,6 +256,14 @@ export function resolveSandboxMode(
  * Validates `--workflow`. Like `--sandbox`, it arrives as an unvalidated string, and a typo
  * must fail rather than quietly run the other workflow.
  */
+/** A positive number of minutes from a CLI flag, or undefined when the flag is absent; anything else is refused. */
+export function minutesFlag(flag: string, value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`${flag} must be a positive number of minutes, got "${value}"`)
+  return n
+}
+
 export function resolveWorkflow(value: string | undefined): RunConfig['workflow'] {
   const requested = value ?? DEFAULT_CONFIG.workflow
   if (requested !== 'collaboration' && requested !== 'tournament') {
@@ -499,6 +511,8 @@ export function cliRunSpec(opts: CliOptions, config: RunConfig): RunSpec {
       crossoverPct: config.selection.crossoverPct,
     },
     concurrency: config.concurrency,
+    agentTimeoutMs: config.agentTimeoutMs,
+    agentSteerAfterMs: config.agentSteerAfterMs,
     maxContainers: config.maxContainers,
     containerMemory: config.containerMemory,
     containerCpus: config.containerCpus,
@@ -626,6 +640,8 @@ export async function runTournamentCli(
         judge: { ...DEFAULT_CONFIG.judge, modelId: opts.judgeModel ?? DEFAULT_REAL_JUDGE_MODEL },
         reflect: { ...DEFAULT_CONFIG.reflect, modelId: opts.reflectModel ?? DEFAULT_REAL_REFLECT_MODEL },
         webAccess: opts.webAccess !== false,
+        agentTimeoutMs: opts.agentTimeoutMinutes ? opts.agentTimeoutMinutes * 60_000 : DEFAULT_CONFIG.agentTimeoutMs,
+        agentSteerAfterMs: opts.agentSteerAfterMinutes ? opts.agentSteerAfterMinutes * 60_000 : DEFAULT_CONFIG.agentSteerAfterMs,
       }
 
       const built = await buildRealDeps(opts, config, runIdHolder, hooks)
@@ -804,6 +820,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       'worker-models': { type: 'string' },
       'no-validate-models': { type: 'boolean', default: false },
       'no-web-access': { type: 'boolean', default: false },
+      'agent-timeout-minutes': { type: 'string' },
+      'steer-after-minutes': { type: 'string' },
       'seed-strategies': { type: 'string' },
       report: { type: 'string' },
     },
@@ -832,6 +850,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       : undefined,
     validateModels: values['no-validate-models'] ? false : undefined,
     webAccess: values['no-web-access'] ? false : undefined,
+    agentTimeoutMinutes: minutesFlag('--agent-timeout-minutes', values['agent-timeout-minutes']),
+    agentSteerAfterMinutes: minutesFlag('--steer-after-minutes', values['steer-after-minutes']),
     seedStrategiesDir: values['seed-strategies'],
     reportPath: values.report,
   })

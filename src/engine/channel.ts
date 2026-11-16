@@ -11,6 +11,15 @@ export const CHANNEL_FILE = 'CHANNEL.md'
 /** Where PREPARE writes the post helper, inside the workspace's runtime plumbing. */
 export const POST_HELPER_PATH = '.opencode/arena/post.mjs'
 
+/** Who signs a post the operator writes from the dashboard. */
+export const OPERATOR_AUTHOR = 'operator'
+
+/**
+ * How an entry signed `operator` that the engine did not write is recorded: the helper takes any
+ * label, so a member could sign as the operator, and the record must not pass that off as theirs.
+ */
+export const UNVERIFIED_OPERATOR = 'operator (unverified)'
+
 export const CHANNEL_PREAMBLE = [
   '# Team channel',
   '',
@@ -139,6 +148,8 @@ export interface ChannelTailOptions {
   deliver: (agentId: string, text: string) => Promise<boolean>
   /** A new entry this round, in file order. */
   onEntry: (entry: RecordedEntry) => void
+  /** The author an entry is recorded and forwarded under; its own header's label when absent. */
+  relabel?: (entry: ChannelEntry) => string
   /** Entries delivered to one agent in one message. */
   onDelivered?: (agentId: string, seqs: number[]) => void
   limits?: Partial<ChannelLimits>
@@ -217,7 +228,7 @@ export class ChannelTail {
     for (const e of parseChannel(text)) {
       if (this.seen.has(e.key)) continue
       this.seen.add(e.key)
-      const entry: RecordedEntry = { ...e, seq: ++this.seq, agentId: this.byLabel.get(e.author) ?? null }
+      const entry: RecordedEntry = { ...e, author: this.opts.relabel?.(e) ?? e.author, seq: ++this.seq, agentId: this.byLabel.get(e.author) ?? null }
       try {
         this.opts.onEntry(entry)
       } catch {

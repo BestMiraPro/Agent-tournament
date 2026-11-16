@@ -27,7 +27,9 @@ Mock mode uses a deterministic fake provider — it scores on keyword overlap, n
 
 **Direct messages.** While agents work, the engine reads `CHANNEL.md` every 2 seconds and queues each new post into the other agents' sessions, behind whatever they are doing; an `@label` post goes only to that agent. Delivery is bounded so a chatty agent cannot flood the others or the budget: at most 2,000 characters of a post, 6,000 per message, one message per agent every 15 seconds (posts in between are combined), and 30 messages per agent per round, the last of which says forwarding has stopped. Agents that have finished are never woken. The live view shows the channel as it happens, and every round's entries are kept.
 
-**Judging.** Once every agent has stopped, `output/` and `CHANNEL.md` are captured once and sealed with a digest. Text files are stored with the round (up to 256 KiB each and 8 MiB per round); binary files are listed with their size and hash. For local and docker runs the grader gets a copy inside its own folder and reads `README.md` first, then opens what it needs with its read-only tools. The team gets one score per round, with the usual decision record. An empty `output/` scores 0 without a scoring call, and so does a team over its quota (one agent's workspace limits per member). Every member's score row repeats the team score, so the analytics and the CSV export keep working.
+**Messaging the team.** While a round runs, the live view's channel has a **Message the team** box (`POST /api/runs/:id/channel` with `{ "body": "…" }`, up to 4,000 characters). The message is written to `CHANNEL.md` signed `operator`, under the same lock as the agents' posts, and forwarded at once to every agent still working; agents are told that posts signed `operator` come from you and to act on them. An agent can sign a post with any label, so an entry signed `operator` that did not come from the dashboard is recorded as `operator (unverified)`.
+
+**Judging.** Once every agent has stopped, `output/` and `CHANNEL.md` are captured once and sealed with a digest. Text files are stored with the round (up to 256 KiB each and 8 MiB per round); binary files are listed with their size and hash. For local and docker runs the grader gets a copy inside its own folder and reads `README.md` first, then opens what it needs with its read-only tools. The team gets one score per round, with the usual decision record. An empty `output/` scores 0 without a scoring call, and so does a team over its disk limit (one agent's per member). Every member's score row repeats the team score, so the analytics and the CSV export keep working.
 
 **Team size.** Under Docker the whole team shares one protected container, charged one agent's ceilings per member: memory and CPUs per agent × agents, plus 256 processes and 2,048 open files per agent, plus one 64 MiB gateway. On the reference machine (~5.2 GiB of free Docker memory, 80% committable) four agents at `1g` fit and five do not, so four is the default team in the setup form and on the CLI. A team that does not fit is refused with the largest team that would. The container restarts every round; the folder does not.
 
@@ -48,6 +50,8 @@ npm run tournament -- `
 ```
 
 Requires opencode `auth.json` at `~/.local/share/opencode/auth.json`. The CLI starts an opencode server, spawns agents as host processes against it, and runs rounds sequentially.
+
+**Local agents run as you.** Their shell commands can read and change anything your account can, your home folder included, and what they read is sent to their model provider. Profile rules keep their file tools inside the workspace, but a shell command is not confined. Use the docker sandbox for anything you would not hand to a stranger; the setup form says so when you pick local.
 
 ## Real mode (docker — agents in containers)
 
@@ -248,6 +252,8 @@ Judging and reflecting on a Claude model run the CLI on this machine with JSON o
 | `--seed-strategies` | (none) | Folder of `.md` files, one round-1 strategy per file (see Seed strategies) |
 | `--report` | (none) | Write the run's markdown report to this path when the last round ends |
 | `--no-web-access` | off | Local real runs: do not give agents the web tools (see Web search and page fetch) |
+| `--agent-timeout-minutes` | none | Real runs: stop each agent after this many minutes; it keeps what it wrote |
+| `--steer-after-minutes` | 60 | Real runs: tell a still-working agent to wrap up after this many minutes |
 
 ## Dashboard (live operator view)
 
@@ -315,7 +321,9 @@ The WebSocket pushes per-agent status/activity/usage and round status/scored/com
 
 **Verifying the protected runtime on this machine** — `$env:ARENA_DOCKER_E2E="1"; npx vitest run test/e2e/container-policy.test.ts` starts two protected containers with fake credentials and a fake model provider and checks every boundary above from inside them. It calls no real model and takes about 30 seconds once the image exists.
 
-**An agent is still working after a long time** — agents have no time limit. After one hour, an agent that is still working is sent one message telling it to write `SUBMISSION.md` with what it has and stop; it reads the message after its current step and wraps up itself. An agent that keeps going anyway, or a model call that never returns, keeps the round waiting: use **Abort** on the round. GLM-5.3-Flash on W&B was seen to stop mid-reply twice on September 15–16, once through the relay and once directly from the host, so such stalls come from the provider. Through the relay, a model reply that sends nothing at all for 15 minutes is treated as a dead connection and closed.
+**An agent is still working after a long time** — by default agents have no hard time limit; set one with **Agent time limit** in the setup form's Advanced section (`agentTimeoutMinutes` in the API, `--agent-timeout-minutes` on the CLI), and the agent is stopped then and keeps what it wrote. After one hour (**Ask agents to wrap up after**), an agent that is still working is sent one message telling it to finish with what it has; it reads the message after its current step and wraps up itself. Without a limit, an agent that keeps going anyway, or a model call that never returns, keeps the round waiting: use **Abort** on the round.
+
+**An agent fails with `PROVIDER_LIMIT`** — OpenCode retries a failed model call without end. When the provider says a person must act (a used-up free tier: "Free usage limit reached"), or the same call has been retried 8 times, the agent, judge or reflection call is stopped and fails with the provider's message instead of waiting for good. Fix the account or pick another model and run the round again. GLM-5.3-Flash on W&B was seen to stop mid-reply twice on September 15–16, once through the relay and once directly from the host, so such stalls come from the provider. Through the relay, a model reply that sends nothing at all for 15 minutes is treated as a dead connection and closed.
 
 **`no opencode auth.json`** — the docker e2e + real mode need `~/.local/share/opencode/auth.json`. Set `ARENA_DOCKER_AUTH_FILE` to override.
 

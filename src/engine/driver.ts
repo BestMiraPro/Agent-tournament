@@ -84,6 +84,8 @@ export class TournamentEngine {
   private aborted = new Set<string>()
   /** Collaboration: what the seed put in each run's team workspace, taken when it was created. */
   private teamSeeds = new Map<string, Map<string, number>>()
+  /** How the operator posts to each run's running collaboration round; set by the round while it runs. */
+  private operatorPosts = new Map<string, (text: string) => Promise<void>>()
 
   constructor(private d: EngineDeps) {}
 
@@ -221,6 +223,18 @@ export class TournamentEngine {
    * EVOLVE gate complete the round. Async only for the session aborts; the flag itself is set synchronously, so a
    * caller that cannot await still stops all future dispatches the instant it calls.
    */
+  /**
+   * Posts to the team channel of the run's running collaboration round, signed `operator`: written
+   * to CHANNEL.md like any post and forwarded to every member still working. False when no
+   * collaboration round of this run is past PREPARE and still running.
+   */
+  async postToTeam(runId: string, text: string): Promise<boolean> {
+    const post = this.operatorPosts.get(runId)
+    if (!post) return false
+    await post(text)
+    return true
+  }
+
   async abortRound(runId: string): Promise<void> {
     this.aborted.add(runId)
     await this.d.runner.abortAll()
@@ -332,7 +346,7 @@ export class TournamentEngine {
         const done = await runCollaborationRound({
           repos, sandbox: this.d.sandbox, runner: this.d.runner, judge, reflector, config, budget,
           audit: this.d.audit, channelLimits: this.d.channel, sealedArtifacts: this.d.sealedArtifacts,
-          readableDirs: readableDirsFor(config), teamSeeds: this.teamSeeds,
+          readableDirs: readableDirsFor(config), teamSeeds: this.teamSeeds, operatorPosts: this.operatorPosts,
           connectorIds: agentConnectorIds(config), toolRules: toolRulesFor(config),
           emit: (e) => this.emit(e),
           aborted: () => this.aborted.has(runId),

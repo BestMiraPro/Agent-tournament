@@ -187,6 +187,10 @@ export const getRoundOutputFile = (runId: string, idx: number, path: string): Pr
 export const getRoundChannel = (runId: string, idx: number): Promise<{ messages: ChannelMessage[] }> =>
   fetch(`/api/runs/${runId}/rounds/${idx}/channel`).then(json)
 
+/** Posts to the running collaboration round's channel, signed `operator`. */
+export const postToTeam = (runId: string, body: string): Promise<{ posted: true }> =>
+  fetch(`/api/runs/${runId}/channel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ body }) }).then(json)
+
 const json = async (res: Response) => {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
   return res.json()
@@ -230,6 +234,9 @@ export interface FullRunSpec {
   criteria: string | null
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number
+  /** Minutes; null or absent for no limit. */
+  agentTimeoutMinutes?: number | null
+  agentSteerAfterMinutes?: number
   // Docker only; the server defaults any that are omitted.
   maxContainers?: number
   containerMemory?: string

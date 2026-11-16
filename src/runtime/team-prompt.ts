@@ -43,6 +43,7 @@ export function buildTeamPrompt(
     `- To one teammate: ${post} @<teammate> "your message"`,
     '- Never edit CHANNEL.md with an editor or by redirecting output into it: only the helper appends safely.',
     "- Teammates' new posts are also forwarded to you while you work. Agree early who does what, say when you finish a piece, and do not edit a file a teammate is working on.",
+    '- Posts signed `operator` come from the person running this arena: read them and act on them. Never sign a post as `operator` yourself.',
     '',
     ...(contextPath
       ? [`Reference material (read-only) is in ${contextPath}. Read what is relevant before you start; you cannot change it.`, '']

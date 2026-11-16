@@ -1,4 +1,5 @@
 import type { OpenCodeClient, PromptBody, PromptResponse } from './client.js'
+import { watchRetries } from './retry-watch.js'
 
 /** What a one-shot call leaves behind when it could not finish cleanly. */
 export interface AbandonedSession {
@@ -31,11 +32,14 @@ export async function promptOnce(
   body: PromptBody,
   timeoutMs: number,
   onAbandoned?: (session: AbandonedSession) => void,
+  retryWatch?: { pollMs?: number; giveUpAttempts?: number },
 ): Promise<PromptResponse> {
   // A failure here created nothing, so there is nothing to stop.
   const session = await client.createSession(directory, title)
+  // As for agents: a provider error OpenCode keeps retrying would hold the call for good.
+  const retries = watchRetries(client, session.id, directory, retryWatch)
   try {
-    return await client.prompt(session.id, directory, body, timeoutMs)
+    return await Promise.race([client.prompt(session.id, directory, body, timeoutMs), retries.promise])
   } catch (e) {
     onAbandoned?.({
       sessionId: session.id,
@@ -46,5 +50,7 @@ export async function promptOnce(
       .then(() => client.abort(session.id, directory))
       .catch(() => {})
     throw e
+  } finally {
+    retries.stop()
   }
 }
