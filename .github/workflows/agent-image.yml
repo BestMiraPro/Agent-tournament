@@ -1,0 +1,52 @@
+name: Agent image
+
+# Builds the Docker agent image whenever a file that defines it changes, and checks it the way
+# agents use it. Unit tests read these files but never build them: a package that fails its
+# import check (beautifulsoup4 imports as bs4) would otherwise reach the first Docker run.
+on:
+  push:
+    branches: ["master"]
+    paths:
+      - "docker/**"
+      - "src/runtime/tool-manifest.ts"
+      - ".github/workflows/agent-image.yml"
+  pull_request:
+    paths:
+      - "docker/**"
+      - "src/runtime/tool-manifest.ts"
+      - ".github/workflows/agent-image.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Toolchain id
+        id: toolchain
+        # The id the app names the image by: a hash of TOOLCHAIN_FILES.
+        run: echo "id=$(npx tsx -e "import('./src/runtime/tool-manifest.ts').then(async (m) => console.log(await m.readToolchainId(process.cwd())))")" >> "$GITHUB_OUTPUT"
+      - name: Build
+        # The same arguments as ensureImage in src/runtime/docker/image.ts.
+        run: >
+          docker build -t "agent-arena:tc-${{ steps.toolchain.outputs.id }}"
+          --build-arg "TOOLCHAIN_ID=${{ steps.toolchain.outputs.id }}"
+          --label "arena.toolchain=${{ steps.toolchain.outputs.id }}"
+          -f docker/Dockerfile.agent docker
+      - name: Smoke test
+        run: >
+          docker run --rm -v "$PWD/docker/smoke-test.sh:/smoke-test.sh:ro"
+          --entrypoint /bin/sh "agent-arena:tc-${{ steps.toolchain.outputs.id }}" /smoke-test.sh
