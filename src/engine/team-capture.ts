@@ -5,7 +5,7 @@ import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
 import { WorkspaceEscapeError } from '../runtime/workspace-path.js'
 import { OUTPUT_DIR, OUTPUT_README } from '../runtime/team-prompt.js'
 import type { AuditEvidence } from './audit.js'
-import { checkQuota, type Quota } from './capture.js'
+import { checkQuota, HASH_BUDGET_FILES, isDependencyPath, type Quota } from './capture.js'
 import { CHANNEL_FILE, type ChannelMember, type RecordedEntry } from './channel.js'
 
 /** Text stored per file and per round with a snapshot; larger files are listed and hashed only. */
@@ -64,7 +64,7 @@ export async function captureTeamOutput(
   handle: AgentHandle,
   opts: {
     executionStopped: boolean
-    /** The team's caps: one agent's workspace caps per member. */
+    /** The team's disk limit: one agent's per member. */
     quota: Quota
     /** Seeded paths and sizes; a seeded file still at its size does not count against the quota. */
     seeded?: ReadonlyMap<string, number>
@@ -74,9 +74,12 @@ export async function captureTeamOutput(
   const counted = opts.seeded ? all.filter((f) => opts.seeded!.get(f.path) !== f.bytes) : all
   const quota = checkQuota(counted, opts.quota)
 
-  const outputs = all.filter((f) => f.path.startsWith(`${OUTPUT_DIR}/`)).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  // Installed packages under output/ count for disk but are not part of what is judged.
+  const outputs = all
+    .filter((f) => f.path.startsWith(`${OUTPUT_DIR}/`) && !isDependencyPath(f.path))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   const totalBytes = outputs.reduce((n, f) => n + f.bytes, 0)
-  const hashesComplete = outputs.length <= opts.quota.maxFiles && totalBytes <= opts.quota.maxBytes
+  const hashesComplete = outputs.length <= HASH_BUDGET_FILES && totalBytes <= opts.quota.maxBytes
 
   const files: TeamFileEntry[] = []
   const contents = new Map<string, string>()

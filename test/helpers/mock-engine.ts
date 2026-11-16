@@ -1,6 +1,7 @@
 import { openDb, type Db } from '../../src/db/open.js'
 import { makeRepos, type Repos } from '../../src/db/repos.js'
 import type { AuditCollector } from '../../src/engine/audit.js'
+import { MIN_FILE_BYTES } from '../../src/engine/capture.js'
 import { makeRng } from '../../src/core/rng.js'
 import { DEFAULT_CONFIG, type RunConfig } from '../../src/core/types.js'
 import { TournamentEngine } from '../../src/engine/driver.js'
@@ -24,10 +25,10 @@ export const HUGE_TOKENS_MARKER = '__HUGE_TOKENS__'
  * breach test needs neither a huge population nor many rounds to trip one.
  */
 export const HUGE_TOKENS = 2_000_000
-/** How many files the flooding agent writes; must exceed FLOOD_QUOTA_FILES. */
+/** How many files the flooding agent writes; as counted, must exceed FLOOD_QUOTA_BYTES. */
 export const FLOOD_FILE_COUNT = 40
-/** The quota a flood test runs under. Far below the real default purely for speed. */
-export const FLOOD_QUOTA_FILES = 25
+/** The disk limit a flood test runs under: 25 files as counted. Far below the real default purely for speed. */
+export const FLOOD_QUOTA_BYTES = 25 * MIN_FILE_BYTES
 /** What a saboteur overwrites a rival's submission with. */
 export const SABOTAGED_TEXT = '# Submission\n\nFITNESS=0.01\n'
 
@@ -311,10 +312,10 @@ export function makeMockEngine(opts: {
     // "later agents were skipped once the budget tripped" would be a race rather than
     // a fact.
     concurrency: sabotaging || racing || opts.hugeTokensFor !== undefined ? 1 : 4,
-    // The real default is 2000 files, which is deliberately generous; a flood test that
-    // wrote 2001 files would only be slower, not more truthful.
-    maxWorkspaceFiles:
-      opts.floodFilesFor !== undefined || opts.seedFiles ? FLOOD_QUOTA_FILES : DEFAULT_CONFIG.maxWorkspaceFiles,
+    // The real default is 1 GiB, which is deliberately generous; a flood test that filled
+    // it would only be slower, not more truthful.
+    maxWorkspaceBytes:
+      opts.floodFilesFor !== undefined || opts.seedFiles ? FLOOD_QUOTA_BYTES : DEFAULT_CONFIG.maxWorkspaceBytes,
     seedDir: opts.seedFiles ? '/seed' : null,
     // Keep the round short when nothing will ever come back from the runner.
     agentTimeoutMs: opts.hangingRunner ? 50 : DEFAULT_CONFIG.agentTimeoutMs,

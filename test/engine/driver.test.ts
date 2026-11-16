@@ -1120,10 +1120,10 @@ describe('reconfigure is scoped to one run', () => {
       const patched = base.engine.createRun('patched', 'goal')
       const untouched = base.engine.createRun('untouched', 'goal')
 
-      // A quota of zero files is a config value read per round, so its effect is visible
+      // A disk limit of zero is a config value read per round, so its effect is visible
       // in the submission rows rather than only in a getter.
       base.engine.reconfigure(patched.id, {
-        config: { ...base.config, maxWorkspaceFiles: 0 },
+        config: { ...base.config, maxWorkspaceBytes: 0 },
         judge: base.judge,
         reflector: base.reflector,
       })
@@ -1148,7 +1148,7 @@ describe('reconfigure is scoped to one run', () => {
       expect(base.repos.submissions.forRound(before.roundId).some((s) => s.status === 'error')).toBe(false)
 
       base.engine.reconfigure(run.id, {
-        config: { ...base.config, maxWorkspaceFiles: 0 },
+        config: { ...base.config, maxWorkspaceBytes: 0 },
         judge: base.judge,
         reflector: base.reflector,
       })

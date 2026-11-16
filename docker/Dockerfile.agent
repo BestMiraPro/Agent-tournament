@@ -1,8 +1,9 @@
 # Agent arena container: runs an opencode server for one shard of tournament agents.
 #
 # Built with docker/ as the context, tagged agent-arena:tc-<toolchain id>, where the id is a
-# hash of this file, the research requirements and lock, and toolchain-manifest.py
-# (src/runtime/tool-manifest.ts). Changing any of them names a new image.
+# hash of this file, the research requirements and lock, toolchain-manifest.py and the Claude Code
+# and toolbox Node package files (TOOLCHAIN_FILES in src/runtime/tool-manifest.ts). Changing any of
+# them names a new image.
 #
 # Verified 2026-08-25 before the research toolchain: 960MB image, ~250MiB idle, ~413MiB
 # under real work. The toolchain adds disk shared by every container, not per-agent copies.
@@ -30,6 +31,15 @@ RUN cd /opt/claude-code \
     && ln -s /opt/claude-code/node_modules/.bin/claude /usr/local/bin/claude \
     && npm cache clean --force
 
+# The toolbox's Node packages (src/runtime/toolbox.ts builds the same set for local runs), from an
+# integrity-locked lockfile with no package scripts run. /node_modules is where Node's module
+# resolution ends up from any folder under /work, so `import 'zod'` works without an install.
+COPY toolbox-node/package.json toolbox-node/package-lock.json /opt/arena/node/
+RUN cd /opt/arena/node \
+    && npm ci --ignore-scripts --no-audit --no-fund \
+    && ln -s /opt/arena/node/node_modules /node_modules \
+    && npm cache clean --force
+
 # Installed once, from exact versions with verified hashes, binary wheels only: no build
 # scripts run, and nothing is resolved at build time that the lock did not name.
 COPY research-requirements.in research-requirements.lock toolchain-manifest.py /opt/arena/build/
@@ -42,7 +52,7 @@ RUN python3 -m venv /opt/arena/venv \
 # to pip; it is a default, not an enforcement boundary. Set before the inventory, so what it
 # records is resolved on exactly the PATH agents get.
 ENV VIRTUAL_ENV=/opt/arena/venv \
-    PATH="/opt/arena/venv/bin:$PATH" \
+    PATH="/opt/arena/venv/bin:/opt/arena/node/node_modules/.bin:$PATH" \
     MPLCONFIGDIR=/tmp/matplotlib \
     OMP_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1 \

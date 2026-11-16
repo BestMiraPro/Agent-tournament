@@ -28,6 +28,8 @@ export const TOOLCHAIN_FILES = [
   'docker/toolchain-manifest.py',
   'docker/claude-code/package.json',
   'docker/claude-code/package-lock.json',
+  'docker/toolbox-node/package.json',
+  'docker/toolbox-node/package-lock.json',
 ] as const
 
 export const IMAGE_INVENTORY_PATH = '/opt/arena/toolchain.json'

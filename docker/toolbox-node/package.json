@@ -1,0 +1,13 @@
+{
+  "name": "arena-toolbox-node",
+  "private": true,
+  "description": "Node packages in the shared agent toolbox (src/runtime/toolbox.ts and docker/Dockerfile.agent), pinned and integrity-locked by package-lock.json. Add a package with npm install --package-lock-only --save-exact <name>@<version> here.",
+  "dependencies": {
+    "express": "5.3.0",
+    "fastify": "5.12.7",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "4.1.12",
+    "zod": "4.6.7"
+  }
+}

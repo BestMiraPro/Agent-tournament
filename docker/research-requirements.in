@@ -9,3 +9,5 @@ matplotlib
 pyarrow
 duckdb
 pytest
+requests
+beautifulsoup4

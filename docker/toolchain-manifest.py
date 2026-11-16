@@ -69,9 +69,10 @@ def main():
             fail(f"{name} is installed at {installed}, but the lock pins {pinned}")
         packages.append({"name": name, "version": installed})
 
-    # Every approved package here imports under its distribution name.
+    # Every approved package imports under its distribution name, except those named here.
+    import_names = {"beautifulsoup4": "bs4"}
     for name in names(requirements_in):
-        importlib.import_module(name)
+        importlib.import_module(import_names.get(name, name))
 
     python = sys.executable
     inventory = {

@@ -12,6 +12,7 @@ import type { EngineEvent, EventSink } from './events.js'
 import {
   captureSubmission,
   checkQuota,
+  HASH_BUDGET_FILES,
   quiesceAgent,
   verifyCapture,
   workspaceIsolated,
@@ -27,6 +28,7 @@ import { CONTAINER_CONTEXT_PATH } from '../runtime/docker/cli.js'
 import { runPool } from '../runtime/pool.js'
 import { TOOLS_MOUNT } from '../runtime/tool-manifest.js'
 import { agentConnectorIds } from '../connectors/web/builtin.js'
+import { writeNpmStop } from '../runtime/toolbox.js'
 import { localToolRules } from '../connectors/web/opencode.js'
 import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
 
@@ -356,6 +358,8 @@ export class TournamentEngine {
         }
         await this.d.sandbox.writeFile(h, 'NOTES.md', p.genome.notesMd)
         await this.d.sandbox.writeFile(h, 'GOAL.md', input.goalMd)
+        // Keeps an agent's npm installs in its own workspace, away from the shared toolbox.
+        if (config.sandbox !== 'mock') await writeNpmStop(this.d.sandbox, h)
         await this.d.sandbox.writeFile(
           h,
           '.opencode/agents/competitor.md',
@@ -412,7 +416,7 @@ export class TournamentEngine {
                 executionStopped:
                   stopped === 'stopped' && workspaceIsolated(this.d.sandbox, handle),
                 hashBudget: {
-                  maxFiles: config.maxWorkspaceFiles,
+                  maxFiles: HASH_BUDGET_FILES,
                   maxBytes: config.maxWorkspaceBytes,
                 },
               }),
@@ -501,7 +505,6 @@ export class TournamentEngine {
         const seedSizes = seeded.get(p.agent.id)
         const quota = checkQuota(seedSizes ? files.filter((f) => seedSizes.get(f.path) !== f.bytes) : files, {
           maxBytes: config.maxWorkspaceBytes,
-          maxFiles: config.maxWorkspaceFiles,
         })
 
         // A non-'ok' runner status is the actual reason there is nothing to judge and
@@ -980,11 +983,12 @@ export class TournamentEngine {
 }
 
 /** Folders outside the workspace an agent's profile lets it read, never edit. */
-export function readableDirsFor(config: Pick<RunConfig, 'sandbox' | 'contextDir'>): string[] {
+export function readableDirsFor(config: Pick<RunConfig, 'sandbox' | 'contextDir' | 'toolboxDir'>): string[] {
   if (config.sandbox === 'docker') {
     return [...(config.contextDir ? [CONTAINER_CONTEXT_PATH] : []), TOOLS_MOUNT]
   }
-  return config.sandbox === 'local' && config.contextDir ? [config.contextDir] : []
+  if (config.sandbox !== 'local') return []
+  return [...(config.contextDir ? [config.contextDir] : []), ...(config.toolboxDir ? [config.toolboxDir] : [])]
 }
 
 /**
