@@ -6,6 +6,7 @@ import {
   defaultPopulation,
   cliRunSpec,
   makeClientResolver,
+  minutesFlag,
   resolveSandboxMode,
   resolveWorkflow,
   runTournamentCli,
@@ -91,6 +92,19 @@ describe('CLI web access', () => {
   const cliOpts = { goal: 'g', rounds: 1, population: 1, seed: 1, dbPath: ':memory:', criteria: null, mode: 'real' as const, workspaceRoot: '/tmp/cli-web' }
   const localConfig = (webAccess: boolean): RunConfig => ({
     ...DEFAULT_CONFIG, sandbox: 'local', populationSize: 1, roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }], webAccess,
+  })
+
+  test('the spec a local CLI run composes with carries its time limits', () => {
+    const spec = cliRunSpec(cliOpts, { ...localConfig(true), agentTimeoutMs: 20 * 60_000, agentSteerAfterMs: 15 * 60_000 })
+    expect(spec).toMatchObject({ agentTimeoutMs: 20 * 60_000, agentSteerAfterMs: 15 * 60_000 })
+  })
+
+  test('the minutes flags take a positive number and refuse anything else', () => {
+    expect(minutesFlag('--agent-timeout-minutes', undefined)).toBeUndefined()
+    expect(minutesFlag('--agent-timeout-minutes', '90')).toBe(90)
+    for (const bad of ['0', '-1', 'soon', '']) {
+      expect(() => minutesFlag('--agent-timeout-minutes', bad)).toThrow(/--agent-timeout-minutes must be a positive number of minutes/)
+    }
   })
 
   test('the spec a local CLI run composes with carries its web access choice', () => {

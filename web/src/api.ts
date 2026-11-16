@@ -230,6 +230,9 @@ export interface FullRunSpec {
   criteria: string | null
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number
+  /** Minutes; null or absent for no limit. */
+  agentTimeoutMinutes?: number | null
+  agentSteerAfterMinutes?: number
   // Docker only; the server defaults any that are omitted.
   maxContainers?: number
   containerMemory?: string

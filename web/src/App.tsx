@@ -82,6 +82,11 @@ export function App() {
       if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) {
         throw new Error(`Concurrency must be an integer in [1, 64]: ${concurrency}`)
       }
+      for (const [label, minutes] of [['Agent time limit', value.agentTimeoutMinutes], ['Wrap-up time', value.agentSteerAfterMinutes]] as const) {
+        if (minutes !== null && (!Number.isFinite(minutes) || minutes <= 0 || minutes > 10_080)) {
+          throw new Error(`${label} must be a number of minutes from 1 to 10080: ${minutes}`)
+        }
+      }
       if (value.sandbox === 'docker') {
         if (!Number.isInteger(value.maxContainers) || value.maxContainers < 1 || value.maxContainers > 64) {
           throw new Error(`Containers must be an integer in [1, 64]: ${value.maxContainers}`)
@@ -121,6 +126,8 @@ export function App() {
         criteria: value.criteria,
         selection: value.selection,
         concurrency: value.concurrency,
+        agentTimeoutMinutes: value.agentTimeoutMinutes,
+        agentSteerAfterMinutes: value.agentSteerAfterMinutes,
         // Only a docker run has containers to size; the others would ignore these. A team's
         // one container is always protected and sized per agent, so it has no count to send.
         ...(value.sandbox === 'docker'

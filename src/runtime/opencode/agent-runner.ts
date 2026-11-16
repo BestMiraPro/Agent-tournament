@@ -8,6 +8,7 @@ import { buildTeamPrompt, buildTeamSteeringPrompt } from '../team-prompt.js'
 import { OpenCodeTimeoutError, type OpenCodeClient } from './client.js'
 import { splitModelId } from './model-id.js'
 import { OPENCODE_MCP_TIMEOUT_MS, PROJECT_CONFIG_FILE } from './mcp-config.js'
+import { PROVIDER_LIMIT_CODE, ProviderStuckError, watchRetries, type RetryWatch } from './retry-watch.js'
 
 export const SUBMISSION_FILE = 'SUBMISSION.md'
 
@@ -44,6 +45,8 @@ export interface AgentRunnerOptions {
   webToolsNote?: string | null
   /** What the prompt says about the workspace: its disk limit and the packages already installed (runtime/workspace-note.ts). */
   workspaceNote?: string | null
+  /** How a running prompt's retries are watched (retry-watch.ts); the defaults outside tests. */
+  retryWatch?: { pollMs?: number; giveUpAttempts?: number }
   /**
    * The runtime's own evidence that an agent failed because of a resource limit — an OOM kill
    * recorded by the daemon — or null when there is none. Consulted only for runs that ended
@@ -412,6 +415,7 @@ export class OpenCodeAgentRunner implements AgentRunner {
 
       let timer: ReturnType<typeof setTimeout> | undefined
       let steerTimer: ReturnType<typeof setTimeout> | undefined
+      let retries: RetryWatch | undefined
       try {
         tracked.promptDispatched = true
         // Past the steering time the agent is told, not cut off: the message queues behind its
@@ -437,11 +441,15 @@ export class OpenCodeAgentRunner implements AgentRunner {
           this.confirmStopped(tracked)
           return res
         })
+        // A provider error OpenCode keeps retrying (a used-up free tier) would otherwise hold the
+        // agent until its time limit, or for good when it has none.
+        retries = watchRetries(client, session.id, handle.workspacePath, this.options.retryWatch)
         const res = await Promise.race([
           prompt,
           new Promise<never>((_r, reject) => {
             timer = deadlineTimer(ctx.timeoutMs, () => reject(new TimeoutError()))
           }),
+          retries.promise,
         ])
 
         const t = res.info?.tokens
@@ -481,10 +489,15 @@ export class OpenCodeAgentRunner implements AgentRunner {
         // timeoutMs after every run, holding the process open.
         clearTimeout(timer)
         clearTimeout(steerTimer)
+        retries?.stop()
       }
     } catch (e) {
       const isTimeout = e instanceof TimeoutError || e instanceof OpenCodeTimeoutError
       if (tracked.promptDispatched) this.requestAbort(tracked)
+      if (e instanceof ProviderStuckError) {
+        const failure = failureFromText(e.message, PROVIDER_LIMIT_CODE)
+        return { status: 'error', errorText: failure.message, failure, usageKnown: false, ...zero, durationMs: Date.now() - started }
+      }
       return await this.withResourceDiagnosis(handle, {
         status: isTimeout ? 'timeout' : 'error',
         // errorTextFor keeps the transport cause that String(e) dropped, so a reopened run

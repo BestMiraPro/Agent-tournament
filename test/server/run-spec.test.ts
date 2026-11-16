@@ -298,3 +298,27 @@ describe('workflow', () => {
     expect(() => parseRunSpec({ ...base, workflow: 'collaboration', selection })).not.toThrow()
   })
 })
+
+describe('agent time limits', () => {
+  test('minutes in the spec become the config\'s milliseconds', () => {
+    const spec = parseRunSpec({ ...base, agentTimeoutMinutes: 45, agentSteerAfterMinutes: 30 })
+    expect(spec).toMatchObject({ agentTimeoutMs: 45 * 60_000, agentSteerAfterMs: 30 * 60_000 })
+    expect(runConfigFor(spec)).toMatchObject({ agentTimeoutMs: 45 * 60_000, agentSteerAfterMs: 30 * 60_000 })
+  })
+
+  test('absent or null keeps the defaults: no hard limit, a nudge after an hour', () => {
+    for (const extra of [{}, { agentTimeoutMinutes: null, agentSteerAfterMinutes: null }]) {
+      const config = runConfigFor(parseRunSpec({ ...base, ...extra }))
+      expect(config.agentTimeoutMs).toBe(DEFAULT_CONFIG.agentTimeoutMs)
+      expect(config.agentTimeoutMs).toBe(Infinity)
+      expect(config.agentSteerAfterMs).toBe(DEFAULT_CONFIG.agentSteerAfterMs)
+    }
+  })
+
+  test('refuses a limit that is not a positive number of minutes up to a week', () => {
+    for (const bad of [0, -5, 10_081]) {
+      expect(() => parseRunSpec({ ...base, agentTimeoutMinutes: bad })).toThrow()
+      expect(() => parseRunSpec({ ...base, agentSteerAfterMinutes: bad })).toThrow()
+    }
+  })
+})

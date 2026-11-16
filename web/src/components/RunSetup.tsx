@@ -24,6 +24,10 @@ export interface RunSetupValue {
   criteria: string | null
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number
+  /** Each agent attempt's hard limit in minutes; null for none. */
+  agentTimeoutMinutes: number | null
+  /** When a still-working agent is told to wrap up, in minutes. */
+  agentSteerAfterMinutes: number
   maxContainers: number
   containerMemory: string
   containerCpus: number
@@ -159,6 +163,8 @@ export function RunSetup({ busy, error, onCreate }: {
   const [bottomPct, setBottomPct] = useState(String(DEFAULT_CONFIG.selection.bottomPct))
   const [crossoverPct, setCrossoverPct] = useState(String(DEFAULT_CONFIG.selection.crossoverPct))
   const [concurrency, setConcurrency] = useState(String(DEFAULT_CONFIG.concurrency))
+  const [agentTimeout, setAgentTimeout] = useState('')
+  const [steerAfter, setSteerAfter] = useState(String(DEFAULT_CONFIG.agentSteerAfterMs / 60_000))
   const [maxContainers, setMaxContainers] = useState(String(DEFAULT_CONFIG.maxContainers))
   const [containerMemory, setContainerMemory] = useState(DEFAULT_CONFIG.containerMemory)
   const [containerCpus, setContainerCpus] = useState(String(DEFAULT_CONFIG.containerCpus))
@@ -409,6 +415,12 @@ export function RunSetup({ busy, error, onCreate }: {
         <input id="setup-concurrency" type="number" min={1} max={64} step={1} value={concurrency} onChange={(e) => setConcurrency(e.target.value)} disabled={busy} />
         <p className="help">How many agents run at once (1–64).</p>
         </>)}
+        <label htmlFor="setup-agent-timeout">Agent time limit (minutes)</label>
+        <input id="setup-agent-timeout" type="number" min={1} step={1} placeholder="none" value={agentTimeout} onChange={(e) => setAgentTimeout(e.target.value)} disabled={busy} />
+        <p className="help">Each agent is stopped after this long and keeps what it wrote. Blank for no limit.</p>
+        <label htmlFor="setup-steer-after">Ask agents to wrap up after (minutes)</label>
+        <input id="setup-steer-after" type="number" min={1} step={1} value={steerAfter} onChange={(e) => setSteerAfter(e.target.value)} disabled={busy} />
+        <p className="help">A still-working agent is told to finish what it has; it is not cut off.</p>
         <label htmlFor="setup-pricing">Price table (optional)</label>
         <textarea id="setup-pricing" value={pricingText} rows={3} placeholder="mymodel 2.5 10 0.5 2" onChange={(e) => setPricingText(e.target.value)} disabled={busy} />
         <p className="help">One `modelId inPerM outPerM cacheReadPerM cacheWritePerM` per line — used for the spending display.</p>
@@ -434,6 +446,8 @@ export function RunSetup({ busy, error, onCreate }: {
             crossoverPct: Number(crossoverPct),
           },
           concurrency: Number(concurrency),
+          agentTimeoutMinutes: agentTimeout.trim() === '' ? null : Number(agentTimeout),
+          agentSteerAfterMinutes: Number(steerAfter),
           maxContainers: Number(maxContainers),
           containerMemory: containerMemory.trim(),
           containerCpus: Number(containerCpus),

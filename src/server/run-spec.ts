@@ -48,6 +48,10 @@ const schema = z.object({
     .optional(),
   // Upper bound is a typo-guard, not tuning — the provider rate-limits real parallelism anyway.
   concurrency: z.number().int().min(1).max(64).optional(),
+  // Minutes. A hard limit on each agent's attempt (null or absent: none), and when a still-working
+  // agent is told to wrap up. The upper bound (a week) is a typo-guard.
+  agentTimeoutMinutes: z.number().positive().max(10_080).nullable().optional(),
+  agentSteerAfterMinutes: z.number().positive().max(10_080).nullable().optional(),
   // Container sizing for the docker sandbox; mock and local ignore it. In the spec because
   // the capacity preflight refuses a run by telling the operator to change exactly these,
   // and before they were here nothing created from the dashboard could.
@@ -93,6 +97,10 @@ export interface RunSpec {
   budget: { maxRunTokens: number; maxRoundTokens: number; maxAgentTokens: number }
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number; diversityFloor?: boolean }
   concurrency: number
+  /** Each agent attempt's hard limit, in ms; `Infinity` for none. Absent means the app default. */
+  agentTimeoutMs?: number
+  /** When a still-working agent is told to wrap up, in ms. Absent means the app default. */
+  agentSteerAfterMs?: number
   maxContainers: number
   containerMemory: string
   containerCpus: number
@@ -228,6 +236,8 @@ export function parseRunSpec(input: unknown): RunSpec {
       diversityFloor: p.selection?.diversityFloor ?? DEFAULT_CONFIG.selection.diversityFloor,
     },
     concurrency: p.concurrency ?? DEFAULT_CONFIG.concurrency,
+    agentTimeoutMs: p.agentTimeoutMinutes ? p.agentTimeoutMinutes * 60_000 : DEFAULT_CONFIG.agentTimeoutMs,
+    agentSteerAfterMs: p.agentSteerAfterMinutes ? p.agentSteerAfterMinutes * 60_000 : DEFAULT_CONFIG.agentSteerAfterMs,
     maxContainers,
     containerMemory,
     containerCpus: p.containerCpus ?? DEFAULT_CONFIG.containerCpus,

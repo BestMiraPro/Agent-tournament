@@ -250,6 +250,8 @@ Judging and reflecting on a Claude model run the CLI on this machine with JSON o
 | `--seed-strategies` | (none) | Folder of `.md` files, one round-1 strategy per file (see Seed strategies) |
 | `--report` | (none) | Write the run's markdown report to this path when the last round ends |
 | `--no-web-access` | off | Local real runs: do not give agents the web tools (see Web search and page fetch) |
+| `--agent-timeout-minutes` | none | Real runs: stop each agent after this many minutes; it keeps what it wrote |
+| `--steer-after-minutes` | 60 | Real runs: tell a still-working agent to wrap up after this many minutes |
 
 ## Dashboard (live operator view)
 
@@ -317,7 +319,9 @@ The WebSocket pushes per-agent status/activity/usage and round status/scored/com
 
 **Verifying the protected runtime on this machine** — `$env:ARENA_DOCKER_E2E="1"; npx vitest run test/e2e/container-policy.test.ts` starts two protected containers with fake credentials and a fake model provider and checks every boundary above from inside them. It calls no real model and takes about 30 seconds once the image exists.
 
-**An agent is still working after a long time** — agents have no time limit. After one hour, an agent that is still working is sent one message telling it to write `SUBMISSION.md` with what it has and stop; it reads the message after its current step and wraps up itself. An agent that keeps going anyway, or a model call that never returns, keeps the round waiting: use **Abort** on the round. GLM-5.3-Flash on W&B was seen to stop mid-reply twice on September 15–16, once through the relay and once directly from the host, so such stalls come from the provider. Through the relay, a model reply that sends nothing at all for 15 minutes is treated as a dead connection and closed.
+**An agent is still working after a long time** — by default agents have no hard time limit; set one with **Agent time limit** in the setup form's Advanced section (`agentTimeoutMinutes` in the API, `--agent-timeout-minutes` on the CLI), and the agent is stopped then and keeps what it wrote. After one hour (**Ask agents to wrap up after**), an agent that is still working is sent one message telling it to finish with what it has; it reads the message after its current step and wraps up itself. Without a limit, an agent that keeps going anyway, or a model call that never returns, keeps the round waiting: use **Abort** on the round.
+
+**An agent fails with `PROVIDER_LIMIT`** — OpenCode retries a failed model call without end. When the provider says a person must act (a used-up free tier: "Free usage limit reached"), or the same call has been retried 8 times, the agent, judge or reflection call is stopped and fails with the provider's message instead of waiting for good. Fix the account or pick another model and run the round again. GLM-5.3-Flash on W&B was seen to stop mid-reply twice on September 15–16, once through the relay and once directly from the host, so such stalls come from the provider. Through the relay, a model reply that sends nothing at all for 15 minutes is treated as a dead connection and closed.
 
 **`no opencode auth.json`** — the docker e2e + real mode need `~/.local/share/opencode/auth.json`. Set `ARENA_DOCKER_AUTH_FILE` to override.
 

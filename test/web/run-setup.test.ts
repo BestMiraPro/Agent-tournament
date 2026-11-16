@@ -100,3 +100,13 @@ describe('local sandbox caution', () => {
     expect(renderToStaticMarkup(createElement(RunSetup, { busy: false, error: null, onCreate: () => {} }))).not.toContain('Local agents run as you')
   })
 })
+
+describe('agent time limits in the setup form', () => {
+  const html = renderToStaticMarkup(createElement(RunSetup, { busy: false, error: null, onCreate: () => {} }))
+  test('offers a hard limit, blank for none, and the wrap-up time, an hour by default', () => {
+    expect(html).toContain('Agent time limit (minutes)')
+    expect(html).toMatch(/id="setup-agent-timeout"[^>]*placeholder="none"/)
+    expect(html).toContain('Ask agents to wrap up after (minutes)')
+    expect(html).toMatch(/id="setup-steer-after"[^>]*value="60"/)
+  })
+})
