@@ -44,13 +44,26 @@ export interface RuntimeCatalog {
 }
 
 /**
+ * Where a shard's catalogue is read: a folder every container has that is never an agent workspace.
+ *
+ * OpenCode loads a folder's agent profiles and project config once, when that folder's instance
+ * starts. Asked with no folder, a shard answers from `/work`, its working folder, which then
+ * started before a collaboration team's `.opencode/agents/member-*.md` profiles were written, and
+ * every member's prompt named a profile the instance had never loaded: 500 UnknownError within
+ * ~35 ms, before the message was stored (opencode 1.18.21, 16 November 2026). Providers come from
+ * the global config and catalogue, so this folder lists the same models.
+ */
+export const SHARD_CATALOG_DIRECTORY = '/tmp'
+
+/**
  * Reads a runtime's catalogue. Proves a model id resolves there — not that credentials,
  * tools or inference work; those still fail, visibly, on the agent's own request.
  */
 export async function readRuntimeCatalog(
   client: Pick<OpenCodeClient, 'providers' | 'version'>,
+  directory?: string,
 ): Promise<RuntimeCatalog> {
-  const [providers, version] = await Promise.all([client.providers(), client.version()])
+  const [providers, version] = await Promise.all([client.providers(directory), client.version()])
   return { version, models: new Set(flattenProviders(providers)) }
 }
 

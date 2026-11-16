@@ -231,8 +231,12 @@ export class OpenCodeClient {
     }
   }
 
-  async providers(): Promise<ProvidersResponse> {
-    return this.request<ProvidersResponse>('GET', '/config/providers')
+  /**
+   * Without a directory the server answers from its default instance — its working folder —
+   * and starting that instance fixes what it has loaded from the folder (see readRuntimeCatalog).
+   */
+  async providers(directory?: string): Promise<ProvidersResponse> {
+    return this.request<ProvidersResponse>('GET', '/config/providers', directory ? { directory } : {})
   }
 
   async createSession(directory: string, title: string): Promise<{ id: string }> {
