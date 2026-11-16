@@ -548,6 +548,9 @@ circle.chart-line--min { fill: var(--failed); }
 }
 .channel__head { color: var(--text-dim); font-size: .72rem; margin-bottom: .2rem; }
 .channel__body { white-space: pre-wrap; word-break: break-word; }
+.channel__post { display: grid; gap: .35rem; margin-top: .6rem; }
+.channel__post label { font-size: .74rem; color: var(--text-dim); }
+.channel__post button { justify-self: start; }
 .teamoutput { display: grid; gap: .6rem; margin-top: 1.75rem; }
 .teamoutput__body { display: grid; grid-template-columns: minmax(14rem, 1fr) 2fr; gap: .8rem; align-items: start; }
 .teamoutput__files { list-style: none; margin: 0; padding: 0; display: grid; gap: .25rem; font-size: .8rem; }

@@ -72,6 +72,11 @@ export class RunManager {
     return true
   }
 
+  /** Posts to the running collaboration round's channel as the operator; false when there is none. */
+  postToTeam(runId: string, text: string): Promise<boolean> {
+    return this.engine.postToTeam(runId, text)
+  }
+
   /** Resolves once no round is running for this run. */
   async waitForIdle(runId: string): Promise<void> {
     const task = this.inFlight.get(runId)

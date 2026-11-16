@@ -49,4 +49,9 @@ export interface Sandbox {
    * across rounds. Optional; a sandbox without it cannot run a collaboration round.
    */
   provisionTeam?(teamId: string, agentIds: readonly string[], opts: ProvisionOpts): Promise<TeamWorkspace>
+  /**
+   * Appends to a workspace file under the channel helper's lock, so the engine's channel posts
+   * and the agents' never lose each other. Optional; without it the engine rewrites the file.
+   */
+  appendFile?(handle: AgentHandle, relPath: string, content: string): Promise<void>
 }

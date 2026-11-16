@@ -59,6 +59,11 @@ export class MockSandbox implements Sandbox {
     this.space(handle).set(relPath, content)
   }
 
+  async appendFile(handle: AgentHandle, relPath: string, content: string): Promise<void> {
+    const space = this.space(handle)
+    space.set(relPath, (space.get(relPath) ?? '') + content)
+  }
+
   async readFile(handle: AgentHandle, relPath: string): Promise<string | null> {
     return this.space(handle).get(relPath) ?? null
   }

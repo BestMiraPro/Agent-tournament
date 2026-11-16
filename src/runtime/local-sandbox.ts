@@ -1,4 +1,5 @@
 import { lstat, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { appendUnderLock } from './locked-append.js'
 import { dirname, join, relative, sep } from 'node:path'
 import type { FileEntry } from '../core/types.js'
 import { assertTeamId, type AgentHandle, type ProvisionOpts, type Sandbox, type TeamWorkspace } from './sandbox.js'
@@ -64,6 +65,13 @@ export class LocalSandbox implements Sandbox {
     const target = await this.safeJoin(handle, relPath)
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, content, 'utf8')
+  }
+
+  async appendFile(handle: AgentHandle, relPath: string, content: string): Promise<void> {
+    this.assertLive(handle)
+    const target = await this.safeJoin(handle, relPath)
+    await mkdir(dirname(target), { recursive: true })
+    await appendUnderLock(target, content)
   }
 
   async readFile(handle: AgentHandle, relPath: string): Promise<string | null> {

@@ -30,6 +30,9 @@ import { registerConnectorRoutes, type ConnectorRouteDeps } from './connectors-a
 import { allowedHostsFor, registerLocalOriginGuard } from './local-origin.js'
 import { subscriptionStatus, type SubscriptionServices } from './subscriptions.js'
 
+/** The longest message the operator can post to a team at once. */
+export const OPERATOR_POST_MAX_CHARS = 4000
+
 export interface SpecDefaults {
   workspaceRoot?: string | null
   authFile?: string | null
@@ -978,6 +981,25 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     // aborted; completed phases keep their rows and the round ends failed.
     mgr.abortRound(runId)
     return reply.code(202).send({ aborted: true })
+  })
+
+  // The operator's message to a running team: written to CHANNEL.md, signed `operator`, and
+  // forwarded to every member still working.
+  app.post('/api/runs/:runId/channel', async (req, reply) => {
+    const { runId } = req.params as { runId: string }
+    const run = deps.repos.runs.get(runId)
+    if (!run) return reply.code(404).send({ error: 'no such run' })
+    let body: { body: string }
+    try {
+      body = z.object({ body: z.string().trim().min(1).max(OPERATOR_POST_MAX_CHARS) }).parse(req.body ?? {})
+    } catch {
+      return reply.code(400).send({ error: `body must be a message of 1 to ${OPERATOR_POST_MAX_CHARS} characters` })
+    }
+    const mgr = deps.registry?.get(runId)?.manager ?? deps.manager
+    if (!(await mgr.postToTeam(runId, body.body))) {
+      return reply.code(409).send({ error: 'no collaboration round is running for this run' })
+    }
+    return reply.code(202).send({ posted: true })
   })
 
   app.post('/api/runs/:runId/rounds/:idx/rejudge', async (req, reply) => {

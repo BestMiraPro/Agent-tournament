@@ -107,3 +107,15 @@ describe('run setup for collaboration', () => {
     expect(html).toContain('a collaboration run will be refused until it can be')
   })
 })
+
+describe('operator post box', () => {
+  test('shown only while the round is live', async () => {
+    const { createElement } = await import('react')
+    const { renderToStaticMarkup } = await import('react-dom/server')
+    const { ChannelPanel } = await import('../../web/src/components/ChannelPanel.js')
+    const render = (live: boolean) => renderToStaticMarkup(createElement(ChannelPanel, { runId: 'r', roundIdx: 1, live, liveMessages: [] }))
+    expect(render(true)).toContain('Message the team')
+    expect(render(true)).toContain('Post to the team')
+    expect(render(false)).not.toContain('Message the team')
+  })
+})

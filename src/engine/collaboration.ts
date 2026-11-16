@@ -23,6 +23,9 @@ import {
   roundLine,
   type ChannelLimits,
   type RecordedEntry,
+  OPERATOR_AUTHOR,
+  UNVERIFIED_OPERATOR,
+  formatEntry,
 } from './channel.js'
 import type { EngineEvent } from './events.js'
 import { captureTeamOutput, teamContributions } from './team-capture.js'
@@ -75,6 +78,8 @@ export interface CollaborationHost {
   toolRules: Record<string, 'allow' | 'deny'>
   /** Seed sizes of each run's team workspace, taken when it was created. */
   teamSeeds: Map<string, Map<string, number>>
+  /** Where a running round registers how the operator posts to its channel, by run id. */
+  operatorPosts?: Map<string, (text: string) => Promise<void>>
   emit: (event: EngineEvent) => void
   aborted: () => boolean
   releaseWorkers: () => Promise<void>
@@ -144,8 +149,13 @@ export async function runCollaborationRound(
   const entries: RecordedEntry[] = []
   const live = new Set<string>()
   const dispatched = new Set<string>()
+  // Keys of the posts the engine wrote for the operator (a header plus its occurrence, as
+  // parseChannel numbers them); any other entry signed so is unverified, same timestamp or not.
+  const operatorKeys = new Set<string>()
+  const operatorHeaderCounts = new Map<string, number>()
   const tail = new ChannelTail({
     read: () => sandbox.readFile(workspace, CHANNEL_FILE),
+    relabel: (e) => (e.author === OPERATOR_AUTHOR && !operatorKeys.has(e.key) ? UNVERIFIED_OPERATOR : e.author),
     members,
     isLive: (agentId) => live.has(agentId),
     deliver: async (agentId, text) => (runner.send ? runner.send(team.handles.get(agentId)!, text) : false),
@@ -163,6 +173,19 @@ export async function runCollaborationRound(
   })
   tail.prime(before)
   tail.start()
+  // The operator's posts go through the file like everyone's, under the helper's lock, and are
+  // forwarded at once rather than at the next poll.
+  host.operatorPosts?.set(runId, async (text) => {
+    const at = new Date()
+    const header = `${OPERATOR_AUTHOR}|${at.toISOString()}|`
+    const n = (operatorHeaderCounts.get(header) ?? 0) + 1
+    operatorHeaderCounts.set(header, n)
+    operatorKeys.add(`${header}#${n}`)
+    const entry = formatEntry(OPERATOR_AUTHOR, text, { at })
+    if (sandbox.appendFile) await sandbox.appendFile(workspace, CHANNEL_FILE, entry)
+    else await sandbox.writeFile(workspace, CHANNEL_FILE, ((await sandbox.readFile(workspace, CHANNEL_FILE)) ?? '') + entry)
+    await tail.poll(true)
+  })
   // The command as the agent runs it: the helper sits in the workspace, at the agent's path for it.
   const postCommand = `node "${workspace.workspacePath.replace(/[\\/]+$/, '')}/${POST_HELPER_PATH}"`
   const quiesced = new Map<string, QuiesceStatus>()
@@ -177,6 +200,7 @@ export async function runCollaborationRound(
       afterStop: async (h, stopped) => { quiesced.set(h.agentId, stopped) },
     }), { shouldStop: host.aborted })
   } finally {
+    host.operatorPosts?.delete(runId)
     // The barrier: every entry written before it is recorded; none is delivered any more.
     await tail.drain()
   }

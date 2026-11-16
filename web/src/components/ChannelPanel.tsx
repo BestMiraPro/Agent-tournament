@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getRoundChannel, serverError, type ChannelMessage } from '../api.js'
+import { getRoundChannel, postToTeam, serverError, type ChannelMessage } from '../api.js'
 import { channelHeader } from '../lib/team.js'
 
 /** The entries themselves: author, target, time and body, oldest first. */
@@ -14,6 +14,41 @@ export function ChannelList({ messages }: { messages: ChannelMessage[] }) {
         </li>
       ))}
     </ol>
+  )
+}
+
+/** The operator's box for a running round: the post is signed `operator` and forwarded to every agent still working. */
+export function OperatorPost({ runId }: { runId: string }) {
+  const [text, setText] = useState('')
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const send = async () => {
+    setSending(true)
+    setError(null)
+    try {
+      await postToTeam(runId, text.trim())
+      setText('')
+    } catch (e) {
+      setError(serverError(e))
+    } finally {
+      setSending(false)
+    }
+  }
+  return (
+    <form className="channel__post" onSubmit={(e) => { e.preventDefault(); void send() }}>
+      <label htmlFor="channel-post">Message the team</label>
+      <textarea
+        id="channel-post"
+        rows={2}
+        maxLength={4000}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        disabled={sending}
+        placeholder="Signed operator. Every agent still working gets it after its current step."
+      />
+      <button type="submit" disabled={sending || text.trim() === ''}>Post to the team</button>
+      {error && <p className="error">{error}</p>}
+    </form>
   )
 }
 
@@ -45,6 +80,7 @@ export function ChannelPanel({ runId, roundIdx, live, liveMessages }: {
       <h2 id="channel-h" style={{ fontSize: '.9rem' }}>Team channel{roundIdx > 0 ? ` — round ${roundIdx}` : ''}</h2>
       {error && <p className="error">{error}</p>}
       <ChannelList messages={messages} />
+      {live && <OperatorPost runId={runId} />}
     </section>
   )
 }
