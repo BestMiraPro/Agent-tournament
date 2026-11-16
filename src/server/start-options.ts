@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { parseArgs } from 'node:util'
 import type { DockerReach } from '../runtime/docker/container.js'
 
@@ -28,6 +28,25 @@ export interface StartOptions {
    * and never in the database.
    */
   connectorsDir: string
+  /**
+   * `--data-dir`: one folder holding everything a dashboard keeps, so two dashboards (a Work and a
+   * Personal profile, say) share nothing: the database, workspaces, connectors, the Claude setup
+   * token and the OpenCode login. Null without the flag: the project's `runs/` folder, as before.
+   */
+  dataDir: string | null
+  /** The stored Claude setup token; null for the default beside the working directory. */
+  claudeTokenFile: string | null
+  /**
+   * The host OpenCode server's data folder (its `auth.json` and state), for a data dir; null to
+   * leave it to OpenCode's default or the OpenCode 2 credential bridge.
+   */
+  opencodeDataHome: string | null
+  /**
+   * Whether Claude agents may fall back to this machine's own `claude auth login` when no setup
+   * token is stored. Off for a data dir: that login belongs to whichever account the machine is
+   * signed in to, not to the profile.
+   */
+  hostClaudeLogin: boolean
 }
 
 /**
@@ -86,6 +105,7 @@ export function resolveStartOptions(input: {
       'no-docker-sandbox': { type: 'boolean' },
       'docker-reach': { type: 'string' },
       'connectors-dir': { type: 'string' },
+      'data-dir': { type: 'string' },
     },
   })
 
@@ -105,7 +125,12 @@ export function resolveStartOptions(input: {
     throw new Error(`--docker-reach must be loopback or bridge, got "${dockerReach}"`)
   }
 
-  const runsDir = join(input.projectRoot, 'runs')
+  // Relative to the project folder, like the other defaults: a shortcut may start the app elsewhere.
+  const rawDataDir = values['data-dir']
+  if (rawDataDir !== undefined && rawDataDir.trim() === '') throw new Error('--data-dir must not be empty')
+  const dataDir = rawDataDir === undefined ? null : isAbsolute(rawDataDir) ? rawDataDir : join(input.projectRoot, rawDataDir)
+  const runsDir = dataDir ?? join(input.projectRoot, 'runs')
+  const opencodeDataHome = dataDir === null ? null : join(dataDir, 'secrets', 'opencode')
   return {
     port,
     host,
@@ -113,12 +138,19 @@ export function resolveStartOptions(input: {
     dbPath: values.db ?? join(runsDir, 'dashboard.db'),
     // Absolute by construction, which run-spec validation requires.
     workspaceRoot: values['workspace-root'] ?? join(runsDir, 'workspaces'),
-    authFile: values['auth-file'] ?? defaultAuthFile(input.env, input.home, input.exists),
+    // A data dir uses only its own OpenCode login, never the machine's.
+    authFile: values['auth-file'] ?? (opencodeDataHome === null
+      ? defaultAuthFile(input.env, input.home, input.exists)
+      : defaultAuthFile({ XDG_DATA_HOME: opencodeDataHome }, input.home, input.exists)),
     serverUrl: values['server-url'] ?? null,
     uiDir: join(input.projectRoot, 'dist'),
     open: values['no-open'] !== true,
     dockerSandbox: values['no-docker-sandbox'] !== true,
     dockerReach,
     connectorsDir: values['connectors-dir'] ?? join(runsDir, 'connectors'),
+    dataDir,
+    claudeTokenFile: dataDir === null ? null : join(dataDir, 'secrets', 'claude-subscription.json'),
+    opencodeDataHome,
+    hostClaudeLogin: dataDir === null,
   }
 }

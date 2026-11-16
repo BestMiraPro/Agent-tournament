@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { join, resolve as absolute } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { defaultAuthFile, resolveStartOptions } from '../../src/server/start-options.js'
 
@@ -35,7 +35,37 @@ describe('resolveStartOptions', () => {
       dockerReach: 'loopback',
       // Beside the workspaces, never under them.
       connectorsDir: join(root, 'runs', 'connectors'),
+      dataDir: null,
+      claudeTokenFile: null,
+      opencodeDataHome: null,
+      hostClaudeLogin: true,
     })
+  })
+
+  test('a data dir holds everything one dashboard keeps, and uses only its own logins', () => {
+    const work = join(root, 'runs', 'work')
+    const own = join(work, 'secrets', 'opencode', 'opencode', 'auth.json')
+    // The machine's OpenCode login exists but is not the profile's.
+    const o = resolve(['--data-dir', join('runs', 'work'), '--port', '4301'], { files: [opencodeAuth] })
+    expect(o).toMatchObject({
+      port: 4301,
+      dataDir: work,
+      dbPath: join(work, 'dashboard.db'),
+      workspaceRoot: join(work, 'workspaces'),
+      connectorsDir: join(work, 'connectors'),
+      claudeTokenFile: join(work, 'secrets', 'claude-subscription.json'),
+      opencodeDataHome: join(work, 'secrets', 'opencode'),
+      authFile: null,
+      hostClaudeLogin: false,
+    })
+    expect(resolve(['--data-dir', join('runs', 'work')], { files: [opencodeAuth, own] }).authFile).toBe(own)
+    // An absolute folder is taken as given, and each flag still overrides its part.
+    const abs = absolute('/arena-personal')
+    expect(resolve(['--data-dir', abs, '--db', ':memory:'])).toMatchObject({ dataDir: abs, dbPath: ':memory:', workspaceRoot: join(abs, 'workspaces') })
+  })
+
+  test('rejects an empty data dir', () => {
+    expect(() => resolve(['--data-dir', ' '])).toThrow(/--data-dir must not be empty/)
   })
 
   test('every flag overrides its default', () => {

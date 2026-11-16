@@ -70,3 +70,20 @@ describe('subscription API', () => {
     expect(body.chatgpt.signedIn).toBe(false)
   })
 })
+
+describe('a profile dashboard without the machine login', () => {
+  test('reports no host login and never asks the CLI, so only a stored token is used', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'profile-subs-'))
+    const services = (await import('../../src/server/subscriptions.js')).subscriptionServices({
+      tokenFile: join(dir, 'claude-subscription.json'),
+      allowHostLogin: false,
+    })
+    expect(await services.claudeHostLogin()).toEqual({ loggedIn: false, authMethod: null, subscriptionType: null })
+    const { resolveClaudeCredentials } = await import('../../src/runtime/claude-code/credentials.js')
+    await expect(resolveClaudeCredentials({ store: services.claudeTokens, hostLogin: services.claudeHostLogin, allowHost: true }))
+      .rejects.toThrow(/run `claude setup-token`/)
+    await services.claudeTokens.set('sk-ant-oat01-FAKE-PROFILE-TOKEN-0123456789abcdef')
+    await expect(resolveClaudeCredentials({ store: services.claudeTokens, hostLogin: services.claudeHostLogin, allowHost: true }))
+      .resolves.toEqual({ mode: 'token', token: 'sk-ant-oat01-FAKE-PROFILE-TOKEN-0123456789abcdef' })
+  })
+})
