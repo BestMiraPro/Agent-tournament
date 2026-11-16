@@ -833,6 +833,9 @@ describe('composeRun', () => {
       await c.planFor!(['a1'])
       const h = await c.sandbox.provision('a1', {})
       expect(startShardContainerFn).toHaveBeenCalledWith(expect.objectContaining({ contextDir: ctx }), undefined, expect.any(Function), expect.any(Function))
+      // The shard's catalogue check names a folder that is never a workspace, so it cannot start
+      // the workspace's instance before the agents' profiles are written.
+      expect(shardClient.providers).toHaveBeenCalledWith('/tmp')
       await c.runner.run(h, {
         agentId: 'a1', goalMd: 'g', timeoutMs: 1000,
         genome: { strategyMd: 's', notesMd: '', modelId: 'w/m', temperature: 0.7 },

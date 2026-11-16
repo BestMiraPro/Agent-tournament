@@ -21,6 +21,7 @@ import {
   modelUnavailableMessage,
   providerOf,
   readRuntimeCatalog,
+  SHARD_CATALOG_DIRECTORY,
   type RuntimeCatalog,
 } from '../runtime/opencode/discovery.js'
 import { sealedArtifactWriter, writeGraderProfile } from '../runtime/opencode/grader-profile.js'
@@ -862,7 +863,8 @@ export async function composeRun(
       const checkShardCatalog = async (shardIndex: number, baseUrl: string) => {
         shardCatalogs.delete(baseUrl)
         try {
-          const catalog = await readRuntimeCatalog(s.createShardClient(baseUrl, 10_000))
+          // Never from `/work`: that would start the workspace's instance before the agents' profiles exist.
+          const catalog = await readRuntimeCatalog(s.createShardClient(baseUrl, 10_000), SHARD_CATALOG_DIRECTORY)
           shardCatalogs.set(baseUrl, { shardIndex, catalog })
           // Claude subscription agents run through Claude Code, not this OpenCode catalogue.
           const missing = missingModels(catalog, config.roster.map((r) => r.modelId).filter((m) => !isClaudeSubscriptionModel(m)))

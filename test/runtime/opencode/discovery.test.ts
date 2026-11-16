@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import {
   flattenProviders,
   hasProvider,
@@ -7,6 +7,7 @@ import {
   missingModels,
   modelUnavailableMessage,
   readRuntimeCatalog,
+  SHARD_CATALOG_DIRECTORY,
 } from '../../../src/runtime/opencode/discovery.js'
 import { splitModelId } from '../../../src/runtime/opencode/model-id.js'
 
@@ -62,6 +63,12 @@ describe('runtime catalogue', () => {
     const catalog = await readRuntimeCatalog(client as never)
     expect(catalog.version).toBe('1.18.21')
     expect([...catalog.models]).toEqual(flattenProviders(RESPONSE))
+  })
+
+  test('asks for the given folder, so a workspace instance is not started early', async () => {
+    const providers = vi.fn(async (_directory?: string) => RESPONSE)
+    await readRuntimeCatalog({ providers, version: async () => '1.18.21' } as never, SHARD_CATALOG_DIRECTORY)
+    expect(providers).toHaveBeenCalledWith('/tmp')
   })
 
   test('compares exact full ids and never strips a provider prefix', async () => {
