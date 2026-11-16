@@ -181,6 +181,7 @@ export interface FullRunSpec {
   workspaceRoot: string | null
   authFile: string | null
   contextDir: string | null
+  seedStrategiesDir: string | null
   criteria: string | null
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number

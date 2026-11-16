@@ -16,6 +16,7 @@ export interface RunSetupValue {
   workspaceRoot: string
   authFile: string
   contextDir: string
+  seedStrategiesDir: string
   criteria: string | null
   selection: { eliteCount: number; topPct: number; bottomPct: number; crossoverPct: number }
   concurrency: number
@@ -59,6 +60,7 @@ export function RunSetup({ busy, error, onCreate }: {
   const [workspaceRoot, setWorkspaceRoot] = useState('')
   const [authFile, setAuthFile] = useState('')
   const [contextDir, setContextDir] = useState('')
+  const [seedStrategiesDir, setSeedStrategiesDir] = useState('')
   const [criteria, setCriteria] = useState('')
   // Numeric inputs stay text in state (number inputs still surface strings and
   // can be emptied); App re-checks ranges on submit since the server is truth.
@@ -116,6 +118,9 @@ export function RunSetup({ busy, error, onCreate }: {
         <label htmlFor="setup-context">Context folder (read-only, optional)</label>
         <input id="setup-context" value={contextDir} placeholder="C:\path\to\reference-material" onChange={(e) => setContextDir(e.target.value)} disabled={busy} />
         <p className="help">A folder of reference material that agents and the judge can read. Docker mounts it read-only; local agents can still run commands against it, so use Docker if it must stay untouched. The judge can browse the web, so do not put secrets here. Mock runs ignore it.</p>
+        <label htmlFor="setup-seed-strategies">Seed strategies folder (optional)</label>
+        <input id="setup-seed-strategies" value={seedStrategiesDir} placeholder="C:\path\to\strategies" onChange={(e) => setSeedStrategiesDir(e.target.value)} disabled={busy} />
+        <p className="help">A folder of .md files, one starting strategy per file, handed to the agents in name order and repeated if there are more agents than files. Leave blank and agents start from placeholder keywords that only mean something in a mock run.</p>
       </section>
       <section aria-labelledby="setup-h-population">
         <h2 id="setup-h-population">Population</h2>
@@ -240,7 +245,7 @@ export function RunSetup({ busy, error, onCreate }: {
         disabled={busy || name.trim().length === 0 || goal.trim().length === 0}
         onClick={() => onCreate({
           name, goal, sandbox, roster, judgeModel, judgeMode, reflectModel,
-          workspaceRoot, authFile, contextDir,
+          workspaceRoot, authFile, contextDir, seedStrategiesDir,
           criteria: criteria.trim() === '' ? null : criteria,
           selection: {
             eliteCount: Number(eliteCount),

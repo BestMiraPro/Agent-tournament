@@ -60,6 +60,7 @@ const schema = z.object({
   workspaceRoot: z.string().nullable().default(null),
   authFile: z.string().nullable().default(null),
   contextDir: z.string().nullable().default(null),
+  seedStrategiesDir: z.string().nullable().default(null),
   serverUrl: z.string().nullable().default(null),
   criteria: z.string().nullable().default(null),
 })
@@ -88,6 +89,8 @@ export interface RunSpec {
   authFile: string | null
   /** Absolute folder of read-only reference material; existence is checked at composition. */
   contextDir: string | null
+  /** Absolute folder of `.md` files, one round-1 strategy each; read when the run is created. */
+  seedStrategiesDir: string | null
   serverUrl: string | null
   criteria: string | null
 }
@@ -117,6 +120,10 @@ export function parseRunSpec(input: unknown): RunSpec {
   const contextDir = p.contextDir && p.contextDir.trim() !== '' ? p.contextDir.trim() : null
   if (contextDir && !path.isAbsolute(contextDir)) {
     throw new Error('contextDir must be an absolute path')
+  }
+  const seedStrategiesDir = p.seedStrategiesDir && p.seedStrategiesDir.trim() !== '' ? p.seedStrategiesDir.trim() : null
+  if (seedStrategiesDir && !path.isAbsolute(seedStrategiesDir)) {
+    throw new Error('seedStrategiesDir must be an absolute path')
   }
   const containerMemory = p.containerMemory ?? DEFAULT_CONFIG.containerMemory
   let containerMemoryBytes: number
@@ -184,6 +191,7 @@ export function parseRunSpec(input: unknown): RunSpec {
     workspaceRoot: p.workspaceRoot,
     authFile: p.authFile,
     contextDir,
+    seedStrategiesDir,
     serverUrl: p.serverUrl,
     criteria: p.criteria,
   }

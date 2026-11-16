@@ -637,6 +637,41 @@ describe('driver capture guardrails', () => {
     expect(subs.filter((s) => s.status === 'ok')).toHaveLength(2)
   })
 
+  // A seeded repo is the operator's material, not something the agent left behind.
+  const bigSeed = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`repo/file-${i}.txt`, 'seeded']))
+
+  test('files seeded into the workspace do not count against the quota', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3, seedFiles: bigSeed })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    expect(repos.submissions.forRound(round.roundId).map((s) => s.status)).toEqual(['ok', 'ok', 'ok'])
+  })
+
+  test('an agent that floods a seeded workspace is still scored zero', async () => {
+    const { engine, repos } = makeMockEngine({ seed: 1, populationSize: 3, seedFiles: bigSeed, floodFilesFor: 0 })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    const subs = repos.submissions.forRound(round.roundId)
+    expect(subs.filter((s) => s.status === 'error' && /limit/i.test(s.errorText ?? ''))).toHaveLength(1)
+    expect(subs.filter((s) => s.status === 'ok')).toHaveLength(2)
+  })
+
+  test('a seeded file the agent grew counts against the quota', async () => {
+    const { engine, repos, sandbox } = makeMockEngine({
+      seed: 1, populationSize: 2, seedFiles: bigSeed,
+      wrapRunner: (inner) => Object.assign(Object.create(inner) as typeof inner, {
+        run: async (handle: Parameters<typeof inner.run>[0], ctx: Parameters<typeof inner.run>[1]) => {
+          for (const path of Object.keys(bigSeed)) await sandbox.writeFile(handle, path, 'seeded and grown')
+          return inner.run(handle, ctx)
+        },
+      }),
+    })
+    const run = engine.createRun('t', 'goal')
+    const round = await engine.runRound(run.id, { goalMd: 'goal', criteriaMd: null })
+    const subs = repos.submissions.forRound(round.roundId)
+    expect(subs.every((s) => s.status === 'error' && /limit/i.test(s.errorText ?? ''))).toBe(true)
+  })
+
   // The window this closes: a rival sharing the container overwrites a workspace after
   // its owner has finished. The substituted text must never become the judged artifact.
   test('a rival cannot get a substituted submission judged', async () => {

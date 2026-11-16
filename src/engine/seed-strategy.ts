@@ -1,3 +1,5 @@
+import { readdir, readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { GOOD_KEYWORDS } from '../runtime/mock-provider.js'
 
 /**
@@ -17,4 +19,32 @@ import { GOOD_KEYWORDS } from '../runtime/mock-provider.js'
 export function defaultSeedStrategy(index: number): string {
   const keyword = GOOD_KEYWORDS[index % GOOD_KEYWORDS.length]
   return `attempt the goal, variant ${index}, focus on ${keyword}`
+}
+
+/**
+ * Round-1 strategies taken from the operator's own texts, handed out in order and cycled
+ * when the population is larger. With none given the default seeds apply, which are the
+ * mock keywords: fine for a mock run, meaningless to a real model.
+ */
+export function seedStrategyFrom(strategies: readonly string[]): (index: number) => string {
+  if (strategies.length === 0) return defaultSeedStrategy
+  return (index) => strategies[index % strategies.length]!
+}
+
+/** The non-empty `.md` files of `dir`, in name order: one starting strategy per file. */
+export async function loadSeedStrategies(dir: string): Promise<string[]> {
+  let names: string[]
+  try {
+    names = (await readdir(dir, { withFileTypes: true }))
+      .filter((e) => e.isFile() && e.name.endsWith('.md'))
+      .map((e) => e.name)
+      .sort()
+  } catch (e) {
+    throw new Error(`seed strategies folder ${dir} cannot be read: ${(e as NodeJS.ErrnoException).code ?? e}`)
+  }
+  const strategies = (await Promise.all(names.map((n) => readFile(join(dir, n), 'utf8'))))
+    .map((text) => text.trim())
+    .filter((text) => text !== '')
+  if (strategies.length === 0) throw new Error(`no .md strategy files in ${dir}`)
+  return strategies
 }

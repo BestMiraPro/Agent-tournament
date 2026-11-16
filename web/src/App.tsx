@@ -113,6 +113,7 @@ export function App() {
         workspaceRoot: value.workspaceRoot.trim() || null,
         authFile: value.authFile.trim() || null,
         contextDir: value.contextDir.trim() || null,
+        seedStrategiesDir: value.seedStrategiesDir.trim() || null,
         criteria: value.criteria,
         selection: value.selection,
         concurrency: value.concurrency,
@@ -258,7 +259,7 @@ export function App() {
           value="-- export --"
           onChange={(e) => {
             const v = e.target.value
-            if (v === 'json' || v === 'csv') {
+            if (v === 'json' || v === 'csv' || v === 'md') {
               window.location.href = `/api/runs/${snapshot.runId}/export?format=${v}`
             }
           }}
@@ -266,6 +267,7 @@ export function App() {
           <option value="-- export --">-- export --</option>
           <option value="json">JSON</option>
           <option value="csv">CSV</option>
+          <option value="md">Markdown report</option>
         </select>
       </div>
       {!busy && snapshot.lastRoundIdx === 0 && <p className="muted">No rounds yet — set a goal and run round 1.</p>}

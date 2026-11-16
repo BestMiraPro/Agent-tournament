@@ -1,5 +1,5 @@
 import { cp, lstat, mkdir } from 'node:fs/promises'
-import { join, relative, resolve, sep } from 'node:path'
+import { basename, join, relative, resolve, sep } from 'node:path'
 
 export class WorkspaceEscapeError extends Error {
   constructor(message: string) {
@@ -60,7 +60,10 @@ export async function seedWorkspace(dir: string, seedDir: string | undefined, an
   await cp(seedDir, dir, {
     recursive: true,
     dereference: true,
-    filter: async (_source, destination) => {
+    filter: async (source, destination) => {
+      // A seed is usually a checkout. Its history is not the agent's material, and its
+      // object files would crowd the capture.
+      if (basename(source) === '.git' && source !== seedDir) return false
       await resolveInWorkspace(dir, relative(dir, destination), anchor)
       return true
     },

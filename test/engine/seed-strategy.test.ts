@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'vitest'
-import { defaultSeedStrategy } from '../../src/engine/seed-strategy.js'
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { defaultSeedStrategy, loadSeedStrategies, seedStrategyFrom } from '../../src/engine/seed-strategy.js'
 import { GOOD_KEYWORDS, trueFitness } from '../../src/runtime/mock-provider.js'
 
 describe('defaultSeedStrategy', () => {
@@ -50,5 +53,38 @@ describe('every entry point uses it', () => {
       // The old shape: a template literal ending right after the variant number.
       expect(src).not.toMatch(/attempt the goal, variant \$\{[^}]+\}`/)
     }
+  })
+})
+
+describe('seedStrategyFrom', () => {
+  test('hands out the given strategies in order and cycles when the population is larger', () => {
+    const seed = seedStrategyFrom(['first', 'second'])
+    expect([0, 1, 2, 3].map(seed)).toEqual(['first', 'second', 'first', 'second'])
+  })
+
+  test('falls back to the default seeds when none are given', () => {
+    expect(seedStrategyFrom([])(3)).toBe(defaultSeedStrategy(3))
+  })
+})
+
+describe('loadSeedStrategies', () => {
+  test('reads the .md files of a folder in name order, trimmed', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'seeds-'))
+    await writeFile(join(dir, '02-skeptic.md'), '\nquestion every claim\n')
+    await writeFile(join(dir, '01-tracer.md'), 'read the failed traces first')
+    await writeFile(join(dir, 'notes.txt'), 'not a strategy')
+    await writeFile(join(dir, '03-empty.md'), '   \n')
+    await mkdir(join(dir, 'nested.md'))
+    expect(await loadSeedStrategies(dir)).toEqual(['read the failed traces first', 'question every claim'])
+  })
+
+  test('refuses a folder with no strategies, naming it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'seeds-empty-'))
+    await expect(loadSeedStrategies(dir)).rejects.toThrow(`no .md strategy files in ${dir}`)
+  })
+
+  test('refuses a folder that does not exist, naming it', async () => {
+    const dir = join(tmpdir(), 'seeds-missing-does-not-exist')
+    await expect(loadSeedStrategies(dir)).rejects.toThrow(`seed strategies folder ${dir} cannot be read`)
   })
 })

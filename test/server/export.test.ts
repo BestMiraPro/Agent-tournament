@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { openDb } from '../../src/db/open.js'
 import { makeRepos } from '../../src/db/repos.js'
 import { DEFAULT_CONFIG } from '../../src/core/types.js'
-import { buildCsvRows, buildJsonDump, csvEscape } from '../../src/server/export.js'
+import { buildCsvRows, buildJsonDump, buildMarkdownReport, csvEscape } from '../../src/server/export.js'
 
 /** A 2-round x 2-agent run with submissions for all but alpha round 2, which
  * is scored with no submission row (pins `submission: null` / empty CSV
@@ -152,5 +152,64 @@ describe('buildJsonDump', () => {
       { status: 'not_recorded', frozen: null, records: [], late: [], digestMatches: null },
     ])
     expect(dump.rounds.map((r) => r.judging)).toEqual([[], []])
+  })
+})
+
+describe('buildMarkdownReport', () => {
+  test('opens with the run, its goal and what it cost', () => {
+    const { repos, run } = seed()
+    const md = buildMarkdownReport(run.id, repos)!
+    expect(md.startsWith('# Tournament report: export-demo\n')).toBe(true)
+    expect(md).toContain(`- Run: ${run.id}`)
+    expect(md).toContain('- Goal: goal 2')
+    expect(md).toContain('- Population: 2, rounds scored: 2')
+    expect(md).toContain('- Worker usage: 400 tokens in, 200 tokens out, $0.0400')
+  })
+
+  test('has one leaderboard row per scored round', () => {
+    const { repos, run } = seed()
+    const md = buildMarkdownReport(run.id, repos)!
+    expect(md).toContain('| Round | Best | Mean | Leader | Model |')
+    expect(md).toContain('| 1 | 90 | 75.00 | alpha | model/a |')
+    expect(md).toContain('| 2 | 95 | 65.00 | beta | model/b |')
+  })
+
+  test('names the last round\'s leader as winner, with strategy, rationale and submission', () => {
+    const { repos, run, beta } = seed()
+    const md = buildMarkdownReport(run.id, repos)!
+    expect(md).toContain('## Winner: beta (round 2, score 95)')
+    expect(md).toContain('### Strategy\n\nstrategy beta round 2')
+    expect(md).toContain("### Judge's rationale\n\nbeta r2")
+    expect(md).toContain(`### Submission\n\nsubmission ${beta.id.slice(0, 4)} round 2`)
+  })
+
+  test('traces the winning strategy back through its parents to a seed', () => {
+    const { repos, run, alpha, beta } = seed()
+    const r3 = repos.rounds.create({ runId: run.id, idx: 3, goalMd: 'goal 3' })
+    const parent = repos.genomes.forRound(beta.id, 2)!
+    const child = repos.genomes.create({
+      agentId: alpha.id, roundIdx: 3, strategyMd: 'cloned from beta', notesMd: '', modelId: 'model/b',
+      temperature: 0.7, parentGenomeId: parent.id, origin: 'clone',
+    })
+    repos.scores.insertMany(r3.id, [
+      { roundId: r3.id, agentId: alpha.id, rank: 1, score: 99, rationaleMd: 'alpha r3', band: 'elite' },
+    ])
+    void child
+    const md = buildMarkdownReport(run.id, repos)!
+    expect(md).toContain('### Lineage\n\n- Round 3: clone, alpha, model/b\n- Round 2: seed, beta, model/b\n')
+  })
+
+  test('a run with no scored round says so instead of naming a winner', () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const run = repos.runs.create({ name: 'fresh', initialGoal: 'find it', config: DEFAULT_CONFIG, seedDir: null })
+    const md = buildMarkdownReport(run.id, repos)!
+    expect(md).toContain('- Goal: find it')
+    expect(md).toContain('No round has been scored yet.')
+    expect(md).not.toContain('## Winner')
+  })
+
+  test('is null for a run that does not exist', () => {
+    expect(buildMarkdownReport('nope', seed().repos)).toBeNull()
   })
 })

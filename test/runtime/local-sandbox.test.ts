@@ -48,6 +48,19 @@ describe('LocalSandbox', () => {
     expect(await sb.readFile(h, 'X.md')).toBeNull()
   })
 
+  test('seeding leaves the .git folder of the seed behind', async () => {
+    const seed = await tmp()
+    await mkdir(join(seed, '.git', 'objects'), { recursive: true })
+    await mkdir(join(seed, 'pkg', '.git'), { recursive: true })
+    await writeFile(join(seed, '.git', 'objects', 'pack'), 'history')
+    await writeFile(join(seed, 'pkg', '.git', 'HEAD'), 'ref')
+    await writeFile(join(seed, '.gitignore'), 'node_modules')
+    await writeFile(join(seed, 'pkg', 'prompt.md'), 'be careful')
+    const sb = new LocalSandbox(await tmp())
+    const h = await sb.provision('a1', { seedDir: seed })
+    expect((await sb.listFiles(h)).map((f) => f.path).sort()).toEqual(['.gitignore', 'pkg/prompt.md'])
+  })
+
   test('reset re-seeds from the seed directory', async () => {
     const seed = await tmp()
     await mkdir(join(seed, 'sub'), { recursive: true })

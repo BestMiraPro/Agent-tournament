@@ -262,6 +262,8 @@ export function makeMockEngine(opts: {
   failProvisionFor?: number
   /** Make the agent at this seed index write more files than the quota allows. */
   floodFilesFor?: number
+  /** Seed every workspace with these files, under the flood test's small file quota. */
+  seedFiles?: Record<string, string>
   /**
    * Make the agent at this seed index overwrite the FIRST agent's submission once its
    * own run returns — i.e. after that agent finished and was captured. Forces
@@ -310,7 +312,8 @@ export function makeMockEngine(opts: {
     // The real default is 2000 files, which is deliberately generous; a flood test that
     // wrote 2001 files would only be slower, not more truthful.
     maxWorkspaceFiles:
-      opts.floodFilesFor !== undefined ? FLOOD_QUOTA_FILES : DEFAULT_CONFIG.maxWorkspaceFiles,
+      opts.floodFilesFor !== undefined || opts.seedFiles ? FLOOD_QUOTA_FILES : DEFAULT_CONFIG.maxWorkspaceFiles,
+    seedDir: opts.seedFiles ? '/seed' : null,
     // Keep the round short when nothing will ever come back from the runner.
     agentTimeoutMs: opts.hangingRunner ? 50 : DEFAULT_CONFIG.agentTimeoutMs,
     roster: [{
@@ -324,7 +327,7 @@ export function makeMockEngine(opts: {
   const provisionOrder: string[] = []
   let sandbox: Sandbox = opts.failProvisionFor !== undefined
     ? withFailProvision(new MockSandbox(), opts.failProvisionFor)
-    : new MockSandbox()
+    : new MockSandbox({ seedFiles: opts.seedFiles })
   if (racing) sandbox = withCaptureRaceSabotage(sandbox, provisionOrder)
   else if (sabotaging) sandbox = withProvisionOrder(sandbox, provisionOrder)
   if (opts.isolatedWorkspaces) sandbox = withIsolatedWorkspaces(sandbox)

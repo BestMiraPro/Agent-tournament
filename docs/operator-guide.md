@@ -63,6 +63,18 @@ Every container has Python 3.11 with NumPy, pandas, SciPy, matplotlib, PyArrow, 
 
 **Context folder** in the setup form is read-only reference material. Agents see it at `/context`; the grader reads it on the host and may also search the web to check claims. Do not put secrets there: the grader's web access means a hostile submission could try to steer it into quoting the folder.
 
+### Seed strategies
+
+Without seed strategies every agent starts round 1 from a placeholder ("attempt the goal, variant N, focus on <keyword>") that only means something to the mock provider. For a real run, give **Seed strategies folder** in the setup form (or `--seed-strategies` on the CLI, or `seedStrategiesDir` in the API) a folder of `.md` files, one starting strategy per file. They are handed to the agents in file-name order and repeated when there are more agents than files. Empty files and other extensions are ignored; a folder with no strategy is refused before the run is created. The folder is read once, at creation.
+
+### Seed folder
+
+A seed folder (`seedDir`, API only) is copied into every agent's workspace before each round. Its `.git` folders are left behind. Files the seed put there do not count against the workspace quota while they keep their seeded size; files the agent adds or resizes do. Links inside the seed are followed and copied, so a seed that links to a large data folder copies all of it for every agent: use the context folder for material agents only need to read.
+
+### Markdown report
+
+**Export → Markdown report** (or `GET /api/runs/:runId/export?format=md`, or `--report <path>` on the CLI) writes one file with the goal, a leaderboard row per round, the winner of the last scored round, the lineage of its strategy back to a seed, the strategy itself, the judge's rationale and the winning submission. It is meant to be read without the dashboard, by a person or by another agent.
+
 ## CLI flags
 
 | Flag | Default | Notes |
@@ -79,6 +91,8 @@ Every container has Python 3.11 with NumPy, pandas, SciPy, matplotlib, PyArrow, 
 | `--judge-model` | (none) | Model id for the judge |
 | `--reflect-model` | (none) | Model id for the reflector (mutation) |
 | `--worker-models` | (none) | Comma-separated model ids for the agents |
+| `--seed-strategies` | (none) | Folder of `.md` files, one round-1 strategy per file (see Seed strategies) |
+| `--report` | (none) | Write the run's markdown report to this path when the last round ends |
 
 ## Dashboard (live operator view)
 

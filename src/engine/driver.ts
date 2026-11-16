@@ -315,11 +315,17 @@ export class TournamentEngine {
       // One provisioning failure (port exhaustion, image pull, OOM under Docker) must
       // not abort the round before any agent runs — isolate each agent's PREPARE work
       // through the pool rather than a plain sequential loop.
+      // What the seed put in each workspace (path -> bytes), so the quota below can tell
+      // the operator's material from what the agent left behind.
+      const seeded = new Map<string, Map<string, number>>()
       const prepResults = await runPool(prepared, config.concurrency, async (p) => {
         const h = await this.d.sandbox.provision(p.agent.id, {
           seedDir: config.seedDir ?? undefined,
         })
         await this.d.sandbox.reset(h, { seedDir: config.seedDir ?? undefined })
+        if (config.seedDir) {
+          seeded.set(p.agent.id, new Map((await this.d.sandbox.listFiles(h)).map((f) => [f.path, f.bytes])))
+        }
         await this.d.sandbox.writeFile(h, 'NOTES.md', p.genome.notesMd)
         await this.d.sandbox.writeFile(h, 'GOAL.md', input.goalMd)
         await this.d.sandbox.writeFile(
@@ -589,7 +595,10 @@ export class TournamentEngine {
 
         // The agent that filled the disk is the one penalised, so this is its own status
         // rather than a round-level failure.
-        const quota = checkQuota(files, {
+        // A seeded file still at its seeded size takes the space the operator gave it, so
+        // only files the agent added or resized count.
+        const seedSizes = seeded.get(p.agent.id)
+        const quota = checkQuota(seedSizes ? files.filter((f) => seedSizes.get(f.path) !== f.bytes) : files, {
           maxBytes: config.maxWorkspaceBytes,
           maxFiles: config.maxWorkspaceFiles,
         })

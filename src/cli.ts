@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { DEFAULT_CONFIG, type RosterEntry, type RunConfig } from './core/types.js'
@@ -6,7 +7,7 @@ import { makeRepos } from './db/repos.js'
 import { recoverIncompleteRounds } from './db/recover.js'
 import { AuditCollector } from './engine/audit.js'
 import { TournamentEngine } from './engine/driver.js'
-import { defaultSeedStrategy } from './engine/seed-strategy.js'
+import { loadSeedStrategies, seedStrategyFrom } from './engine/seed-strategy.js'
 import { Reflector } from './evolution/reflect.js'
 import { Judge } from './judge/judge.js'
 import { MockAgentRunner, type AgentRunner } from './runtime/agent-runner.js'
@@ -28,6 +29,7 @@ import { validateModel, summarizeValidation, type ModelRole } from './runtime/op
 import { OpenCodeClient } from './runtime/opencode/client.js'
 import { type ServerHandle } from './runtime/opencode/server.js'
 import { composeRun } from './server/compose-run.js'
+import { buildMarkdownReport } from './server/export.js'
 
 export interface CliOptions {
   goal: string
@@ -36,6 +38,10 @@ export interface CliOptions {
   seed: number
   dbPath: string
   criteria: string | null
+  /** Folder of `.md` files, one round-1 strategy each; without it agents start from the mock keywords. */
+  seedStrategiesDir?: string
+  /** Write the run's markdown report here once the last round ends. */
+  reportPath?: string
   mode?: 'mock' | 'real'
   /**
    * Which sandbox real mode runs agents in. `'local'` (the default) runs them as host
@@ -472,6 +478,7 @@ async function buildRealDeps(
       },
       seedDir: config.seedDir,
       contextDir: null,
+      seedStrategiesDir: null,
       workspaceRoot: opts.workspaceRoot,
       authFile: opts.authFile ?? null,
       serverUrl: opts.serverUrl ?? null,
@@ -523,6 +530,8 @@ export async function runTournamentCli(
     let planFor: ((agentIds: readonly string[]) => Promise<void>) | null = null
     let releasePopulation: (() => Promise<void>) | null = null
     const runIdHolder: RunIdHolder = { value: '' }
+    // Read first: a wrong folder should cost no setup.
+    const seedStrategies = opts.seedStrategiesDir ? await loadSeedStrategies(opts.seedStrategiesDir) : []
 
     if (mode === 'real') {
       const workerModels =
@@ -580,7 +589,7 @@ export async function runTournamentCli(
       reflector: new Reflector(provider, config.reflect, config.roster.map((r) => r.modelId)),
       // Each agent starts from a different keyword so imitation has something real to
       // transfer. Uniform seeds leave nothing to imitate and the curve stays flat.
-      seedStrategy: defaultSeedStrategy,
+      seedStrategy: seedStrategyFrom(seedStrategies),
       preparePopulation: planFor ?? undefined,
       releasePopulation: releasePopulation ?? undefined,
       audit: new AuditCollector(repos, {
@@ -661,6 +670,8 @@ export async function runTournamentCli(
       ? repos.genomes.forRound(champion.agentId, finalRoundIdx)
       : null
 
+    if (opts.reportPath) await writeFile(opts.reportPath, buildMarkdownReport(run.id, repos)!, 'utf8')
+
     return {
       rounds,
       winner: {
@@ -699,6 +710,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       'reflect-model': { type: 'string' },
       'worker-models': { type: 'string' },
       'no-validate-models': { type: 'boolean', default: false },
+      'seed-strategies': { type: 'string' },
+      report: { type: 'string' },
     },
   })
 
@@ -722,6 +735,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       ? values['worker-models'].split(',').map((s) => s.trim()).filter((s) => s.length > 0)
       : undefined,
     validateModels: values['no-validate-models'] ? false : undefined,
+    seedStrategiesDir: values['seed-strategies'],
+    reportPath: values.report,
   })
 
   console.log(`\nGoal: ${values.goal}\n`)

@@ -27,6 +27,17 @@ describe('contextDir', () => {
   })
 })
 
+describe('seedStrategiesDir', () => {
+  test('defaults to null and blank means none', () => {
+    expect(parseRunSpec(base).seedStrategiesDir).toBeNull()
+    expect(parseRunSpec({ ...base, seedStrategiesDir: '   ' }).seedStrategiesDir).toBeNull()
+  })
+
+  test('must be absolute', () => {
+    expect(() => parseRunSpec({ ...base, seedStrategiesDir: 'seeds' })).toThrow(/seedStrategiesDir must be an absolute path/)
+  })
+})
+
 describe('isolation', () => {
   const abs = process.platform === 'win32' ? 'C:\\ws' : '/ws'
   const docker = (count: number, extra: Record<string, unknown> = {}) => ({

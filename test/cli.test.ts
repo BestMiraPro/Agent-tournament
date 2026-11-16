@@ -333,3 +333,39 @@ describe('capacity preflight uses the effective container count', () => {
     await expect(assertHostCapacity(cfg, async () => host, () => {})).rejects.toThrow(/memory/i)
   })
 })
+
+describe('CLI research inputs and outputs', () => {
+  test('--seed-strategies starts round 1 from the files in the folder', async () => {
+    const { mkdtemp, writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { openDb } = await import('../src/db/open.js')
+    const { makeRepos } = await import('../src/db/repos.js')
+    const dir = await mkdtemp(join(tmpdir(), 'cli-seeds-'))
+    await writeFile(join(dir, 'a.md'), 'trace the failures')
+    await writeFile(join(dir, 'b.md'), 'doubt the baseline')
+    const dbPath = join(dir, 'run.db')
+    await runTournamentCli({
+      goal: 'g', rounds: 1, population: 3, seed: 1, dbPath, criteria: null, seedStrategiesDir: dir,
+    })
+    const repos = makeRepos(openDb(dbPath))
+    const runId = repos.runs.list()[0]!.id
+    const strategies = repos.agents.listAll(runId).map((a) => repos.genomes.forRound(a.id, 1)!.strategyMd)
+    expect(strategies).toEqual(['trace the failures', 'doubt the baseline', 'trace the failures'])
+  })
+
+  test('--report writes the markdown report of the run', async () => {
+    const { mkdtemp, readFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = await mkdtemp(join(tmpdir(), 'cli-report-'))
+    const reportPath = join(dir, 'report.md')
+    const out = await runTournamentCli({
+      goal: 'write a good answer', rounds: 2, population: 4, seed: 1, dbPath: ':memory:', criteria: null, reportPath,
+    })
+    const report = await readFile(reportPath, 'utf8')
+    expect(report).toContain('# Tournament report: cli')
+    expect(report).toContain('- Goal: write a good answer')
+    expect(report).toContain(`## Winner: ${out.winner.label}`)
+  })
+})

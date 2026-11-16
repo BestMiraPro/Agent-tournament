@@ -917,3 +917,55 @@ describe('container names carry the live run id', () => {
     expect(source).not.toMatch(/void runIdHolder/)
   })
 })
+
+describe('seed strategies from a folder', () => {
+  const mockApi = () => {
+    const db = openDb(':memory:')
+    const repos = makeRepos(db)
+    const app = buildApi({
+      repos,
+      manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+      createRun: (() => { throw new Error('must not be called for specs') }) as never,
+      registry: new RunRegistry(),
+      composeWith: (async () => ({
+        config: {
+          ...DEFAULT_CONFIG, populationSize: 3, sandbox: 'mock',
+          roster: [{ modelId: 'mock/model', count: 3, temperature: 0.7 }],
+        },
+        sandbox: {}, provider: {}, runner: {},
+        planFor: null, serverHandle: null, shardServers: [],
+        sessionMap: new Map(), sessionHook: () => {}, warnings: [],
+        capacity: null, cleanup: async () => {},
+      })) as never,
+    } as never)
+    return { app, repos }
+  }
+  const payload = { name: 's', goal: 'g', sandbox: 'mock', roster: [{ modelId: 'mock/model', count: 3, temperature: 0.7 }] }
+
+  test('round 1 starts from the files in the folder', async () => {
+    const { mkdtemp, writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = await mkdtemp(join(tmpdir(), 'api-seeds-'))
+    await writeFile(join(dir, 'a.md'), 'trace the failures')
+    await writeFile(join(dir, 'b.md'), 'doubt the baseline')
+    const { app, repos } = mockApi()
+    const res = await app.inject({ method: 'POST', url: '/api/runs', payload: { ...payload, seedStrategiesDir: dir } })
+    expect(res.statusCode).toBe(201)
+    const { runId } = JSON.parse(res.body) as { runId: string }
+    const strategies = repos.agents.listAll(runId).map((a) => repos.genomes.forRound(a.id, 1)!.strategyMd)
+    expect(strategies).toEqual(['trace the failures', 'doubt the baseline', 'trace the failures'])
+  })
+
+  test('a folder without strategies is refused before a run exists', async () => {
+    const { mkdtemp } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = await mkdtemp(join(tmpdir(), 'api-seeds-empty-'))
+    const { app, repos } = mockApi()
+    const res = await app.inject({ method: 'POST', url: '/api/runs', payload: { ...payload, seedStrategiesDir: dir } })
+    expect(res.statusCode).toBe(400)
+    expect((JSON.parse(res.body) as { error: string }).error).toContain('no .md strategy files')
+    expect(repos.runs.list()).toHaveLength(0)
+  })
+})
