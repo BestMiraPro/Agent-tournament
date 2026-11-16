@@ -59,6 +59,21 @@ export function serializeGraderProfile(contextDir: string | null): string {
   ].join('\n')
 }
 
+/** The profile reflection calls select by name, written beside the grader's. */
+export const REFLECTOR_AGENT = 'reflector'
+
+/**
+ * The OpenCode profile reflection runs as: every tool denied. Reflection rewrites a strategy from
+ * what its prompt carries and needs no tools, as on the Claude runtime. Before this profile it ran
+ * as the implicit `build` agent, and one read outside its folder raised a permission prompt nobody
+ * was there to answer, so the round waited in reflection for good (opencode 1.18.21, 16 November
+ * 2026). `"*"` covers tools added later and MCP servers from a global config. Structured output
+ * still works: OpenCode adds that tool after the profile's rules are applied.
+ */
+export function serializeReflectorProfile(): string {
+  return ['---', 'description: tournament reflector', 'permission:', '  "*": deny', '---', ''].join('\n')
+}
+
 /** Where a collaboration round's sealed output is copied for grading, inside the grader's own folder. */
 export const SEALED_DIR = 'sealed'
 
@@ -83,11 +98,12 @@ export function sealedArtifactWriter(graderDirectory: string): SealedArtifactWri
   }
 }
 
-/** Writes the profile under the workspace root and returns the directory grader calls use. */
+/** Writes the grader and reflector profiles under the workspace root and returns the directory their calls use. */
 export function writeGraderProfile(workspaceRoot: string, contextDir: string | null): string {
   const dir = join(workspaceRoot, GRADER_DIR)
   const agents = join(dir, '.opencode', 'agents')
   mkdirSync(agents, { recursive: true })
   writeFileSync(join(agents, `${GRADER_AGENT}.md`), serializeGraderProfile(contextDir), 'utf8')
+  writeFileSync(join(agents, `${REFLECTOR_AGENT}.md`), serializeReflectorProfile(), 'utf8')
   return dir
 }

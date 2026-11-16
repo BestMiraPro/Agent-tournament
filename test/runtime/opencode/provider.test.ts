@@ -46,17 +46,17 @@ describe('OpenCodeProvider', () => {
     expect(out).toBe('plain')
   })
 
-  test('criteria and judge calls run as the grader in its directory; reflect does not', async () => {
+  test('criteria and judge calls run as the grader, reflect as the tool-less reflector, both in the profiles\' directory', async () => {
     const c = new FakeClient(structured({ a: 1 }))
     const p = new OpenCodeProvider(c as never, '/work', { timeoutMs: 1000, graderDirectory: '/work/.arena-grader' })
-    for (const purpose of ['criteria', 'judge'] as const) {
+    for (const purpose of ['criteria', 'judge', 'review'] as const) {
       await p.complete({ purpose, prompt: 'x', modelId: 'a/b', schema: {} })
       expect(c.lastBody?.agent).toBe('grader')
       expect(c.lastDirectory).toBe('/work/.arena-grader')
     }
     await p.complete({ purpose: 'reflect', prompt: 'x', modelId: 'a/b', schema: {} })
-    expect(c.lastBody?.agent).toBeUndefined()
-    expect(c.lastDirectory).toBe('/work')
+    expect(c.lastBody?.agent).toBe('reflector')
+    expect(c.lastDirectory).toBe('/work/.arena-grader')
   })
 
   test('without a grader directory every call keeps the implicit agent', async () => {
