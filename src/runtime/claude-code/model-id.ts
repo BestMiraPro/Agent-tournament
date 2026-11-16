@@ -16,7 +16,7 @@ const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,127}$/
 export const DEFAULT_CLAUDE_SUBSCRIPTION_MODELS = [
   'claude-subscription/claude-opus-5-5',
   'claude-subscription/claude-sonnet-5-5',
-  'claude-subscription/claude-fable-5-1',
+  'claude-subscription/claude-fable-5-2',
   'claude-subscription/claude-haiku-5-5',
   'claude-subscription/opus',
   'claude-subscription/sonnet',
