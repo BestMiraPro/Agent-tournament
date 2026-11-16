@@ -77,9 +77,22 @@ Every roster provider needs an API key in the credentials file; a provider signe
 
 **Shared** is the earlier behaviour: several agents may share a container, the credentials file is mounted read-only, and containers have ordinary network access. Choose it when a run needs something the relay cannot carry.
 
-### Research toolchain
+### Shared toolbox
 
-Every container has Python 3.11 with NumPy, pandas, SciPy, matplotlib, PyArrow, DuckDB and pytest (exact versions and hashes in `docker/research-requirements.lock`), plus Node, Git and ripgrep. Nothing is installed at run time. Adding a package is a build-time change: edit `docker/research-requirements.in`, regenerate the lock with hashes, and the next run builds a new image automatically.
+Agents start with packages already installed, so they don't spend time or disk installing common ones:
+
+- **Python 3.11** with NumPy, pandas, SciPy, matplotlib, PyArrow, DuckDB, pytest, requests and Beautiful Soup (exact versions and hashes in `docker/research-requirements.lock`).
+- **Node packages** typescript, tsx, zod, fastify, express and vitest (exact versions and integrity hashes in `docker/toolbox-node/package-lock.json`). `import 'zod'` works from any folder, and `tsx`, `tsc` and `vitest` are on PATH.
+
+Docker containers have them in the image, plus Node, Git and ripgrep. Local runs get the same packages in `.arena-toolbox` under the workspace root, built the first time a local run starts there (it downloads the pinned packages, so the first run takes a little longer) and again whenever the package files change. The Python part needs [uv](https://docs.astral.sh/uv/); without it, local agents get only the Node packages and the run says so. The toolbox is read-only: an agent that needs another package installs it into its own folder, and the prompt tells it how. Set `ARENA_TOOLBOX=off` to start local runs without it.
+
+Adding a package is a change to the package files: for Python, edit `docker/research-requirements.in` and regenerate the lock with hashes (the command is at the top of the lock); for Node, run `npm install --package-lock-only --save-exact <name>@<version>` in `docker/toolbox-node`. The next Docker run builds a new image and the next local run rebuilds the toolbox.
+
+In local runs agents' commands run in `/bin/sh`, as in Docker, not in your login shell, so your shell's startup files (and anything they export) don't reach them.
+
+### Workspace disk limit
+
+Each agent's workspace may use up to 1 GiB of disk, and a collaboration team gets 1 GiB per member. Every file counts as at least 4 KiB, which is how a filesystem allocates space, so a flood of empty files hits the limit too; there is no separate limit on the number of files. A workspace over the limit scores 0 for the round, and the prompt tells agents the limit. Installed packages (`node_modules`, `.venv`, `__pycache__` and similar) count toward it but are not hashed, stored or judged.
 
 ### Context folder
 
