@@ -6,6 +6,8 @@ import type { Repos } from '../db/repos.js'
 import { BudgetTracker, type AgentUsage, type BudgetBreach, type BudgetStatus } from './budget.js'
 import { breed } from '../evolution/breed.js'
 import type { AuditCollector } from './audit.js'
+import type { ChannelLimits } from './channel.js'
+import { runCollaborationRound, type AgentAttempt, type SealedArtifactWriter } from './collaboration.js'
 import type { EngineEvent, EventSink } from './events.js'
 import {
   captureSubmission,
@@ -24,6 +26,8 @@ import { deadlineTimer, type AgentRunner, type AgentRunResult } from '../runtime
 import { CONTAINER_CONTEXT_PATH } from '../runtime/docker/cli.js'
 import { runPool } from '../runtime/pool.js'
 import { TOOLS_MOUNT } from '../runtime/tool-manifest.js'
+import { agentConnectorIds } from '../connectors/web/builtin.js'
+import { localToolRules } from '../connectors/web/opencode.js'
 import type { AgentHandle, Sandbox } from '../runtime/sandbox.js'
 
 export interface EngineDeps {
@@ -48,6 +52,10 @@ export interface EngineDeps {
   releasePopulation?: () => Promise<void>
   /** Durable behavioural evidence: fed every engine event, frozen at the judging boundary. */
   audit?: AuditCollector
+  /** Collaboration: how the team channel is polled and bounded (defaults in channel.ts). */
+  channel?: Partial<ChannelLimits>
+  /** Collaboration: where the grader can open a round's sealed output; absent to inline it. */
+  sealedArtifacts?: SealedArtifactWriter
 }
 
 export interface RoundResult {
@@ -72,6 +80,8 @@ export class TournamentEngine {
   /** Per-run abort flags for cooperative abort — set by `abortRound`, read by the
    *  pool `shouldStop` gates and the phase gates below. */
   private aborted = new Set<string>()
+  /** Collaboration: what the seed put in each run's team workspace, taken when it was created. */
+  private teamSeeds = new Map<string, Map<string, number>>()
 
   constructor(private d: EngineDeps) {}
 
@@ -127,7 +137,8 @@ export class TournamentEngine {
       for (let i = 0; i < entry.count; i++) {
         const agent = repos.agents.create({
           runId: run.id,
-          label: `competitor-${String(index + 1).padStart(2, '0')}`,
+          // Teammates, not competitors, when nobody is ranked against anybody.
+          label: `${config.workflow === 'collaboration' ? 'agent' : 'competitor'}-${String(index + 1).padStart(2, '0')}`,
           parentAgentId: null,
           bornRound: 1,
         })
@@ -231,6 +242,9 @@ export class TournamentEngine {
     if (!budget) {
       throw new Error(`no budget tracker registered for run ${runId} — call createRun first`)
     }
+    if (config.workflow === 'collaboration' && typeof this.d.sandbox.provisionTeam !== 'function') {
+      throw new Error(`the ${config.sandbox} sandbox cannot run collaboration rounds: it has no shared team workspace`)
+    }
 
     // Preflight before the round exists, in this order:
     // 1. the run has its budget tracker (above);
@@ -312,6 +326,20 @@ export class TournamentEngine {
         return { agent, genome }
       })
 
+      if (config.workflow === 'collaboration') {
+        const done = await runCollaborationRound({
+          repos, sandbox: this.d.sandbox, runner: this.d.runner, judge, reflector, config, budget,
+          audit: this.d.audit, channelLimits: this.d.channel, sealedArtifacts: this.d.sealedArtifacts,
+          readableDirs: readableDirsFor(config), teamSeeds: this.teamSeeds,
+          connectorIds: agentConnectorIds(config), toolRules: toolRulesFor(config),
+          emit: (e) => this.emit(e),
+          aborted: () => this.aborted.has(runId),
+          releaseWorkers,
+          attempt: (a) => this.runAgentAttempt(a),
+        }, { runId, roundId: round.id, roundIdx, goalMd: input.goalMd, submittedCriteria, prepared })
+        return this.finishRound(runId, round.id, roundIdx, done.metaDigest, done.budgetBreach)
+      }
+
       // One provisioning failure (port exhaustion, image pull, OOM under Docker) must
       // not abort the round before any agent runs — isolate each agent's PREPARE work
       // through the pool rather than a plain sequential loop.
@@ -336,6 +364,9 @@ export class TournamentEngine {
           serializeCompetitorProfile(p.genome, {
             label: p.agent.label,
             readableDirs: readableDirsFor(config),
+            // The run's connectors plus the built-in web tools, which every sandbox reaches through the bridge.
+            connectorIds: agentConnectorIds(config),
+            toolRules: toolRulesFor(config),
           }),
         )
         return h
@@ -362,141 +393,11 @@ export class TournamentEngine {
       const quiesced = new Map<string, QuiesceStatus>()
       // The timeout is enforced here, not delegated to the runner: a runner that
       // ignores or mishandles `timeoutMs` would otherwise hang the whole round.
-      const runResults = await runPool(prepared, config.concurrency, async (p) => {
-        // Emitted once, as this agent's worker is dispatched, regardless of how it
-        // eventually ends — matched by exactly one done/failed emission via `finish` below.
-        this.emit({ type: 'agent.status', runId, agentId: p.agent.id, status: 'running' })
-        const finish = (result: AgentRunResult): AgentRunResult => {
-          const failed = result.status !== 'ok'
-          // Published the moment this worker returns — before COLLECT, JUDGE or any sibling
-          // finishes — so a card can say why an agent failed while the round still runs.
-          this.emit({
-            type: 'agent.status',
-            runId,
-            agentId: p.agent.id,
-            roundIdx,
-            status: failed ? 'failed' : 'done',
-            ...(failed
-              ? {
-                  failure: result.failure ?? failureFromText(
-                    result.status === 'no_submission'
-                      ? 'The agent finished without writing SUBMISSION.md'
-                      : result.errorText ?? `The agent ended with status ${result.status}`,
-                  ),
-                }
-              : {}),
-          })
-          // Usage nobody observed is not a known zero: a runner that lost its response
-          // marks it unknown, and nothing is published rather than a fabricated 0.
-          if (result.usageKnown !== false) {
-            this.emit({
-              type: 'agent.usage',
-              runId,
-              agentId: p.agent.id,
-              tokensIn: result.tokensIn,
-              tokensOut: result.tokensOut,
-              costUsd: result.costUsd,
-            })
-          }
-          return result
-        }
-
-        // An agent whose provisioning failed has no handle to run against; record it
-        // as the error it already is instead of calling the runner with a missing
-        // handle.
-        const prepError = prepFailed.get(p.agent.id)
-        if (prepError !== undefined) {
-          const failed: AgentRunResult = {
-            status: 'error',
-            errorText: `provisioning failed: ${prepError}`,
-            failure: failureFromText(`Provisioning failed: ${prepError}`, 'PROVISION_FAILED'),
-            tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
-            costUsd: 0, durationMs: 0,
-          }
-          return finish(failed)
-        }
-
-        // The dispatch gate: checked per agent as the pool pulls it off the queue, not
-        // once for the whole phase, so an aggregate cap that trips mid-round stops
-        // agents still waiting behind `concurrency` without touching ones already
-        // dispatched — those are left to drain and are still scored, since that work is
-        // paid for either way.
-        if (budget.shouldStopDispatch()) {
-          const skipped: AgentRunResult = {
-            status: 'error',
-            errorText: 'agent dispatch skipped: the run/round budget was already exhausted',
-            tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
-            costUsd: 0, durationMs: 0,
-          }
-          return finish(skipped)
-        }
-
-        const handle = handles.get(p.agent.id)!
-        const started = Date.now()
-        let timer: ReturnType<typeof setTimeout> | undefined
-        try {
-          const result = await Promise.race([
-            this.d.runner.run(handle, {
-              agentId: p.agent.id,
-              genome: p.genome,
-              goalMd: input.goalMd,
-              timeoutMs: config.agentTimeoutMs,
-              steerAfterMs: config.agentSteerAfterMs ?? DEFAULT_CONFIG.agentSteerAfterMs,
-            }),
-            // No limit by default: the race is only armed for a finite cap.
-            new Promise<never>((_r, reject) => {
-              timer = deadlineTimer(config.agentTimeoutMs, () => reject(new DriverTimeout()))
-            }),
-          ])
-          // Folded in the instant the run returns, so a concurrent sibling still
-          // queued behind `shouldStopDispatch` above sees this spend immediately.
-          budget.record({
-            agentId: p.agent.id,
-            modelId: p.genome.modelId,
-            tokensIn: result.tokensIn,
-            tokensOut: result.tokensOut,
-            tokensCacheRead: result.tokensCacheRead,
-            tokensCacheWrite: result.tokensCacheWrite,
-            costUsd: result.costUsd,
-          })
-          return finish(result)
-        } catch (e) {
-          if (e instanceof DriverTimeout) {
-            const timedOut: AgentRunResult = {
-              status: 'timeout',
-              errorText: `driver timeout after ${config.agentTimeoutMs}ms`,
-              failure: failureFromText(`Driver timeout after ${config.agentTimeoutMs}ms`, 'DRIVER_TIMEOUT'),
-              // The runner never returned, so nothing about its usage was observed.
-              usageKnown: false,
-              tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
-              costUsd: 0, durationMs: Date.now() - started,
-            }
-            return finish(timedOut)
-          }
-          // A runner that throws rather than returning still ended this attempt. This used
-          // to publish nothing, leaving the card on "working" until the whole round ended;
-          // the error still propagates exactly as before.
-          this.emit({
-            type: 'agent.status',
-            runId,
-            agentId: p.agent.id,
-            roundIdx,
-            status: 'failed',
-            failure: describeFailure(e),
-          })
-          throw e
-        } finally {
-          // Without this the loser of the race keeps a timer alive for the full
-          // agentTimeoutMs after every round, holding the process open.
-          clearTimeout(timer)
-
-          // Capturing here rather than after the pool is deliberate, and so is the order:
-          // the run promise settling only means the driver stopped waiting — on the
-          // timeout path the agent's own session is still live and still writing into the
-          // directory about to be hashed. Stop it first, then read; otherwise the hash
-          // certifies a file its author kept editing. Runs in `finally` so a runner that
-          // threw still has whatever it produced preserved.
-          const stopped = await quiesceAgent(this.d.runner, handle)
+      const runResults = await runPool(prepared, config.concurrency, (p) => this.runAgentAttempt({
+        runId, roundIdx, config, budget, agent: p.agent, genome: p.genome, goalMd: input.goalMd,
+        handle: handles.get(p.agent.id),
+        prepError: prepFailed.get(p.agent.id),
+        afterStop: async (handle, stopped) => {
           quiesced.set(p.agent.id, stopped)
           try {
             captures.set(
@@ -519,8 +420,8 @@ export class TournamentEngine {
           } catch {
             // A workspace that cannot be read is handled in COLLECT as a missing capture.
           }
-        }
-      }, {
+        },
+      }), {
         // Cooperative abort: queued agents stop; in-flight sessions are aborted via the runner (mocks run out);
         shouldStop: () => this.aborted.has(runId),
       })
@@ -833,16 +734,7 @@ export class TournamentEngine {
       // Closing the gap means changing `Provider.complete` to return usage alongside text,
       // through MockProvider, OpenCodeProvider, Judge and Reflector. Until then the UI
       // labels this "worker cost" rather than implying a total (web/src/lib/cost.ts).
-      repos.rounds.markEnded(round.id, repos.submissions.totalCost(round.id))
-      repos.rounds.setStatus(round.id, 'complete')
-      this.emit({ type: 'round.status', runId, roundIdx, status: 'complete' })
-      this.emit({
-        type: 'round.complete',
-        runId,
-        roundIdx,
-        budgetBreach: budgetBreach?.reason ?? null,
-      })
-      return { roundId: round.id, roundIdx, metaDigest: judged.metaDigest, budgetBreach }
+      return this.finishRound(runId, round.id, roundIdx, judged.metaDigest, budgetBreach)
     } catch (e) {
       // The primary failure remains authoritative: a secondary persistence problem
       // must not replace it, but a failed round should still retain its known spend.
@@ -885,6 +777,176 @@ export class TournamentEngine {
     }
   }
 
+  /** The end of every successful round, whichever workflow ran it. */
+  private finishRound(
+    runId: string,
+    roundId: string,
+    roundIdx: number,
+    metaDigest: string,
+    budgetBreach: BudgetBreach | null,
+  ): RoundResult {
+    const repos = this.d.repos
+    repos.rounds.markEnded(roundId, repos.submissions.totalCost(roundId))
+    repos.rounds.setStatus(roundId, 'complete')
+    this.emit({ type: 'round.status', runId, roundIdx, status: 'complete' })
+    this.emit({
+      type: 'round.complete',
+      runId,
+      roundIdx,
+      budgetBreach: budgetBreach?.reason ?? null,
+    })
+    return { roundId, roundIdx, metaDigest, budgetBreach }
+  }
+
+  /**
+   * One agent's attempt: dispatch under the budget gate, the driver-enforced timeout, usage
+   * folded into the budget the instant it returns, and the agent stopped before anyone reads
+   * what it wrote. Tournaments capture in `afterStop`; collaboration rounds only record the stop.
+   * The timeout is enforced here, not delegated to the runner: a runner that ignores or
+   * mishandles `timeoutMs` would otherwise hang the whole round.
+   */
+  private async runAgentAttempt(a: AgentAttempt): Promise<AgentRunResult> {
+    const { runId, roundIdx, config, budget, agent } = a
+    // Emitted once, as this agent's worker is dispatched, regardless of how it
+    // eventually ends — matched by exactly one done/failed emission via `finish` below.
+    this.emit({ type: 'agent.status', runId, agentId: agent.id, status: 'running' })
+    const finish = (result: AgentRunResult): AgentRunResult => {
+      const failed = result.status !== 'ok'
+      // Published the moment this worker returns — before COLLECT, JUDGE or any sibling
+      // finishes — so a card can say why an agent failed while the round still runs.
+      this.emit({
+        type: 'agent.status',
+        runId,
+        agentId: agent.id,
+        roundIdx,
+        status: failed ? 'failed' : 'done',
+        ...(failed
+          ? {
+              failure: result.failure ?? failureFromText(
+                result.status === 'no_submission'
+                  ? 'The agent finished without writing SUBMISSION.md'
+                  : result.errorText ?? `The agent ended with status ${result.status}`,
+              ),
+            }
+          : {}),
+      })
+      // Usage nobody observed is not a known zero: a runner that lost its response
+      // marks it unknown, and nothing is published rather than a fabricated 0.
+      if (result.usageKnown !== false) {
+        this.emit({
+          type: 'agent.usage',
+          runId,
+          agentId: agent.id,
+          tokensIn: result.tokensIn,
+          tokensOut: result.tokensOut,
+          costUsd: result.costUsd,
+        })
+      }
+      return result
+    }
+
+    // An agent whose provisioning failed has no handle to run against; record it
+    // as the error it already is instead of calling the runner with a missing
+    // handle.
+    if (a.prepError !== undefined) {
+      const failed: AgentRunResult = {
+        status: 'error',
+        errorText: `provisioning failed: ${a.prepError}`,
+        failure: failureFromText(`Provisioning failed: ${a.prepError}`, 'PROVISION_FAILED'),
+        tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
+        costUsd: 0, durationMs: 0,
+      }
+      return finish(failed)
+    }
+
+    // The dispatch gate: checked per agent as the pool pulls it off the queue, not
+    // once for the whole phase, so an aggregate cap that trips mid-round stops
+    // agents still waiting behind `concurrency` without touching ones already
+    // dispatched — those are left to drain and are still scored, since that work is
+    // paid for either way.
+    if (budget.shouldStopDispatch()) {
+      const skipped: AgentRunResult = {
+        status: 'error',
+        errorText: 'agent dispatch skipped: the run/round budget was already exhausted',
+        tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
+        costUsd: 0, durationMs: 0,
+      }
+      return finish(skipped)
+    }
+
+    const handle = a.handle!
+    const started = Date.now()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    a.onDispatched?.(agent.id)
+    try {
+      const result = await Promise.race([
+        this.d.runner.run(handle, {
+          agentId: agent.id,
+          genome: a.genome,
+          goalMd: a.goalMd,
+          timeoutMs: config.agentTimeoutMs,
+          steerAfterMs: config.agentSteerAfterMs ?? DEFAULT_CONFIG.agentSteerAfterMs,
+          ...(a.team ? { team: a.team } : {}),
+        }),
+        // No limit by default: the race is only armed for a finite cap.
+        new Promise<never>((_r, reject) => {
+          timer = deadlineTimer(config.agentTimeoutMs, () => reject(new DriverTimeout()))
+        }),
+      ])
+      // Folded in the instant the run returns, so a concurrent sibling still
+      // queued behind `shouldStopDispatch` above sees this spend immediately.
+      budget.record({
+        agentId: agent.id,
+        modelId: a.genome.modelId,
+        tokensIn: result.tokensIn,
+        tokensOut: result.tokensOut,
+        tokensCacheRead: result.tokensCacheRead,
+        tokensCacheWrite: result.tokensCacheWrite,
+        costUsd: result.costUsd,
+      })
+      return finish(result)
+    } catch (e) {
+      if (e instanceof DriverTimeout) {
+        const timedOut: AgentRunResult = {
+          status: 'timeout',
+          errorText: `driver timeout after ${config.agentTimeoutMs}ms`,
+          failure: failureFromText(`Driver timeout after ${config.agentTimeoutMs}ms`, 'DRIVER_TIMEOUT'),
+          // The runner never returned, so nothing about its usage was observed.
+          usageKnown: false,
+          tokensIn: 0, tokensOut: 0, tokensCacheRead: 0, tokensCacheWrite: 0,
+          costUsd: 0, durationMs: Date.now() - started,
+        }
+        return finish(timedOut)
+      }
+      // A runner that throws rather than returning still ended this attempt. This used
+      // to publish nothing, leaving the card on "working" until the whole round ended;
+      // the error still propagates exactly as before.
+      this.emit({
+        type: 'agent.status',
+        runId,
+        agentId: agent.id,
+        roundIdx,
+        status: 'failed',
+        failure: describeFailure(e),
+      })
+      throw e
+    } finally {
+      // Without this the loser of the race keeps a timer alive for the full
+      // agentTimeoutMs after every round, holding the process open.
+      clearTimeout(timer)
+      a.onEnded?.(agent.id)
+
+      // Stopping comes before any read, and so does this ordering: the run promise
+      // settling only means the driver stopped waiting — on the timeout path the agent's
+      // own session is still live and still writing into the directory about to be read.
+      // Stop it first, then read; otherwise a hash certifies a file its author kept
+      // editing. Runs in `finally` so a runner that threw still has whatever it produced
+      // preserved.
+      const stopped = await quiesceAgent(this.d.runner, handle)
+      await a.afterStop?.(handle, stopped)
+    }
+  }
+
   /**
    * Snapshot of this run's budget tracker — tokens/USD spent and remaining, and
    * whether USD is even known for the models actually used. Exists so a caller (the
@@ -923,6 +985,15 @@ export function readableDirsFor(config: Pick<RunConfig, 'sandbox' | 'contextDir'
     return [...(config.contextDir ? [CONTAINER_CONTEXT_PATH] : []), TOOLS_MOUNT]
   }
   return config.sandbox === 'local' && config.contextDir ? [config.contextDir] : []
+}
+
+/**
+ * Whole-tool permission answers for the run's sandbox: a local run's web tools when it has web
+ * access, and OpenCode's own `websearch` denied (the shared host server offers it for the grader).
+ * Docker profiles are unchanged.
+ */
+export function toolRulesFor(config: Pick<RunConfig, 'sandbox' | 'webAccess'>): Record<string, 'allow' | 'deny'> {
+  return config.sandbox === 'local' ? localToolRules(config.webAccess === true) : {}
 }
 
 /** Marker for the driver's own timeout, so a runner's rejection is not mistaken for one. */

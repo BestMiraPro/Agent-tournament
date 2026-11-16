@@ -3,10 +3,12 @@ import { summarizeRoster, type RosterEntry } from '../lib/roster.js'
 
 // Controlled: the parent owns the array, this renders rows. Unknown model ids
 // pass through untouched — the datalist is a picker aid, the server validates.
-export function RosterBuilder({ value, onChange, models, disabled }: {
+export function RosterBuilder({ value, onChange, models, labels = {}, disabled }: {
   value: RosterEntry[]
   onChange: (v: RosterEntry[]) => void
   models: string[]
+  /** `subscription` for models that bill a subscription rather than an API key. */
+  labels?: Record<string, string>
   disabled?: boolean
 }) {
   const listId = useId()
@@ -29,6 +31,7 @@ export function RosterBuilder({ value, onChange, models, disabled }: {
             onChange={(e) => update(i, { modelId: e.target.value })}
             disabled={disabled}
           />
+          {labels[entry.modelId] && <SubscriptionBadge />}
           <label htmlFor={`roster-count-${i}`}>Count</label>
           <input
             id={`roster-count-${i}`} type="number" min={1} step={1}
@@ -51,7 +54,7 @@ export function RosterBuilder({ value, onChange, models, disabled }: {
         </div>
       ))}
       <datalist id={listId}>
-        {models.map((m) => <option key={m} value={m} />)}
+        {models.map((m) => <option key={m} value={m} label={labels[m] ? `${m} (subscription)` : undefined} />)}
       </datalist>
       <button
         aria-label="Add agent row"
@@ -67,4 +70,9 @@ export function RosterBuilder({ value, onChange, models, disabled }: {
       {errors.map((e) => <p key={e} className="error">{e}</p>)}
     </div>
   )
+}
+
+/** Marks a model that bills a subscription rather than an API key. */
+export function SubscriptionBadge() {
+  return <span className="badge badge--subscription" title="Billed to your subscription, not an API key">subscription</span>
 }

@@ -23,6 +23,11 @@ export interface StartOptions {
   dockerSandbox: boolean
   /** How docker runs reach their containers: `bridge` from the container image, else `loopback`. */
   dockerReach: DockerReach
+  /**
+   * Where connectors and their credentials are kept (owner-only files). Beside the workspaces, never under them,
+   * and never in the database.
+   */
+  connectorsDir: string
 }
 
 /**
@@ -80,6 +85,7 @@ export function resolveStartOptions(input: {
       'no-open': { type: 'boolean' },
       'no-docker-sandbox': { type: 'boolean' },
       'docker-reach': { type: 'string' },
+      'connectors-dir': { type: 'string' },
     },
   })
 
@@ -113,5 +119,6 @@ export function resolveStartOptions(input: {
     open: values['no-open'] !== true,
     dockerSandbox: values['no-docker-sandbox'] !== true,
     dockerReach,
+    connectorsDir: values['connectors-dir'] ?? join(runsDir, 'connectors'),
   }
 }

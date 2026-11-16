@@ -33,6 +33,8 @@ export interface AppliedCriteria {
 export interface RunSnapshot {
   runId: string
   name: string
+  /** Fixed at creation: a team judged on its shared output, or an evolving tournament. */
+  workflow: 'collaboration' | 'tournament'
   lastRoundIdx: number
   goalMd: string | null
   /**
@@ -114,7 +116,7 @@ export function buildRunSnapshot(repos: Repos, runId: string, extra?: RunSnapsho
   }
 
   return {
-    runId, name: run.name, lastRoundIdx, goalMd,
+    runId, name: run.name, workflow: run.config.workflow, lastRoundIdx, goalMd,
     initialCriteria: run.initialCriteria,
     lastRoundCriteria,
     agents: snapshotAgents, scores,

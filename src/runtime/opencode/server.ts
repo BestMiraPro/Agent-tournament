@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { WEB_KEY_ENV } from '../../connectors/web/config.js'
 import { OpenCodeClient } from './client.js'
 
 /** The server prints `opencode server listening on http://127.0.0.1:<port>` on startup. */
@@ -201,6 +202,9 @@ export async function startServer(opts: StartServerOptions = {}): Promise<Server
   // server demand credentials our client does not have. Scrub them from the copy.
   delete env.OPENCODE_SERVER_USERNAME
   delete env.OPENCODE_SERVER_PASSWORD
+  // The web search keys stay in this process: a local agent's shell commands inherit the
+  // server's environment, and the grader's own web search runs keyless as before.
+  for (const name of WEB_KEY_ENV) delete env[name]
 
   // The win32 shell is what lets `opencode` resolve its `.cmd` shim, and it is what
   // raises DEP0190 (args are concatenated, not escaped). That warning stays: silencing

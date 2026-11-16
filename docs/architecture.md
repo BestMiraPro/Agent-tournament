@@ -1,6 +1,11 @@
 # Architecture
 
-Agent Tournament runs a population of LLM agents through repeated rounds with evolutionary selection, a blind LLM judge, and a live dashboard. This doc describes how the pieces fit.
+Agent Tournament runs LLM agents through repeated rounds with an LLM judge and a live dashboard, in one of two workflows fixed per run (`RunConfig.workflow`):
+
+- **collaboration** (default): the round's agents are one team in one shared workspace that carries over between rounds. They talk through `CHANNEL.md` and co-write `output/`, which is captured once, sealed and judged as one artifact. No selection or breeding; each agent's strategy is reflected from the team's result.
+- **tournament**: agents compete individually with evolutionary selection and a blind judge.
+
+This doc describes how the pieces fit.
 
 ## System diagram
 
@@ -47,7 +52,7 @@ Both share the same engine (`src/engine/driver.ts`), judge (`src/judge/`), refle
 
 ## The round lifecycle
 
-One round, end to end:
+`runRound` shares its preflight (budget tracker, active population, prior execution reconciled, placement and capacity, abort check), the round row, criteria and failure handling between the workflows, then branches after genomes are resolved. The tournament round, end to end:
 
 1. **Start** — `POST /api/runs/:id/rounds` (or the CLI loop) calls `engine.runRound(runId, { goalMd, criteriaMd })`.
 2. **Prepare** — the engine creates a round row, resolves each agent's genome (seed/elite/clone/mutation/crossover), and writes `GOAL.md` + `STRATEGY.md` into each agent's workspace.
@@ -57,6 +62,18 @@ One round, end to end:
 6. **Select** — `src/core/selection.ts` ranks agents; the top band clones, the bottom band is culled, elites are kept verbatim, crossover (4d) breeds children. The `diversityFloor` (4f) rescues the most distinct culled agent.
 7. **Reflect** — `src/evolution/reflect.ts` rewrites each survivor's strategy for the next round (the mutation operator). LLM-recombine (4f) merges two parent strategies with a split-merge fallback.
 8. **Complete** — the round row is marked ended; the engine emits `round.complete`; the dashboard's grid clears for the next round.
+
+### A collaboration round
+
+`src/engine/collaboration.ts`, after the shared preflight (a sandbox without `provisionTeam` is refused there, before the round row exists):
+
+1. **Prepare** — `sandbox.provisionTeam(runId, agentIds)` returns one handle per agent onto the run's single shared workspace (`team-<runId>`; `/work` in its one Docker container), created and seeded on first use and kept across rounds. The engine writes `GOAL.md`, the channel helper (`.opencode/arena/post.mjs`), each member's OpenCode profile (`.opencode/agents/member-<label>.md`) and notes (`agents/<label>/NOTES.md`), and a `## Round N` line in `CHANNEL.md`. Strategies still travel in each prompt's `system` field.
+2. **Run** — every agent is dispatched at once with `AgentRunContext.team` (label, teammates, post command); the runner builds the team prompt (`src/runtime/team-prompt.ts`). `ChannelTail` (`src/engine/channel.ts`) reads `CHANNEL.md` every 2 s, records each new entry (`channel_messages`, `channel.message` event) and queues it into the other live agents' sessions through the optional `AgentRunner.send` (OpenCode: `prompt_async`, the steering path), with per-entry, per-message, per-gap and per-round caps. Budget gate, timeout and quiesce are the tournament's (`runAgentAttempt` is shared).
+3. **Barrier and capture** — after the pool drains and every agent is quiesced, a last channel read records what is left and `captureTeamOutput` (`src/engine/team-capture.ts`) captures `output/` and `CHANNEL.md` once: hashes within the team budget (one agent's workspace caps per member), stored text (bounded), binary files listed, one digest. `sealed` = every dispatched agent confirmed stopped. Stored in `round_outputs` / `round_output_files`.
+4. **Freeze** — each member gets a `submission.captured` event carrying the team seal, the audit is frozen, and per-member contributions (files from write/edit/patch activity, tool calls, channel posts) are stored with the snapshot. Workers are released.
+5. **Judge** — `Judge.scoreTeam` grades the one artifact (no shuffle: nothing to compare). Local and Docker compositions copy the sealed text under the grader's own folder (`.arena-grader/sealed/<roundId>/output`, via `ComposedRun.sealedArtifacts`) so its read-only tools can open it; mock inlines it. Members' activity is shown as `M1`, `M2`, … and cited evidence is checked against it. One envelope as usual, each member's entry holding the team assessment and the safety findings that cite it. An empty or over-quota output is not judged and scores 0, with members' behaviour still reviewed.
+6. **Score** — one row in `team_scores`, mirrored into each member's `scores` row (rank 1, no band).
+7. **Reflect** — no selection, breeding or retirement. Unless the budget was breached, `Reflector.reflectTeam` rewrites each strategy from the team score, the judge's rationale and digest, and the member's own posts and contributions; next-round genomes are `mutation` (rewritten) or `clone` (carried forward).
 
 ## Data model
 
@@ -71,6 +88,12 @@ runs       id, name, goal, status, config (JSON), createdAt
   │                        fileManifestJson, tokensIn/Out/CacheRead/CacheWrite,
   │                        costUsd, durationMs
   │
+  │     ├── round_outputs       roundId, status, digest, sealed, hashesComplete, manifest,
+  │     │                       channelMd, contributions          (collaboration: sealed output/)
+  │     ├── round_output_files  roundId, path, content            (its stored text)
+  │     ├── team_scores         roundId, score, rationaleMd, status (one team score)
+  │     └── channel_messages    roundId, seq, author, agentId, target, postedAt, body, delivered
+  │
   ├── agents       id, runId, label, parentAgentId, bornRound, status
   │     │
   │     └── genomes  id, agentId, roundIdx, modelId, temperature,
@@ -81,7 +104,8 @@ runs       id, name, goal, status, config (JSON), createdAt
 
 - **Agents are never deleted** — retire sets `status='retired'`; lineage is preserved for the drawer's lineage tree.
 - **Genomes are append-only** — one per (agent, round); the latest is the agent's current strategy. `origin` tracks seed/elite/mutation/clone/crossover/manual.
-- **Scores are per (round, agent)** — rank-ordered; `band` is top/middle/bottom.
+- **Scores are per (round, agent)** — rank-ordered; `band` is top/middle/bottom. In a collaboration round every member's row repeats the team score (rank 1, no band); `team_scores` is the record.
+- **New tables are created on open** — `CREATE TABLE IF NOT EXISTS` adds the collaboration tables to an older database, and a stored config without `workflow` decodes as `tournament`.
 
 ## The sandbox abstraction
 
@@ -90,29 +114,67 @@ runs       id, name, goal, status, config (JSON), createdAt
 - **MockSandbox** — in-memory, no real processes. Used by tests + mock mode.
 - **Local** — agents are host opencode processes against one shared server (`src/runtime/opencode/`). Workspaces are subdirs under `workspaceRoot`.
 - **Docker** — agents run in resource-capped containers (`src/runtime/docker/`), each running its own OpenCode server. Two isolation policies:
-  - **protected** (dashboard default) — one agent per container, read-only root, unprivileged user, no credentials inside, and an internal-only network whose one exit is a gateway container. Model calls go through the host-side provider relay (`src/runtime/provider-relay.ts`), which swaps a per-run token for the real key and only allows roster models within a request limit.
+  - **protected** (dashboard default) — one agent per container, read-only root, unprivileged user, no credentials inside, and an internal-only network whose one exit is a gateway container with three fixed routes. Model calls go through the host-side provider relay (`src/runtime/provider-relay.ts`), which swaps a per-run token for the real key and only allows roster models within a request limit. Connector tool calls go through the host tool bridge (below).
   - **shared** — several agents may share a container, `auth.json` is bind-mounted read-only, and containers have ordinary network access.
 
   See the operator guide's isolation section for the full list of what each policy enforces.
 
+Collaboration adds one optional method, `provisionTeam(teamId, agentIds, opts)`: one shared workspace per run, seeded once and kept across rounds. MockSandbox keeps it in memory for the life of the sandbox, LocalSandbox uses `<root>/team-<runId>`, and DockerSandbox (composed with `team: true`) places the whole team on one container with the folder at `/work`, always with the protected runtime and with memory, CPUs, PIDs and open files scaled per member (`teamContainerLimits`); the capacity preflight admits it as one container of that size plus its gateway.
+
 The engine doesn't know which sandbox it's using — it calls `sandbox.run(handle, ...)` and `sandbox.readFile(handle, ...)`.
+
+## Connectors and the tool bridge
+
+`src/connectors/` gives agents MCP tools from GitHub, Slack, Gmail, imported Claude Code servers and built-in servers, without giving them credentials.
+
+- **Registry** (`store.ts`, `types.ts`): connectors in `connectors.json`, credentials in an owner-only `secrets.json`, both in `--connectors-dir`. Never in SQLite.
+- **Policy** (`policy.ts`, `presets.ts`): which tools an agent may list and call. Slack and Gmail are locked to a code-defined read allowlist; others expose tools annotated read-only, plus write tools the connector permits and the run opts into.
+- **Upstreams** (`upstream.ts`, `resolve.ts`): the MCP SDK client over stdio, Streamable HTTP/SSE or an in-memory transport (the in-house Slack and Gmail servers in `slack/` and `gmail/`, and built-ins registered with `registerBuiltinConnector`, `builtins.ts`).
+- **Bridge** (`bridge.ts`, `bridge-server.ts`, `bridge-process.ts`): one Streamable HTTP MCP endpoint per process at `/mcp/<connector>`, started on first use like the relay. A run's grant (`run-plan.ts`, made in `compose-run.ts`) opens its upstreams, lists their tools and mints one token per agent. Every `tools/call` is checked against the policy, the per-agent call limit, a timeout and a result cap, and emits an `agent.connector` event: the audit collector stores it as `tool_bridge` evidence, the activity cache shows it as a tool item. Revoked first when the run stops.
+- **Reaching it**: `grant.endpointsFor(agentId, baseUrl)` returns `{ id, title, url, headers }` per connector, runner-agnostic. The OpenCode runner writes it to `.opencode/opencode.json` in the agent's workspace (`runtime/opencode/mcp-config.ts`) right before the session; the competitor profile allows `"<id>_*"`; TOOLS.md lists the tools. Protected workers use the gateway's tools route (`GATEWAY_TOOLS_PORT`, 8788).
+- **API and UI**: `src/server/connectors-api.ts` (presets, Claude Code import from `claude-import.ts`, connection tests, Google and MCP OAuth with the callback on the dashboard's own origin) and `web/src/components/Connectors.tsx`.
+
+Design: `docs/superpowers/specs/2026-11-15-connectors-design.md`.
+
+## Web tools for agents
+
+`src/connectors/web/` serves two tools, `web_search` and `web_fetch`, from the host process:
+
+- **Search** (`search.ts`): LangSearch when `LANGSEARCH_API_KEY` is set, Exa's public MCP endpoint when it is not or when LangSearch fails for any reason (keyless, or `EXA_API_KEY` in a header). The answer names its provider and, after a fallback, the fixed reason code. Keys come from the environment or the repository `.env` (`config.ts`) and travel only in request headers.
+- **Fetch** (`fetch-page.ts`, `ssrf.ts`, `html-to-text.ts`): http(s) only; each hop resolved once, every answer checked against the blocked IPv4/IPv6 ranges (embedded IPv4 forms included), the connection pinned to the checked address; manual redirects (5), 2 MiB, 20 s; HTML converted to text by a small in-house extractor; binaries refused.
+- **Limits and evidence** (`limits.ts`, `evidence.ts`): per-agent and per-run call counts; one `WebCallRecord` per call (tool, target as query or host + path, provider, outcome, status, bytes, timing), which `builtin.ts` hands to the bridge as the call's `network` evidence; the audit collector stores it from `tool_bridge`.
+- **MCP** (`mcp-server.ts`): `createWebMcpServer(deps)` builds the tools for one agent of one run; `webConnector()` keeps one limiter per run for many agents. `stdio.ts` serves the same tools over stdio for a host-side client.
+- **Through the bridge** (`builtin.ts`): registered as the built-in connector `arena`, so every sandbox reaches the tools at the tool bridge with the bridge's per-agent tokens (one shared identity for a collaboration team, with the run-wide allowance), limits and sealed `tool_bridge` evidence. Competitor and team-member profiles allow `arena_*` and deny OpenCode's own `websearch` (local runs; the shared host server offers it for the grader). OpenCode connects a folder's MCP servers once and never retries, so before each session `OpenCodeAgentRunner` reads the folder's MCP status and connects any failed server again (up to `MCP_CONNECT_ATTEMPTS`); an agent whose tools stay unavailable still runs.
+
+## Agent runners and subscriptions
+
+An `AgentRunner` (`src/runtime/agent-runner.ts`) runs one agent attempt on a sandbox handle. Real runs compose a `DispatchingAgentRunner` (`src/runtime/dispatch.ts`) that routes each agent by its model: `claude-subscription/*` to `ClaudeCodeAgentRunner` (`src/runtime/claude-code/`), everything else to `OpenCodeAgentRunner`. Mixed rosters run side by side; round admission, abort and quiesce consult both.
+
+- **ClaudeCodeAgentRunner** runs `claude -p` headless with streamed JSON in and out: in the agent's workspace as a host process (local), or through `docker exec` in the agent's shard as a recorded process group (docker). The GOAL is the first streamed message; the steering message and the optional `send(handle, text)` (the seam for live messages) follow at the agent's next step. `stream.ts` translates the CLI's stream into the same `agent.activity` items the OpenCode bridge emits, plus usage (cost always 0) and failures (`CLAUDE_AUTH_EXPIRED`, `SUBSCRIPTION_LIMIT`, `CLAUDE_CLI_MISSING`). Because its activity comes from stdout rather than an OpenCode server, a run exposes `ComposedRun.attachActivity`, which the API points at the same audit-and-cache sink as the OpenCode bridges.
+- **Credentials**: a `claude setup-token` value in a 0600 file (`ClaudeTokenStore`), handed to the CLI on descriptor 3 locally or as a `docker exec` environment variable; or the host's own Claude login (local only). The CLI's environment is stripped of every `ANTHROPIC_*`/`CLAUDE*` variable first. `src/server/subscriptions.ts` holds these services and the status the dashboard shows.
+- **Protected Claude agents** hold the setup token in their own unmodified `claude` process (passed through a 0600 `docker exec --env-file` the launcher removes) and leave through `HTTPS_PROXY`: a CONNECT route on the shard gateway (`src/runtime/docker/gateway.ts`, port 8789) that tunnels to exactly `api.anthropic.com:443`, started only for runs with Claude agents. The relay never holds, matches or injects a Claude token (Anthropic's terms forbid intermediating one).
+- **ChatGPT Plus/Pro** stays on OpenCode: local and shared runs use OpenCode's own login in `auth.json`. In protected runs the relay carries that one OAuth login: `ChatGptLogin` (`src/runtime/chatgpt-oauth.ts`) re-reads `auth.json` per request, refreshes under a lock and writes the rotated pair back atomically, and the relay forwards to the Codex backend with the account headers, moving the system prompt into `instructions` as OpenCode does under OAuth.
+
+Design and verified CLI facts: `docs/superpowers/specs/2026-11-15-subscription-runs-design.md`.
 
 ## The provider abstraction
 
-`src/runtime/provider.ts` — `complete(prompt, opts)` returns the LLM response. Two implementations:
+`src/runtime/provider.ts` — `complete(prompt, opts)` returns the LLM response. Implementations:
 
 - **MockProvider** — deterministic keyword-scoring, no LLM. Used by tests + mock mode.
 - **OpenCodeProvider** — calls the opencode server's `/complete` endpoint (which proxies to the configured model).
+- **ClaudeCodeProvider** (`src/runtime/claude-code/provider.ts`) — one `claude -p --output-format=json` per call on the Claude subscription, `--json-schema` when the caller has a schema.
+- **RoutingProvider** (`src/runtime/dispatch.ts`) — what real runs use: `claude-subscription/*` calls to Claude Code, the rest to OpenCode. `describe(modelId)` names the runtime that graded, for the grading audit.
 
 The Judge and Reflector take a `Provider` in their constructor; they don't know which one.
 
 ## The event bridge
 
-The engine emits `EngineEvent`s (round.status, agent.status, agent.usage, round.scored, round.complete). The dashboard's `EventBroadcaster` (`src/server/event-bridge.ts`) forwards these to all WebSocket subscribers. The web client's `useLiveRun` hook dispatches them to a pure reducer (`liveReducer`) that updates the live state. The reducer is pure so it's unit-tested without a browser or socket.
+The engine emits `EngineEvent`s (round.status, agent.status, agent.usage, round.scored, round.complete, and for collaboration channel.message and the team score on round.scored). The dashboard's `EventBroadcaster` (`src/server/event-bridge.ts`) forwards these to all WebSocket subscribers. The web client's `useLiveRun` hook dispatches them to a pure reducer (`liveReducer`) that updates the live state. The reducer is pure so it's unit-tested without a browser or socket.
 
 ## Config + reconfiguration
 
-`RunConfig` (in `src/core/types.ts`) holds: roster, budget, judge, reflect, selection, concurrency, pricing, sandbox, container caps. `PATCH /api/runs/:id/config` merges a partial into the config and calls `engine.reconfigure()` between rounds — the next round reads the new config fresh. The budget tracker is updated in place (keeps accumulated spend). The busy guard ensures no round is in flight during a PATCH.
+`RunConfig` (in `src/core/types.ts`) holds: roster, budget, judge, reflect, selection, concurrency, pricing, sandbox, container caps, and the run's connectors (ids and write opt-ins only; fixed at creation). `PATCH /api/runs/:id/config` merges a partial into the config and calls `engine.reconfigure()` between rounds — the next round reads the new config fresh. The budget tracker is updated in place (keeps accumulated spend). The busy guard ensures no round is in flight during a PATCH.
 
 ## SDD phase history
 
@@ -132,5 +194,8 @@ The codebase was built via subagent-driven development (SDD) in phases:
 - **Phase 4i** — real-mode smoke (skipped — 4g+4h touched zero real-mode code; 4f green smoke stands).
 - **Phase 4j** — new features (export JSON/CSV, run browser, run comparison, rejudge).
 - **Phase 4k** — documentation (this file + operator guide + API reference + AGENTS.md).
+- **Phase 8** — collaboration workflow (shared team workspace, channel, sealed team output, team judging), now the default; see `docs/superpowers/specs/2026-11-15-collaboration-mode-design.md`.
+- **Phase 8** — web search and page fetch for agents, served through the connectors tool bridge.
+- **Phase 8** — subscription runs: Claude Pro/Max through the unmodified Claude Code CLI (in protected mode with the token in the container and a CONNECT egress route), ChatGPT Plus/Pro through OpenCode's login (relayed in protected mode).
 
 Specs live in `docs/superpowers/specs/`, plans in `docs/superpowers/plans/`. The local SDD ledger (`.superpowers/sdd/<phase>/progress.md`) is gitignored.

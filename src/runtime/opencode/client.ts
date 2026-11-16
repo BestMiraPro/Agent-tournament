@@ -263,6 +263,19 @@ export class OpenCodeClient {
     await this.request('POST', `/session/${sessionId}/prompt_async`, { directory, body, timeoutMs: 30_000 })
   }
 
+  /**
+   * The MCP servers configured for a folder and whether each is connected. Reading it starts the
+   * folder's instance if needed, so it returns only after that instance's first connection attempts.
+   */
+  async mcpStatus(directory: string, timeoutMs: number): Promise<Record<string, { status?: unknown }>> {
+    return (await this.request<Record<string, { status?: unknown }> | null>('GET', '/mcp', { directory, timeoutMs })) ?? {}
+  }
+
+  /** Connects one configured MCP server again; resolves once that attempt has finished. */
+  async mcpConnect(name: string, directory: string, timeoutMs: number): Promise<void> {
+    await this.request('POST', `/mcp/${encodeURIComponent(name)}/connect`, { directory, timeoutMs })
+  }
+
   async abort(sessionId: string, directory: string): Promise<void> {
     await this.request('POST', `/session/${sessionId}/abort`, { directory, timeoutMs: 5000 })
   }

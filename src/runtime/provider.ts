@@ -21,6 +21,9 @@ export interface Provider {
    * keep working untouched — callers fall back to `complete` and record null.
    */
   completeRich?(req: CompleteRequest): Promise<{ text: string; reasoning: string | null }>
-  /** The runtime that answers calls, recorded with grading audits: `opencode` or `mock`. */
-  describe?(): string
+  /**
+   * The runtime that answers calls, recorded with grading audits: `opencode`, `claude-code` or `mock`.
+   * A provider that routes by model answers for `modelId` when given.
+   */
+  describe?(modelId?: string): string
 }

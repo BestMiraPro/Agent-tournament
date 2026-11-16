@@ -23,7 +23,7 @@ export const AUDIT_EVIDENCE_EVENT = 'audit.evidence'
 export const AUDIT_LATE_EVENT = 'audit.late'
 export const AUDIT_FROZEN_EVENT = 'audit.frozen'
 
-export type AuditSource = 'runtime' | 'policy' | 'provider_stream' | 'capture'
+export type AuditSource = 'runtime' | 'policy' | 'provider_stream' | 'capture' | 'tool_bridge'
 export type AuditKind = 'tool' | 'file' | 'permission' | 'network' | 'integrity' | 'failure' | 'gap'
 export type AuditOutcome = 'allowed' | 'denied' | 'completed' | 'failed' | 'unknown'
 
@@ -105,7 +105,8 @@ export const AUDIT_SENSORS: Record<string, string> = {
   permission: 'Permission requests and the unattended replies to them.',
   failure: 'Attempt failures recorded by the engine and provider errors reported by the stream.',
   integrity: 'Submission capture: whether it was sealed, verified unchanged, or tampered with.',
-  network: 'Not observed directly: programs started inside a command can use whatever network the sandbox allows.',
+  network: 'Not observed directly: programs started inside a command can use whatever network the sandbox allows. Calls to the web tools (arena_web_search, arena_web_fetch) go through the tool bridge and are recorded there, with the query or page host and path.',
+  connector: 'Connector tool calls as the host tool bridge recorded them: connector, tool, outcome, sizes and timing, attributed by each agent\'s own token. Argument values and results are not kept.',
   filesystem: 'Only the captured workspace manifest; file operations inside commands are not observed one by one.',
 }
 
@@ -114,6 +115,17 @@ const MAX_DETAIL_BYTES = 2048
 
 /** OpenCode 1.18.21's wording when a permission rule refused a tool call (seen September 15). */
 const RULE_REFUSAL = 'The user has specified a rule which prevents you from using this specific tool call'
+
+/**
+ * Claude Code 2.1.325's wordings for the same thing: a deny rule, and a call that would have needed
+ * an approval nobody can give (`--permission-prompts=none`). Seen against a fake upstream on
+ * 2026-11-15 (test/fixtures/claude-code-2.1.325/fake-upstream-tools.jsonl).
+ */
+const CLAUDE_CODE_REFUSALS = ['denied by your permission settings', 'Permission for this tool use was denied']
+
+function isRuleRefusal(output: string): boolean {
+  return output.includes(RULE_REFUSAL) || CLAUDE_CODE_REFUSALS.some((w) => output.includes(w))
+}
 
 type Draft = Pick<AuditEvidence, 'sessionId' | 'observedAt' | 'source' | 'kind' | 'summary' | 'outcome' | 'detail'>
 
@@ -339,6 +351,24 @@ export class AuditCollector {
         })
         return
       }
+      case 'agent.connector': {
+        if (event.call) {
+          const c = event.call
+          const args = c.argKeys.length > 0 ? `; arguments: ${c.argKeys.join(', ')}` : ''
+          this.persist(state, event.agentId, {
+            sessionId: null, observedAt: event.at, source: 'tool_bridge', kind: 'tool',
+            summary: `${event.connectorId}: ${c.tool}`, outcome: c.outcome,
+            detail: `status ${c.status}; ${c.requestBytes} B in, ${c.responseBytes} B out; ${c.durationMs} ms${args}${c.error ? `; ${c.error}` : ''}`,
+          })
+        } else if (event.note) {
+          this.persist(state, event.agentId, {
+            sessionId: null, observedAt: event.at, source: 'tool_bridge', kind: event.note.kind === 'network' ? 'network' : 'tool',
+            summary: `${event.connectorId}: ${event.note.summary}`,
+            ...(event.note.detail !== undefined ? { detail: event.note.detail } : {}),
+          })
+        }
+        return
+      }
       case 'bridge.status': {
         if (event.state !== 'reconnecting') return
         state.streamGaps++
@@ -363,7 +393,7 @@ export class AuditCollector {
     if (item.status === 'completed' || item.status === 'error') {
       state.openTools.delete(key)
       state.settledTools.add(key)
-      const refused = item.status === 'error' && (item.output ?? '').includes(RULE_REFUSAL)
+      const refused = item.status === 'error' && isRuleRefusal(item.output ?? '')
       this.persist(state, agentId, {
         ...draft,
         ...(refused ? { source: 'policy' as const, outcome: 'denied' as const } : { outcome: item.status === 'completed' ? 'completed' as const : 'failed' as const }),

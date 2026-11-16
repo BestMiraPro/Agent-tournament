@@ -301,6 +301,8 @@ export function makeMockEngine(opts: {
 
   const config: RunConfig = {
     ...DEFAULT_CONFIG,
+    // Everything this helper simulates (rivals, sabotage, culls, breeding) is tournament mechanics.
+    workflow: 'tournament',
     populationSize: opts.populationSize,
     sandbox: 'mock',
     // One at a time makes "the victim was already captured" an ordering guarantee

@@ -67,6 +67,23 @@ describe('AuditCollector', () => {
     ])
   })
 
+  test('a web tool call is network evidence from the tool bridge, redacted like everything else', () => {
+    const { audit } = setup()
+    audit.record({
+      type: 'agent.connector', runId: 'run', agentId: 'a', connectorId: 'arena', at: 42,
+      note: { summary: 'web_fetch 169.254.169.254/latest refused: blocked_address', detail: 'outcome=denied status=null token=abc123 error=blocked_address', kind: 'network' },
+    })
+    audit.record({
+      type: 'agent.connector', runId: 'run', agentId: 'a', connectorId: 'arena', at: 43,
+      note: { summary: 'web_search "rust" via LangSearch: 5 results', detail: 'outcome=completed provider=langsearch', kind: 'network' },
+    })
+    const network = audit.freeze('run', 'round-1', ['a']).records.filter((r) => r.kind === 'network')
+    expect(network).toEqual([
+      expect.objectContaining({ id: 'E1', agentId: 'a', source: 'tool_bridge', kind: 'network', observedAt: 42, summary: 'arena: web_fetch 169.254.169.254/latest refused: blocked_address', detail: 'outcome=denied status=null token=[redacted] error=blocked_address' }),
+      expect.objectContaining({ id: 'E2', source: 'tool_bridge', kind: 'network', observedAt: 43, summary: 'arena: web_search "rust" via LangSearch: 5 results' }),
+    ])
+  })
+
   test('failures and stream gaps are evidence; agent text is not', () => {
     const { audit } = setup()
     audit.record({ type: 'agent.activity', runId: 'run', agentId: 'a', kind: 'text', detail: 'hi', item: { id: 'x', sessionId: 's', kind: 'text', summary: 'thinking aloud', observedAt: 1 } })

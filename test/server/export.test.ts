@@ -10,7 +10,7 @@ import { buildCsvRows, buildJsonDump, buildMarkdownReport, csvEscape } from '../
 function seed() {
   const db = openDb(':memory:')
   const repos = makeRepos(db)
-  const run = repos.runs.create({ name: 'export-demo', config: DEFAULT_CONFIG, seedDir: null })
+  const run = repos.runs.create({ name: 'export-demo', config: { ...DEFAULT_CONFIG, workflow: 'tournament' }, seedDir: null })
   const alpha = repos.agents.create({ runId: run.id, label: 'alpha', parentAgentId: null, bornRound: 1 })
   const beta = repos.agents.create({ runId: run.id, label: 'beta', parentAgentId: null, bornRound: 1 })
   const r1 = repos.rounds.create({ runId: run.id, idx: 1, goalMd: 'goal 1' })
@@ -202,7 +202,7 @@ describe('buildMarkdownReport', () => {
   test('a run with no scored round says so instead of naming a winner', () => {
     const db = openDb(':memory:')
     const repos = makeRepos(db)
-    const run = repos.runs.create({ name: 'fresh', initialGoal: 'find it', config: DEFAULT_CONFIG, seedDir: null })
+    const run = repos.runs.create({ name: 'fresh', initialGoal: 'find it', config: { ...DEFAULT_CONFIG, workflow: 'tournament' }, seedDir: null })
     const md = buildMarkdownReport(run.id, repos)!
     expect(md).toContain('- Goal: find it')
     expect(md).toContain('No round has been scored yet.')

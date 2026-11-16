@@ -71,7 +71,21 @@ export interface RosterEntry {
   temperature: number
 }
 
+/** One connector enabled for a run, and the write tools the run opts into (only ever ones the connector permits). */
+export interface RunConnector {
+  id: string
+  writeTools: string[]
+}
+
 export interface RunConfig {
+  /**
+   * `collaboration`: the agents of a round work as one team in one shared workspace, talk
+   * through CHANNEL.md and are judged on the output folder they build together; nobody is
+   * cloned or culled. `tournament`: agents compete individually and the population evolves.
+   * Fixed for the life of a run. Stored configs from before the choice existed decode as
+   * tournament, which is what they ran as.
+   */
+  workflow: 'collaboration' | 'tournament'
   populationSize: number
   concurrency: number
   /**
@@ -102,6 +116,16 @@ export interface RunConfig {
   seedDir: string | null
   /** Read-only reference folder for worker agents and the grader; null when the run has none. */
   contextDir: string | null
+  /**
+   * Connectors whose tools this run's agents get through the host tool bridge, with the write tools the run opts
+   * into. Ids and tool names only: credentials never live in a run's config. Absent on runs from before connectors.
+   */
+  connectors?: RunConnector[]
+  /**
+   * Whether workers get the host's web tools (`arena_web_search`, `arena_web_fetch`), served through the tool bridge
+   * in local and docker runs; absent means off — configs from before the toggle ran without them.
+   */
+  webAccess?: boolean
   roster: RosterEntry[]
   judge: {
     modelId: string
@@ -139,7 +163,20 @@ export interface RunConfig {
   pricing: Record<string, ModelPrice>
 }
 
+/**
+ * Default size of a collaboration team, from the same measurements as the container sizing
+ * below. A team shares ONE container, charged one agent's ceiling (`containerMemory`, 1g) per
+ * member plus one 64m gateway. The reference host has ~5.2 GiB of free Docker memory and the
+ * capacity preflight commits at most 80% of it, ~4.16 GiB: four members (4 GiB + 64 MiB) fit,
+ * five (5 GiB + 64 MiB) are refused. The charge is conservative: the measured per-container
+ * peaks (~413 MiB on short work, ~725-762 MiB over 100-turn conversations) each include their
+ * own ~250 MiB OpenCode server, and a team container runs one server for everybody. The
+ * tournament's population default (20) cannot fit in one container on that host at all.
+ */
+export const DEFAULT_TEAM_SIZE = 4
+
 export const DEFAULT_CONFIG: RunConfig = {
+  workflow: 'collaboration',
   populationSize: 20,
   concurrency: 8,
   agentTimeoutMs: Infinity,

@@ -1,4 +1,7 @@
+import { homedir } from 'node:os'
+import type { IncomingMessage } from 'node:http'
 import { WebSocketServer } from 'ws'
+import { allowedHostsFor, isLocalRequest } from './local-origin.js'
 import type { FastifyInstance } from 'fastify'
 import { DEFAULT_CONFIG, type RunConfig } from '../core/types.js'
 import { openDb } from '../db/open.js'
@@ -18,6 +21,7 @@ import { sweepOrphanRuntimeDirs } from '../runtime/runtime-dirs.js'
 import { buildApi } from './api.js'
 import { ActivityCache } from './activity.js'
 import { AuditCollector } from '../engine/audit.js'
+import { MOCK_CHANNEL_LIMITS } from '../engine/channel.js'
 import { bridgeSeams, composeRun, defaultSeams, type ComposedRun, type RunIdHolder } from './compose-run.js'
 import type { DockerReach } from '../runtime/docker/container.js'
 import type { RunSpec } from './run-spec.js'
@@ -25,9 +29,14 @@ import { RunManager } from './run-manager.js'
 import { disposeRunRecord, RunRegistry } from './runs.js'
 import { EventBroadcaster } from './ws.js'
 import { serveUi } from './static-ui.js'
+import { ConnectorStore } from '../connectors/store.js'
+import { connectorResolver } from '../connectors/resolve.js'
+import { subscriptionServices } from './subscriptions.js'
 
 export interface DashboardOptions {
   dbPath?: string
+  /** The address the server binds; requests must name it or a loopback host (see local-origin.ts). */
+  host?: string
   /** Size of the default mock run used before a spec-driven run is created. */
   population?: number
   workspaceRoot?: string | null
@@ -46,6 +55,13 @@ export interface DashboardOptions {
   dockerSandbox?: boolean
   /** How docker runs reach their containers; `bridge` when this app itself runs in a container. */
   dockerReach?: DockerReach
+  /**
+   * The connector store's folder (connectors and their credentials, owner-only). Unset: no stored connectors, and
+   * only built-in ones can be enabled.
+   */
+  connectorsDir?: string | null
+  /** Where the `claude setup-token` value is kept (0600); `runs/secrets/claude-subscription.json` by default. */
+  claudeTokenFile?: string
 }
 
 /** Why a docker run is refused when `dockerSandbox` is false. */
@@ -59,6 +75,8 @@ export interface Dashboard {
   manager: RunManager
   registry: RunRegistry
   broadcaster: EventBroadcaster
+  /** Stored connectors and their credentials; null when the dashboard was started without a store. */
+  connectorStore: ConnectorStore | null
   /** Rounds recovered from an interrupted previous process. */
   recovered: number
   /** Attaches the websocket server to the HTTP server. Call before `listen`. */
@@ -116,6 +134,7 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     seedStrategy: defaultSeedStrategy,
     onEvent: emit,
     audit: new AuditCollector(repos, { provenance: { sandbox: 'mock', isolation: null, toolchainId: null } }),
+    channel: MOCK_CHANNEL_LIMITS,
   })
 
   const manager = new RunManager(engine, emit)
@@ -124,7 +143,12 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
   // Real-mode composition for spec POSTs. Per-spec values win; anything omitted
   // falls back to the process-level defaults, and the seams are the same ones the
   // CLI uses so local/docker compose identically.
-  const seams = opts.dockerReach === 'bridge' ? bridgeSeams(defaultSeams) : defaultSeams
+  const connectorStore = opts.connectorsDir ? new ConnectorStore(opts.connectorsDir) : null
+  const resolver = connectorResolver(connectorStore)
+  // One set of subscription services for the API and every run, so a token pasted in the
+  // dashboard is what the next run uses.
+  const subscriptions = subscriptionServices({ ...(opts.claudeTokenFile ? { tokenFile: opts.claudeTokenFile } : {}) })
+  const seams = { ...(opts.dockerReach === 'bridge' ? bridgeSeams(defaultSeams) : defaultSeams), connectors: () => resolver, subscriptions }
   const composeWith = (spec: RunSpec, o?: { runIdHolder?: RunIdHolder }): Promise<ComposedRun> =>
     opts.dockerSandbox === false && spec.sandbox === 'docker'
       ? Promise.reject(new Error(DOCKER_SANDBOX_OFF))
@@ -139,7 +163,9 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
         o ?? {},
       )
 
+  const allowedHosts = allowedHostsFor(opts.host)
   const app = buildApi({
+    allowedHosts,
     repos,
     manager,
     createRun: (name, goal, criteria) => engine.createRun(name, goal, criteria ?? null).id,
@@ -171,6 +197,8 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     activityFor: (runId) => defaultActivity.get(runId)?.snapshot() ?? null,
     hasLiveBudget: (runId) => engine.budgetStatus(runId) !== null,
     capacity: async () => ({ host: await readHostCapacity(), reserved: processLedger.totals() }),
+    connectors: { store: connectorStore, home: homedir(), cwd: process.cwd() },
+    subscriptions,
     sweepWith: (cfg, runId, onWarning, workspaceRoot) => {
       // Every registered docker run owns live containers; excluding only the new run
       // would let its sweep destroy a concurrent run mid-tournament.
@@ -206,9 +234,14 @@ export function createDashboard(opts: DashboardOptions = {}): Dashboard {
     manager,
     registry,
     broadcaster,
+    connectorStore,
     recovered,
     attachWebSocket() {
-      wss ??= new WebSocketServer({ server: app.server, path: '/ws' })
+      wss ??= new WebSocketServer({
+        server: app.server,
+        path: '/ws',
+        verifyClient: (info: { origin: string; req: IncomingMessage }) => isLocalRequest({ host: info.req.headers.host, origin: info.origin }, allowedHosts),
+      })
       broadcaster.attach(wss)
       return wss
     },

@@ -1,11 +1,13 @@
 import { writeFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
-import { DEFAULT_CONFIG, type RosterEntry, type RunConfig } from './core/types.js'
+import { DEFAULT_CONFIG, DEFAULT_TEAM_SIZE, type RosterEntry, type RunConfig } from './core/types.js'
 import { openDb } from './db/open.js'
 import { makeRepos } from './db/repos.js'
 import { recoverIncompleteRounds } from './db/recover.js'
 import { AuditCollector } from './engine/audit.js'
+import { MOCK_CHANNEL_LIMITS } from './engine/channel.js'
+import type { SealedArtifactWriter } from './engine/collaboration.js'
 import { TournamentEngine } from './engine/driver.js'
 import { loadSeedStrategies, seedStrategyFrom } from './engine/seed-strategy.js'
 import { Reflector } from './evolution/reflect.js'
@@ -14,8 +16,10 @@ import { MockAgentRunner, type AgentRunner } from './runtime/agent-runner.js'
 import { GOOD_KEYWORDS, MockProvider } from './runtime/mock-provider.js'
 import { MockSandbox } from './runtime/mock-sandbox.js'
 import {
+  memoryLabel,
   planCapacity,
   readHostCapacity,
+  teamContainerLimits,
   type CapacityLedger,
   type HostCapacity,
 } from './runtime/docker/capacity.js'
@@ -29,6 +33,10 @@ import { validateModel, summarizeValidation, type ModelRole } from './runtime/op
 import { OpenCodeClient } from './runtime/opencode/client.js'
 import { type ServerHandle } from './runtime/opencode/server.js'
 import { composeRun } from './server/compose-run.js'
+import type { RunSpec } from './server/run-spec.js'
+import type { EventSink } from './engine/events.js'
+import type { ConnectorEvent } from './connectors/bridge.js'
+import { isClaudeSubscriptionModel } from './runtime/claude-code/model-id.js'
 import { buildMarkdownReport } from './server/export.js'
 
 export interface CliOptions {
@@ -43,6 +51,8 @@ export interface CliOptions {
   /** Write the run's markdown report here once the last round ends. */
   reportPath?: string
   mode?: 'mock' | 'real'
+  /** Collaboration (one team, one shared workspace) or tournament (evolving population). App default when absent. */
+  workflow?: RunConfig['workflow']
   /**
    * Which sandbox real mode runs agents in. `'local'` (the default) runs them as host
    * processes against one shared opencode server; `'docker'` runs them inside
@@ -68,6 +78,11 @@ export interface CliOptions {
    * (e.g. when the caller has already validated the roster out of band).
    */
   validateModels?: boolean
+  /**
+   * Real local runs: give agents the host's audited web tools (`web_search`, `web_fetch`), as the
+   * dashboard does. Defaults to true; `--no-web-access` turns it off. Docker runs ignore it.
+   */
+  webAccess?: boolean
 }
 
 export interface ValidateRosterOptions {
@@ -121,6 +136,8 @@ export async function validateRosterModels(
   const seen = new Set<string>()
   const probes: { modelId: string; role: ModelRole }[] = []
   const addProbe = (modelId: string, role: ModelRole) => {
+    // Claude subscription models run through Claude Code, not OpenCode; composition checks them.
+    if (isClaudeSubscriptionModel(modelId)) return
     const key = `${modelId} ${role}`
     if (seen.has(key)) return
     seen.add(key)
@@ -232,6 +249,23 @@ export function resolveSandboxMode(
 }
 
 /**
+ * Validates `--workflow`. Like `--sandbox`, it arrives as an unvalidated string, and a typo
+ * must fail rather than quietly run the other workflow.
+ */
+export function resolveWorkflow(value: string | undefined): RunConfig['workflow'] {
+  const requested = value ?? DEFAULT_CONFIG.workflow
+  if (requested !== 'collaboration' && requested !== 'tournament') {
+    throw new Error(`unknown workflow "${requested}" — expected "collaboration" or "tournament"`)
+  }
+  return requested
+}
+
+/** `--population` when it is not given: a team that fits one container, or the tournament default. */
+export function defaultPopulation(workflow: RunConfig['workflow']): number {
+  return workflow === 'collaboration' ? DEFAULT_TEAM_SIZE : DEFAULT_CONFIG.populationSize
+}
+
+/**
  * Builds the per-agent client lookup the OpenCode runner uses.
  *
  * Under Docker each shard has its own opencode server on its own published port, so the
@@ -331,32 +365,56 @@ export async function assertHostCapacity(
     return
   }
 
+  // A collaboration team is ONE container sized for every member (teamContainerLimits).
+  const team = config.workflow === 'collaboration'
+  const members = Math.max(1, config.populationSize)
+  const perAgent = { memory: config.containerMemory, cpus: config.containerCpus }
+  const perContainer = team
+    ? teamContainerLimits(perAgent, members)
+    : { memory: config.containerMemory, memoryBytes: parseMemoryLimit(config.containerMemory), cpus: config.containerCpus }
   // Check the containers this run will ACTUALLY start, not the configured ceiling.
   // `planShards` clamps shard count to the population, so a 2-agent run never starts
   // more than 2 containers however high `maxContainers` is. Validating the ceiling
   // instead refuses runs that would have fit comfortably.
-  const containers = Math.max(1, Math.min(config.maxContainers, config.populationSize))
+  const containers = team ? 1 : Math.max(1, Math.min(config.maxContainers, config.populationSize))
+  const extraMemory = opts.extraMemoryBytes ?? 0
+  const extraCpus = opts.extraCpus ?? 0
 
   const verdict = opts.ledger && opts.reservationId
     ? opts.ledger.admit(
         opts.reservationId,
         {
           containers,
-          memoryBytes: parseMemoryLimit(config.containerMemory) + (opts.extraMemoryBytes ?? 0),
-          cpus: config.containerCpus + (opts.extraCpus ?? 0),
+          memoryBytes: perContainer.memoryBytes + extraMemory,
+          cpus: perContainer.cpus + extraCpus,
         },
         host,
       )
     : planCapacity(
         {
           containers,
-          memory: config.containerMemory,
-          cpus: config.containerCpus,
+          memory: memoryLabel(perContainer.memoryBytes + extraMemory),
+          cpus: perContainer.cpus + extraCpus,
         },
         host,
       )
   if (!verdict.ok) {
-    throw new Error(`docker sandbox: ${verdict.reason}`)
+    if (!team) throw new Error(`docker sandbox: ${verdict.reason}`)
+    // Fewer containers is no remedy for a team; fewer members is.
+    const reserved = opts.ledger && opts.reservationId ? opts.ledger.reservedFor(opts.reservationId, host) : undefined
+    let fit = 0
+    for (let n = members - 1; n >= 1 && fit === 0; n--) {
+      const smaller = teamContainerLimits(perAgent, n)
+      const plan = { containers: 1, memory: memoryLabel(smaller.memoryBytes + extraMemory), cpus: smaller.cpus + extraCpus }
+      if (planCapacity(plan, host, reserved).ok) fit = n
+    }
+    throw new Error(
+      `docker sandbox: Collaboration runs all ${members} agents in one container sized ${members} x ${config.containerMemory} = ${perContainer.memory}` +
+        `${extraMemory > 0 ? ' plus its gateway' : ''}. ${verdict.reason} ` +
+        (fit > 0
+          ? `A team of at most ${fit} agents fits: remove agents, or lower the memory per agent.`
+          : 'Not even a team of one fits: lower the memory per agent, or free Docker memory.'),
+    )
   }
 }
 
@@ -398,6 +456,12 @@ interface RealDeps {
   planFor: ((agentIds: readonly string[]) => Promise<void>) | null
   /** Non-null under Docker only: recycles workers between rounds (see compose-run). */
   releasePopulation: (() => Promise<void>) | null
+  /** Where the grader opens a collaboration round's sealed output. */
+  sealedArtifacts: SealedArtifactWriter | null
+  /** Stops the run's runtime: for a local run its tool grant first, then the server. */
+  stop: () => Promise<void>
+  /** The run's tool bridge events (connectors and web tools), for the audit; null without a bridge. */
+  onConnectorEvent: ((sink: (event: ConnectorEvent) => void) => () => void) | null
 }
 
 /**
@@ -407,6 +471,56 @@ interface RealDeps {
  */
 interface RunIdHolder {
   value: string
+}
+
+/**
+ * The run-spec the CLI composes with.
+ * Built literally from the caller's config, not via parseRunSpec: parseRunSpec
+ * REFUSES docker-without-authFile, but the CLI contract is warn-and-continue
+ * (test/cli.test.ts: 'the CLI refuses to start a docker run that would
+ * overcommit the host' runs docker with no authFile and expects the capacity
+ * refusal, not an auth refusal). Every field below is copied from config/opts,
+ * so the composed config cannot drift from the caller's.
+ */
+export function cliRunSpec(opts: CliOptions, config: RunConfig): RunSpec {
+  return {
+    name: 'cli',
+    goal: opts.goal,
+    sandbox: resolveSandboxMode('real', opts.sandbox),
+    workflow: config.workflow,
+    roster: config.roster,
+    population: config.populationSize,
+    judge: { modelId: config.judge.modelId, mode: config.judge.mode },
+    reflect: { modelId: config.reflect.modelId, topK: config.reflect.topK },
+    selection: {
+      eliteCount: config.selection.eliteCount,
+      topPct: config.selection.topPct,
+      bottomPct: config.selection.bottomPct,
+      crossoverPct: config.selection.crossoverPct,
+    },
+    concurrency: config.concurrency,
+    maxContainers: config.maxContainers,
+    containerMemory: config.containerMemory,
+    containerCpus: config.containerCpus,
+    // The CLI keeps the placement it always had unless its config says otherwise; a
+    // collaboration team's one container is always protected.
+    isolation: config.workflow === 'collaboration' ? 'protected' : config.isolation ?? 'shared',
+    pricing: { ...config.pricing },
+    budget: {
+      maxRunTokens: config.budget.maxRunTokens,
+      maxRoundTokens: config.budget.maxRoundTokens,
+      maxAgentTokens: config.budget.maxAgentTokens,
+    },
+    seedDir: config.seedDir,
+    contextDir: null,
+    seedStrategiesDir: null,
+    workspaceRoot: opts.workspaceRoot ?? null,
+    authFile: opts.authFile ?? null,
+    serverUrl: opts.serverUrl ?? null,
+    criteria: opts.criteria,
+    // Local runs get the host's web tools unless the CLI was told not to (--no-web-access).
+    webAccess: config.webAccess === true,
+  }
 }
 
 async function buildRealDeps(
@@ -444,46 +558,7 @@ async function buildRealDeps(
     )
   }
   const composed = await composeRun(
-    // Built literally from the caller's config, not via parseRunSpec: parseRunSpec
-    // REFUSES docker-without-authFile, but the CLI contract is warn-and-continue
-    // (test/cli.test.ts: 'the CLI refuses to start a docker run that would
-    // overcommit the host' runs docker with no authFile and expects the capacity
-    // refusal, not an auth refusal). Every field below is copied from config/opts,
-    // so the composed config cannot drift from the caller's.
-    {
-      name: 'cli',
-      goal: opts.goal,
-      sandbox: resolveSandboxMode('real', opts.sandbox),
-      roster: config.roster,
-      population: config.populationSize,
-      judge: { modelId: config.judge.modelId, mode: config.judge.mode },
-      reflect: { modelId: config.reflect.modelId, topK: config.reflect.topK },
-      selection: {
-        eliteCount: config.selection.eliteCount,
-        topPct: config.selection.topPct,
-        bottomPct: config.selection.bottomPct,
-        crossoverPct: config.selection.crossoverPct,
-      },
-      concurrency: config.concurrency,
-      maxContainers: config.maxContainers,
-      containerMemory: config.containerMemory,
-      containerCpus: config.containerCpus,
-      // The CLI keeps the placement it always had unless its config says otherwise.
-      isolation: config.isolation ?? 'shared',
-      pricing: { ...config.pricing },
-      budget: {
-        maxRunTokens: config.budget.maxRunTokens,
-        maxRoundTokens: config.budget.maxRoundTokens,
-        maxAgentTokens: config.budget.maxAgentTokens,
-      },
-      seedDir: config.seedDir,
-      contextDir: null,
-      seedStrategiesDir: null,
-      workspaceRoot: opts.workspaceRoot,
-      authFile: opts.authFile ?? null,
-      serverUrl: opts.serverUrl ?? null,
-      criteria: opts.criteria,
-    },
+    cliRunSpec(opts, config),
     {
       readCapacity: hooks.readCapacity,
       sweepFn: async () => [],
@@ -501,6 +576,10 @@ async function buildRealDeps(
     runner: composed.runner,
     planFor: composed.planFor,
     releasePopulation: composed.releasePopulation ?? null,
+    sealedArtifacts: composed.sealedArtifacts ?? null,
+    // A local composition's cleanup is exactly its tool grant's revocation and the server's stop.
+    stop: config.sandbox === 'local' ? composed.cleanup : composed.serverHandle.stop,
+    onConnectorEvent: composed.onConnectorEvent ?? null,
   }
 }
 
@@ -529,6 +608,8 @@ export async function runTournamentCli(
     let runner: AgentRunner
     let planFor: ((agentIds: readonly string[]) => Promise<void>) | null = null
     let releasePopulation: (() => Promise<void>) | null = null
+    let sealedArtifacts: SealedArtifactWriter | null = null
+    let onConnectorEvent: RealDeps['onConnectorEvent'] = null
     const runIdHolder: RunIdHolder = { value: '' }
     // Read first: a wrong folder should cost no setup.
     const seedStrategies = opts.seedStrategiesDir ? await loadSeedStrategies(opts.seedStrategiesDir) : []
@@ -538,11 +619,13 @@ export async function runTournamentCli(
         opts.workerModels && opts.workerModels.length > 0 ? opts.workerModels : [DEFAULT_REAL_WORKER_MODEL]
       config = {
         ...DEFAULT_CONFIG,
+        workflow: resolveWorkflow(opts.workflow),
         populationSize: opts.population,
         sandbox: resolveSandboxMode('real', opts.sandbox),
         roster: buildRoster(workerModels, opts.population, 0.7),
         judge: { ...DEFAULT_CONFIG.judge, modelId: opts.judgeModel ?? DEFAULT_REAL_JUDGE_MODEL },
         reflect: { ...DEFAULT_CONFIG.reflect, modelId: opts.reflectModel ?? DEFAULT_REAL_REFLECT_MODEL },
+        webAccess: opts.webAccess !== false,
       }
 
       const built = await buildRealDeps(opts, config, runIdHolder, hooks)
@@ -551,7 +634,9 @@ export async function runTournamentCli(
       runner = built.runner
       planFor = built.planFor
       releasePopulation = built.releasePopulation
-      stopServer = built.server.stop
+      sealedArtifacts = built.sealedArtifacts
+      onConnectorEvent = built.onConnectorEvent
+      stopServer = built.stop
 
       // Pre-flight: fail fast and legibly before any agent runs or money is spent,
       // rather than mid-round with an opaque provider error. Mock mode never reaches
@@ -565,6 +650,7 @@ export async function runTournamentCli(
     } else {
       config = {
         ...DEFAULT_CONFIG,
+        workflow: resolveWorkflow(opts.workflow),
         populationSize: opts.population,
         sandbox: 'mock',
         roster: [{ modelId: 'mock/model', count: opts.population, temperature: 0.7 }],
@@ -592,6 +678,9 @@ export async function runTournamentCli(
       seedStrategy: seedStrategyFrom(seedStrategies),
       preparePopulation: planFor ?? undefined,
       releasePopulation: releasePopulation ?? undefined,
+      // A mock team finishes in milliseconds; a real one is read every couple of seconds.
+      channel: mode === 'real' ? undefined : MOCK_CHANNEL_LIMITS,
+      sealedArtifacts: sealedArtifacts ?? undefined,
       audit: new AuditCollector(repos, {
         provenance: {
           sandbox: config.sandbox,
@@ -603,6 +692,8 @@ export async function runTournamentCli(
 
     const run = engine.createRun('cli', opts.goal)
     runIdHolder.value = run.id
+    // Tool bridge calls (web tools, connectors) join the run's audit as they do in the dashboard.
+    onConnectorEvent?.((e) => engine.observe(e))
     disposeSandbox = () => engine.dispose(run.id)
 
     // Deliberately after createRun rather than at process start: the sweep's second safety
@@ -698,7 +789,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     options: {
       goal: { type: 'string', default: 'Produce the best possible answer.' },
       rounds: { type: 'string', default: '5' },
-      population: { type: 'string', default: '20' },
+      // No default here: it depends on the workflow (defaultPopulation).
+      population: { type: 'string' },
+      workflow: { type: 'string' },
       seed: { type: 'string', default: '42' },
       db: { type: 'string', default: ':memory:' },
       mode: { type: 'string', default: 'mock' },
@@ -710,15 +803,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       'reflect-model': { type: 'string' },
       'worker-models': { type: 'string' },
       'no-validate-models': { type: 'boolean', default: false },
+      'no-web-access': { type: 'boolean', default: false },
       'seed-strategies': { type: 'string' },
       report: { type: 'string' },
     },
   })
 
+  const workflow = resolveWorkflow(values.workflow)
   const out = await runTournamentCli({
     goal: values.goal!,
     rounds: Number(values.rounds),
-    population: Number(values.population),
+    population: values.population === undefined ? defaultPopulation(workflow) : Number(values.population),
+    workflow,
     seed: Number(values.seed),
     dbPath: values.db!,
     criteria: null,
@@ -735,6 +831,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       ? values['worker-models'].split(',').map((s) => s.trim()).filter((s) => s.length > 0)
       : undefined,
     validateModels: values['no-validate-models'] ? false : undefined,
+    webAccess: values['no-web-access'] ? false : undefined,
     seedStrategiesDir: values['seed-strategies'],
     reportPath: values.report,
   })

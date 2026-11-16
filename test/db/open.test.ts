@@ -99,6 +99,29 @@ describe('openDb', () => {
     }
   })
 
+  test('adds the collaboration tables to a database from before collaboration, and its runs read as tournaments', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-tournament-migrate-collab-test-'))
+    const dbPath = join(dir, 'old.sqlite')
+    try {
+      const old = new DatabaseSync(dbPath)
+      old.exec(`CREATE TABLE runs (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
+        status TEXT NOT NULL, config_json TEXT NOT NULL, seed_dir TEXT
+      )`)
+      old.prepare('INSERT INTO runs VALUES (?,?,?,?,?,?)')
+        .run('old-run', 'old run', Date.now(), 'active', JSON.stringify({ populationSize: 2 }), null)
+      old.close()
+
+      const migrated = openDb(dbPath)
+      const tables = (migrated.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((t) => t.name)
+      for (const t of ['channel_messages', 'round_outputs', 'round_output_files', 'team_scores']) expect(tables).toContain(t)
+      expect(makeRepos(migrated).runs.get('old-run')!.config.workflow).toBe('tournament')
+      migrated.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
   test('migrates a runs table that predates initial criteria, without inventing any', async () => {
     // The immediately previous schema: it already has initial_goal, not initial_criteria.
     // A historical run never recorded its creation criteria, so the only honest value is

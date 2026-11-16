@@ -17,6 +17,21 @@ export interface ProvisionOpts {
   seedDir?: string
 }
 
+/** A collaboration team's one workspace, as each member reaches it. */
+export interface TeamWorkspace {
+  /** One handle per agent; every one points at the shared workspace. */
+  handles: Map<string, AgentHandle>
+  /** True when this call created (and seeded) the workspace; false when it already existed. */
+  created: boolean
+}
+
+/** Team ids name a directory, so they must be plain names. */
+export function assertTeamId(teamId: string): void {
+  if (!/^[A-Za-z0-9._-]+$/.test(teamId) || teamId.startsWith('.')) {
+    throw new Error(`unsafe team id for a workspace directory: ${teamId}`)
+  }
+}
+
 export interface Sandbox {
   provision(agentId: string, opts: ProvisionOpts): Promise<AgentHandle>
   reset(handle: AgentHandle, opts: ProvisionOpts): Promise<void>
@@ -29,4 +44,9 @@ export interface Sandbox {
    */
   endpoint(handle: AgentHandle): { baseUrl: string }
   teardown(handle: AgentHandle): Promise<void>
+  /**
+   * Collaboration: the team's one shared workspace, created and seeded on first use and kept
+   * across rounds. Optional; a sandbox without it cannot run a collaboration round.
+   */
+  provisionTeam?(teamId: string, agentIds: readonly string[], opts: ProvisionOpts): Promise<TeamWorkspace>
 }

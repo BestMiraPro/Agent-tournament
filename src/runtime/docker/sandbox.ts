@@ -1,7 +1,7 @@
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import type { FileEntry } from '../../core/types.js'
-import type { AgentHandle, ProvisionOpts, Sandbox } from '../sandbox.js'
+import { assertTeamId, type AgentHandle, type ProvisionOpts, type Sandbox, type TeamWorkspace } from '../sandbox.js'
 import { resolveInWorkspace, seedWorkspace } from '../workspace-path.js'
 import { describeShards, planShards, shardIndexOf, type Placement, type Shard } from './shard.js'
 
@@ -26,7 +26,13 @@ export interface DockerSandboxOptions {
   authFile: string | null
   /** `protected` refuses any round that would put two agents in one container. Default shared. */
   isolation?: 'protected' | 'shared'
-  startContainer: (shardIndex: number, hostDir: string) => Promise<StartedContainer>
+  /**
+   * Collaboration: the whole team on ONE container whatever `maxContainers` says, with the
+   * team's workspace (`<root>/team-<teamId>`) as its `/work`. Set from the run's workflow.
+   */
+  team?: boolean
+  /** `members`: how many agents the container will hold, so its limits can scale with them. */
+  startContainer: (shardIndex: number, hostDir: string, members: number) => Promise<StartedContainer>
   stopContainer: (name: string) => Promise<void>
   /**
    * Confirms an original instance is gone, by container ID (or name when the
@@ -77,12 +83,19 @@ export class DockerSandbox implements Sandbox {
   /** The in-flight per-round cleanup, joined by repeated or concurrent calls. */
   private releaseInFlight: Promise<void> | null = null
   private disposed = false
+  /** The team workspace on the host, once `provisionTeam` has named it. */
+  private teamDir: string | null = null
 
   constructor(private opts: DockerSandboxOptions) {}
 
   /** Must be called once with the full population before provisioning. */
   async planFor(agentIds: readonly string[]): Promise<void> {
     if (this.disposed) throw new Error('docker sandbox has been disposed')
+    // A team shares one container by design; the capacity preflight sized it for all of them.
+    if (this.opts.team) {
+      this.shards = agentIds.length > 0 ? [{ shardIndex: 0, agentIds: [...agentIds] }] : []
+      return
+    }
     // Checked every round, not only at setup: manual additions and an evolved population can
     // outgrow the containers a run was admitted with.
     if (this.opts.isolation === 'protected' && agentIds.length > this.opts.maxContainers) {
@@ -153,10 +166,18 @@ export class DockerSandbox implements Sandbox {
   }
 
   private shardHostDir(shardIndex: number): string {
+    if (this.opts.team) {
+      if (this.teamDir === null) throw new Error('team workspace has not been provisioned')
+      return this.teamDir
+    }
     return join(this.opts.root, `shard-${shardIndex}`)
   }
 
   private hostDirFor(agentId: string): string {
+    if (this.opts.team) {
+      this.shardFor(agentId)
+      return this.shardHostDir(0)
+    }
     return join(this.shardHostDir(this.shardFor(agentId)), agentId)
   }
 
@@ -182,6 +203,7 @@ export class DockerSandbox implements Sandbox {
       const container = await this.opts.startContainer(
         shardIndex,
         this.shardHostDir(shardIndex),
+        this.shards.find((s) => s.shardIndex === shardIndex)?.agentIds.length ?? 1,
       )
       this.containers.set(shardIndex, container)
       this.owned.set(ownershipKey(container), container)
@@ -219,6 +241,37 @@ export class DockerSandbox implements Sandbox {
       baseUrl: container.baseUrl,
       runtimeId: container.containerId,
     }
+  }
+
+  /**
+   * The team's workspace, created and seeded on first use and kept across rounds (a released
+   * round removes containers, never workspaces), and the one container serving it. Every
+   * member's handle names the CONTAINER path `/work`.
+   */
+  async provisionTeam(teamId: string, agentIds: readonly string[], opts: ProvisionOpts): Promise<TeamWorkspace> {
+    if (this.disposed) throw new Error('docker sandbox has been disposed')
+    if (!this.opts.team) throw new Error('this docker sandbox was not composed for a collaboration team')
+    assertTeamId(teamId)
+    for (const agentId of agentIds) this.shardFor(agentId)
+    const dir = join(this.opts.root, `team-${teamId}`)
+    let created = false
+    try {
+      await lstat(dir)
+      await resolveInWorkspace(dir, '', this.opts.root)
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+      created = true
+      await seedWorkspace(dir, opts.seedDir, this.opts.root)
+    }
+    this.teamDir = dir
+    const container = await this.startShard(0)
+    if (this.disposed) throw new Error('docker sandbox has been disposed')
+    const handles = new Map<string, AgentHandle>()
+    for (const agentId of agentIds) {
+      this.live.add(agentId)
+      handles.set(agentId, { agentId, workspacePath: '/work', baseUrl: container.baseUrl, runtimeId: container.containerId })
+    }
+    return { handles, created }
   }
 
   async reset(handle: AgentHandle, opts: ProvisionOpts): Promise<void> {

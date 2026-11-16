@@ -67,6 +67,7 @@ export function RunSummary({ snapshot, busy, roundStats }: {
     <section className="summary__strip" aria-label="Run summary" role="status" aria-live="polite">
       <span className="summary__name">{snapshot.name}</span>
       <span className="badge" title="sandbox">{snapshot.sandbox}</span>
+      {snapshot.workflow && <span className="badge" title="workflow">{snapshot.workflow}</span>}
       <span className={`badge${busy ? ' badge--live' : ''}`}>{busy ? 'running' : 'idle'}</span>
       <span className="stat"><em>rounds</em>{roundStats.length}</span>
       <span className="stat">

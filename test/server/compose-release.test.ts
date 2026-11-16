@@ -12,6 +12,7 @@ import { Reflector } from '../../src/evolution/reflect.js'
 import { MockProvider } from '../../src/runtime/mock-provider.js'
 import { CapacityLedger } from '../../src/runtime/docker/capacity.js'
 import { RelayPolicy } from '../../src/runtime/provider-relay.js'
+import { ToolBridge } from '../../src/connectors/bridge.js'
 import { composeRun, type ShardServerEvent } from '../../src/server/compose-run.js'
 import { parseRunSpec } from '../../src/server/run-spec.js'
 
@@ -21,7 +22,7 @@ const inventoryFixture = {
   schemaVersion: 1 as const,
   toolchainId: TOOLCHAIN,
   python: { version: '3.11.2', venv: '/opt/arena/venv', executable: '/opt/arena/venv/bin/python' },
-  tools: ['python3', 'node', 'git', 'opencode', 'rg'].map((name) => ({ name, version: '1.0', executable: `/usr/bin/${name}` })),
+  tools: ['python3', 'node', 'git', 'opencode', 'rg', 'claude'].map((name) => ({ name, version: '1.0', executable: `/usr/bin/${name}` })),
   pythonPackages: [{ name: 'numpy', version: '2.3.3' }],
 }
 const catalogJson = JSON.stringify({
@@ -113,6 +114,7 @@ const seamsFor = (daemon: ReturnType<typeof fakeDaemon>, over: Record<string, un
     hostModelsFile: vi.fn(() => '/host/models.json'),
     readTextFile: vi.fn(async (path: string) => (path.endsWith('models.json') ? catalogJson : authJson)),
     relay: vi.fn(async () => ({ policy: new RelayPolicy(), port: 45678 })),
+    toolBridge: vi.fn(async () => ({ bridge: new ToolBridge(), port: 45679, host: '127.0.0.1' })),
     createShardNetworkFn: vi.fn(async (runId: string, i: number) => `arena-${runId}-net-${i}`),
     removeShardNetworkFn: vi.fn(async () => true),
     startShardContainerFn: vi.fn(daemon.start),
@@ -134,7 +136,7 @@ const seamsFor = (daemon: ReturnType<typeof fakeDaemon>, over: Record<string, un
 }
 
 const specFor = (root: string, extra: Record<string, unknown> = {}) => parseRunSpec({
-  name: 'd', goal: 'g', sandbox: 'docker', isolation: 'shared',
+  name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', isolation: 'shared',
   roster: [{ modelId: 'mock/model', count: 2, temperature: 0.7 }],
   workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 2, containerMemory: '1g', ...extra,
 })

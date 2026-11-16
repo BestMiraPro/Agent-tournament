@@ -19,7 +19,7 @@ import {
   type ScoringAudit,
 } from './audit.js'
 import { parseWithRepair } from './parse.js'
-import { buildCriteriaPrompt, buildSafetyReviewPrompt, buildScoringPrompt, type GradingContext } from './prompts.js'
+import { buildCriteriaPrompt, buildSafetyReviewPrompt, buildScoringPrompt, buildTeamScoringPrompt, type GradingContext } from './prompts.js'
 import { CRITERIA_JSON_SCHEMA, RANKING_JSON_SCHEMA, SAFETY_BATCH_JSON_SCHEMA } from './schemas.js'
 
 /**
@@ -79,6 +79,30 @@ export interface JudgeOutput {
   mode: JudgeMode
 }
 
+/** A collaboration round's one artifact: the sealed output folder and who built it. */
+export interface TeamJudgeInput {
+  /** The capture's verdict: only `ok` has something to grade. */
+  status: string
+  /** Why there is nothing to grade, when there is not. */
+  reason: string | null
+  readmeMd: string | null
+  files: { path: string; bytes: number; binary: boolean }[]
+  /** Stored text by path, shown inline when no artifact path is given. */
+  texts: { path: string; content: string }[]
+  /** The sealed copy the grader can open with its tools; null to inline the text instead. */
+  artifactPath: string | null
+  members: { agentId: string; evidence?: JudgeEvidence }[]
+}
+
+export interface TeamJudgeOutput {
+  score: number
+  rationaleMd: string
+  metaDigest: string
+  mode: JudgeMode
+  /** Each member's public record: the team's assessment, with its own behavioural review. */
+  audits: Record<string, ScoringAudit>
+}
+
 export type { JudgeCallRecord, JudgeRecorder, JudgeStage } from './audit.js'
 
 /**
@@ -118,7 +142,7 @@ export class Judge {
 
   /** What actually graded: the configured model and the runtime that answered, for the record. */
   evaluator(): { modelId: string; runtime: string } {
-    return { modelId: this.cfg.modelId, runtime: this.provider.describe?.() ?? 'unknown' }
+    return { modelId: this.cfg.modelId, runtime: this.provider.describe?.(this.cfg.modelId) ?? 'unknown' }
   }
 
   async resolveCriteria(
@@ -213,6 +237,95 @@ export class Judge {
     ]
 
     return { scores, metaDigest: result.metaDigest, mode }
+  }
+
+  /**
+   * Grades a collaboration team's sealed output folder as one artifact. Blind ordering and the
+   * shuffle exist to compare submissions and do not apply. Every cited evidence id is held to
+   * what was shown; each member's record keeps the team's criteria and limitations, and the
+   * safety findings that cite that member's own activity.
+   */
+  async scoreTeam(
+    goalMd: string,
+    criteriaMd: string,
+    input: TeamJudgeInput,
+    roundIdx = 0,
+    recorder?: JudgeRecorder,
+  ): Promise<TeamJudgeOutput> {
+    const members = input.members.map((m, i) => ({ ...m, ref: `M${i + 1}` }))
+    if (input.status !== 'ok') {
+      const reason = input.reason ?? 'The team produced nothing to grade.'
+      // Nothing to grade is not nothing to see: the members' behaviour is still reviewed.
+      const reviews = await this.reviewAttempts(
+        goalMd,
+        members.map((m) => ({ agentId: m.agentId, submissionMd: '', files: [], status: input.status, ...(m.evidence ? { evidence: m.evidence } : {}) })),
+        roundIdx,
+        recorder,
+      )
+      return {
+        score: 0,
+        rationaleMd: reason,
+        metaDigest: reason,
+        mode: 'single_call',
+        audits: Object.fromEntries(members.map((m) => [m.agentId, {
+          criteria: [],
+          scoreDerivation: 'not_judged' as const,
+          limitations: [reason],
+          safety: reviews.get(m.agentId)
+            ?? unreviewedSafety(m.evidence, m.evidence?.recorded ? 'The behavioural review returned nothing for this member.' : undefined),
+        }])),
+      }
+    }
+
+    const refs = new Map<string, string>([['TEAM', 'team'], ...members.map((m) => [m.ref, m.agentId] as [string, string])])
+    const prompt = buildTeamScoringPrompt(goalMd, criteriaMd, {
+      readmeMd: input.readmeMd,
+      files: input.files,
+      inline: input.artifactPath ? [] : input.texts,
+      artifactPath: input.artifactPath,
+      members: members.map((m) => ({ ref: m.ref, ...(m.evidence ? { evidence: m.evidence } : {}) })),
+    }, this.cfg.submissionCharCap, this.grading)
+    const parsed = await this.withRetry(() => this.call({
+      purpose: 'judge', stage: 'single', prompt, schema: RANKING_JSON_SCHEMA, parser: RankingSchema, refs,
+    }, recorder))
+    const entry = parsed.rankings.find((r) => r.ref === 'TEAM')
+    if (!entry) {
+      return {
+        score: 0, rationaleMd: NO_RANKING_MD, metaDigest: parsed.meta_digest, mode: 'single_call',
+        audits: Object.fromEntries(members.map((m) => [m.agentId, {
+          criteria: [], scoreDerivation: 'not_judged' as const, limitations: [NO_RANKING_MD], safety: unreviewedSafety(m.evidence, NO_RANKING_MD),
+        }])),
+      }
+    }
+    const allowedFor = new Map(members.map((m) => [m.agentId, allowedRefs(m.ref, m.evidence)]))
+    const allowedAll = new Set(members.flatMap((m) => [...allowedFor.get(m.agentId)!]))
+    const criteria = normalizeCriteria(entry.criteria, allowedAll)
+    const limitations = dedupe([
+      ...entry.limitations,
+      ...(criteria.removed > 0 ? [`${criteria.removed} cited evidence reference(s) were not in the evidence shown and were removed.`] : []),
+    ])
+    const audits: Record<string, ScoringAudit> = {}
+    for (const m of members) {
+      const allowed = allowedFor.get(m.agentId)!
+      // A finding belongs to the member whose activity it cites; the others were reviewed too.
+      const findings = (entry.safety?.findings ?? [])
+        .filter((f) => f.evidence_ids.some((id) => allowed.has(id)))
+        .map((f) => ({ ...f, evidence_ids: f.evidence_ids.filter((id) => allowed.has(id)) }))
+      const safety = entry.safety
+        ? {
+            ...entry.safety,
+            findings,
+            status: findings.length > 0 ? 'flagged' as const : entry.safety.status === 'flagged' ? 'no_issue_observed' as const : entry.safety.status,
+          }
+        : undefined
+      audits[m.agentId] = {
+        criteria: criteria.criteria,
+        scoreDerivation: 'model_awarded',
+        limitations,
+        safety: normalizeSafety(safety, allowed, m.evidence),
+      }
+    }
+    return { score: entry.score, rationaleMd: entry.rationale, metaDigest: parsed.meta_digest, mode: 'single_call', audits }
   }
 
   /** Text plus reasoning trace, preferring the rich path when the runtime exposes one. */

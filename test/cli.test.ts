@@ -1,15 +1,22 @@
 import { describe, expect, test } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { vi } from 'vitest'
 import {
   assertHostCapacity,
+  defaultPopulation,
+  cliRunSpec,
   makeClientResolver,
   resolveSandboxMode,
+  resolveWorkflow,
   runTournamentCli,
   sweepBeforeRun,
   type DockerStartupHooks,
 } from '../src/cli.js'
-import { DEFAULT_CONFIG, type RunConfig } from '../src/core/types.js'
+import { DEFAULT_CONFIG, DEFAULT_TEAM_SIZE, type RunConfig } from '../src/core/types.js'
 import type { HostCapacity } from '../src/runtime/docker/capacity.js'
 import type { SweepOptions } from '../src/runtime/docker/sweep.js'
+import { ToolBridge } from '../src/connectors/bridge.js'
+import { composeRun } from '../src/server/compose-run.js'
 
 const roomyHost: HostCapacity = {
   totalMemoryBytes: 16 * 1024 ** 3,
@@ -31,10 +38,24 @@ describe('runTournamentCli', () => {
       seed: 42,
       dbPath: ':memory:',
       criteria: null,
+      workflow: 'tournament',
     })
     expect(out.rounds).toHaveLength(3)
     expect(out.rounds[0]!.meanScore).toBeGreaterThan(0)
     expect(out.rounds.at(-1)!.meanScore).toBeGreaterThan(out.rounds[0]!.meanScore)
+  })
+
+  test('collaboration is the default: one team, one shared output, one score per round', async () => {
+    const out = await runTournamentCli({
+      goal: 'write a good answer', rounds: 2, population: 3, seed: 1, dbPath: ':memory:', criteria: null,
+    })
+    expect(out.rounds).toHaveLength(2)
+    for (const r of out.rounds) {
+      expect(r.meanScore).toBeGreaterThan(0)
+      // Every member's score is the team's.
+      expect(r.bestScore).toBe(r.meanScore)
+    }
+    expect(out.winner.label).toMatch(/^agent-0[1-3]$/)
   })
 
   test('reports the winning strategy of the final round', async () => {
@@ -50,7 +71,7 @@ describe('CLI mode selection', () => {
   test('mock mode still runs and improves', async () => {
     const out = await runTournamentCli({
       goal: 'write a good answer', rounds: 3, population: 6, seed: 42,
-      dbPath: ':memory:', criteria: null, mode: 'mock',
+      dbPath: ':memory:', criteria: null, mode: 'mock', workflow: 'tournament',
     })
     expect(out.rounds).toHaveLength(3)
     expect(out.rounds.at(-1)!.meanScore).toBeGreaterThan(out.rounds[0]!.meanScore)
@@ -63,6 +84,45 @@ describe('CLI mode selection', () => {
         dbPath: ':memory:', criteria: null, mode: 'real',
       }),
     ).rejects.toThrow(/workspaceRoot/i)
+  })
+})
+
+describe('CLI web access', () => {
+  const cliOpts = { goal: 'g', rounds: 1, population: 1, seed: 1, dbPath: ':memory:', criteria: null, mode: 'real' as const, workspaceRoot: '/tmp/cli-web' }
+  const localConfig = (webAccess: boolean): RunConfig => ({
+    ...DEFAULT_CONFIG, sandbox: 'local', populationSize: 1, roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }], webAccess,
+  })
+
+  test('the spec a local CLI run composes with carries its web access choice', () => {
+    expect(cliRunSpec(cliOpts, localConfig(true)).webAccess).toBe(true)
+    expect(cliRunSpec(cliOpts, localConfig(false)).webAccess).toBe(false)
+  })
+
+  test('a local CLI run reaches the web tools through the tool bridge, and revokes them on cleanup', async () => {
+    const bridge = new ToolBridge()
+    const composed = await composeRun(cliRunSpec(cliOpts, localConfig(true)), {
+      startHostServer: async () => ({ client: {}, stop: async () => {} }) as never,
+      validateModels: async () => {},
+      toolBridge: async () => ({ bridge, port: 1, host: '127.0.0.1' }),
+    })
+    expect(composed.onConnectorEvent).toBeTypeOf('function')
+    const opencode = (composed.runner as unknown as { runnerFor?: (m: string) => unknown }).runnerFor?.('w/m') ?? composed.runner
+    const options = (opencode as { options: { projectConfig: (h: { agentId: string }) => string } }).options
+    const token = (JSON.parse(options.projectConfig({ agentId: 'agent-1' })) as { mcp: { arena: { headers: { Authorization: string } } } })
+      .mcp.arena.headers.Authorization.replace(/^Bearer /, '')
+    expect(bridge.authenticate(token)).not.toBeNull()
+    await composed.cleanup()
+    expect(bridge.authenticate(token)).toBeNull()
+  })
+
+  test('the CLI defaults web access on, offers --no-web-access, feeds the audit and revokes on stop', () => {
+    const src = readFileSync('src/cli.ts', 'utf8')
+    expect(src).toContain('webAccess: opts.webAccess !== false')
+    expect(src).toContain("'no-web-access': { type: 'boolean', default: false }")
+    expect(src).toContain("webAccess: values['no-web-access'] ? false : undefined")
+    expect(src).toMatch(/engine\.createRun\('cli', opts\.goal\)\n\s+runIdHolder\.value = run\.id\n(?:\s*\/\/[^\n]*\n)*\s+onConnectorEvent\?\.\(\(e\) => engine\.observe\(e\)\)/)
+    expect(src).toContain("stop: config.sandbox === 'local' ? composed.cleanup : composed.serverHandle.stop")
+    expect(src).toContain('stopServer = built.stop')
   })
 })
 
@@ -88,6 +148,8 @@ describe('CLI docker mode', () => {
 describe('CLI host-capacity preflight', () => {
   const dockerConfig = (over: Partial<RunConfig> = {}): RunConfig => ({
     ...DEFAULT_CONFIG,
+    // Containers counted one per agent: the tournament's placement. Teams are covered below.
+    workflow: 'tournament',
     sandbox: 'docker',
     maxContainers: 4,
     containerMemory: '1g',
@@ -142,7 +204,7 @@ describe('CLI host-capacity preflight', () => {
 
   test('an unreadable host refuses a protected run instead of assuming it fits', async () => {
     const warnings: string[] = []
-    const protectedConfig = { ...DEFAULT_CONFIG, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
+    const protectedConfig = { ...DEFAULT_CONFIG, workflow: 'tournament' as const, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
     await expect(
       assertHostCapacity(protectedConfig, async () => { throw new Error('docker info unavailable') }, (m) => warnings.push(m)),
     ).rejects.toThrow(/docker sandbox: host capacity could not be read, so a protected run cannot be admitted \(docker info unavailable\)/)
@@ -152,9 +214,30 @@ describe('CLI host-capacity preflight', () => {
   test('with a ledger, an admitted run holds its reservation until released', async () => {
     const { CapacityLedger } = await import('../src/runtime/docker/capacity.js')
     const ledger = new CapacityLedger()
-    const cfg = { ...DEFAULT_CONFIG, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
+    const cfg = { ...DEFAULT_CONFIG, workflow: 'tournament' as const, sandbox: 'docker' as const, isolation: 'protected' as const, populationSize: 2, maxContainers: 2 }
     await assertHostCapacity(cfg, async () => roomy, () => {}, { ledger, reservationId: 'r1' })
     expect(ledger.active()).toEqual([{ id: 'r1', containers: 2, memoryBytes: 1024 ** 3, cpus: 1 }])
+  })
+
+  describe('a collaboration team in one container', () => {
+    const GiB = 1024 ** 3
+    // The reference host: ~5.2 GiB of free Docker memory, 80% of it committable (~4.16 GiB).
+    const reference: HostCapacity = { totalMemoryBytes: 5.2 * GiB, usedMemoryBytes: 0, cpus: 16 }
+    const team = (n: number) => ({ ...dockerConfig(), workflow: 'collaboration' as const, isolation: 'protected' as const, populationSize: n, maxContainers: 1 })
+    const gateway = { extraMemoryBytes: 64 * 1024 ** 2, extraCpus: 0.25 }
+
+    test('is admitted as one container charged one agent ceiling per member plus its gateway', async () => {
+      const { CapacityLedger } = await import('../src/runtime/docker/capacity.js')
+      const ledger = new CapacityLedger()
+      await assertHostCapacity(team(DEFAULT_TEAM_SIZE), async () => reference, () => {}, { ledger, reservationId: 't', ...gateway })
+      expect(ledger.active()).toEqual([{ id: 't', containers: 1, memoryBytes: 4 * GiB + 64 * 1024 ** 2, cpus: 4.25 }])
+    })
+
+    test('a team that does not fit is refused with its size, its ceiling and the largest team that fits', async () => {
+      await expect(assertHostCapacity(team(5), async () => reference, () => {}, gateway)).rejects.toThrow(
+        /docker sandbox: Collaboration runs all 5 agents in one container sized 5 x 1g = 5g.*Requested 1 containers.*A team of at most 4 agents fits/s,
+      )
+    })
   })
 
   test('the CLI refuses to start a docker run that would overcommit the host', async () => {
@@ -167,7 +250,7 @@ describe('CLI host-capacity preflight', () => {
         {
           goal: 'g', rounds: 1, population: 2, seed: 1,
           dbPath: ':memory:', criteria: null, mode: 'real', sandbox: 'docker',
-          workspaceRoot: '/tmp/does-not-need-to-exist',
+          workspaceRoot: '/tmp/does-not-need-to-exist', workflow: 'tournament',
         },
         hooks,
       ),
@@ -243,6 +326,23 @@ describe('CLI orphan sweep', () => {
       },
     )
     expect(seen).toHaveLength(0)
+  })
+})
+
+describe('resolveWorkflow', () => {
+  test('defaults to the app default and accepts both workflows', () => {
+    expect(resolveWorkflow(undefined)).toBe(DEFAULT_CONFIG.workflow)
+    expect(resolveWorkflow('collaboration')).toBe('collaboration')
+    expect(resolveWorkflow('tournament')).toBe('tournament')
+  })
+
+  test('a typo fails loudly rather than running the other workflow', () => {
+    expect(() => resolveWorkflow('collab')).toThrow(/unknown workflow "collab"/)
+  })
+
+  test('the population default is a team that fits one container, or the tournament default', () => {
+    expect(defaultPopulation('collaboration')).toBe(DEFAULT_TEAM_SIZE)
+    expect(defaultPopulation('tournament')).toBe(DEFAULT_CONFIG.populationSize)
   })
 })
 
@@ -362,6 +462,7 @@ describe('CLI research inputs and outputs', () => {
     const reportPath = join(dir, 'report.md')
     const out = await runTournamentCli({
       goal: 'write a good answer', rounds: 2, population: 4, seed: 1, dbPath: ':memory:', criteria: null, reportPath,
+      workflow: 'tournament',
     })
     const report = await readFile(reportPath, 'utf8')
     expect(report).toContain('# Tournament report: cli')

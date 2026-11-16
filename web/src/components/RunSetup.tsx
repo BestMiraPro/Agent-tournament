@@ -1,13 +1,17 @@
 import { useEffect, useId, useState } from 'react'
 import { DEFAULT_CONFIG } from '../../../src/core/types.js'
-import { getCapacity, listModels } from '../api.js'
-import { setupEstimate, type CapacityInfo, type PlacementPlan } from '../lib/placement.js'
+import { getCapacity, getSubscriptions, getWebSearchStatus, listConnectors, listModels, type ConnectorList, type SubscriptionStatus, type WebSearchStatus } from '../api.js'
+import { pickerChoices, runConnectorsFrom, type PickerChoice, type PickerState } from '../lib/connectors.js'
+import { setupEstimate, teamSetupEstimate, type CapacityInfo, type PlacementPlan } from '../lib/placement.js'
 import type { RosterEntry } from '../lib/roster.js'
-import { RosterBuilder } from './RosterBuilder.js'
+import { pickerModels } from '../lib/subscriptions.js'
+import { RosterBuilder, SubscriptionBadge } from './RosterBuilder.js'
+import { SubscriptionsPanel } from './SubscriptionsPanel.js'
 
 export interface RunSetupValue {
   name: string
   goal: string
+  workflow: 'collaboration' | 'tournament'
   sandbox: 'mock' | 'local' | 'docker'
   roster: RosterEntry[]
   judgeModel: string
@@ -25,6 +29,65 @@ export interface RunSetupValue {
   containerCpus: number
   isolation: 'protected' | 'shared'
   pricingText: string
+  /** Connectors the run's agents get, with the write tools it opts into; ignored for mock runs. */
+  connectors: { id: string; writeTools: string[] }[]
+  webAccess: boolean
+}
+
+/**
+ * Which connectors this run's agents get. Write tools appear only where the connector permits them, and each is
+ * off until ticked here; read-only connectors offer none.
+ */
+export function ConnectorPicker({ choices, state, disabled, onChange }: {
+  choices: PickerChoice[]
+  state: PickerState
+  disabled: boolean
+  onChange: (next: PickerState) => void
+}) {
+  if (choices.length === 0) return <p className="help">No connectors yet. Add them on the Connectors page.</p>
+  return (
+    <div className="connector-picker">
+      {choices.map((c) => {
+        const entry = state[c.id] ?? { enabled: false, writeTools: [] }
+        return (
+          <div key={c.id}>
+            <label>
+              <input
+                type="checkbox"
+                checked={entry.enabled}
+                disabled={disabled}
+                onChange={() => onChange({ ...state, [c.id]: { ...entry, enabled: !entry.enabled } })}
+              />{' '}
+              {c.title} <code>{c.id}</code>{c.locked ? ' — read-only' : ''}{c.connected ? '' : ' — not connected yet'}
+            </label>
+            {entry.enabled && c.permittedWriteTools.map((tool) => (
+              <label key={tool} className="connector-picker__write">
+                <input
+                  type="checkbox"
+                  checked={entry.writeTools.includes(tool)}
+                  disabled={disabled}
+                  onChange={() => onChange({
+                    ...state,
+                    [c.id]: { ...entry, writeTools: entry.writeTools.includes(tool) ? entry.writeTools.filter((t) => t !== tool) : [...entry.writeTools, tool] },
+                  })}
+                />{' '}
+                allow write tool <code>{tool}</code> in this run
+              </label>
+            ))}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/** Which search provider the web tools would use: the primary with its key, or the Exa fallback. */
+export function WebSearchStatusLine({ status }: { status: WebSearchStatus | null }) {
+  if (!status) return <p className="help">Search provider: could not be read from the server.</p>
+  const exa = status.fallback.mode === 'keyed' ? 'Exa with your key' : 'Exa without a key'
+  return status.primary.configured
+    ? <p className="help">Search provider: {status.primary.name} (key configured), falling back to {exa}.</p>
+    : <p className="help">Search provider: {exa} only — set LANGSEARCH_API_KEY for {status.primary.name}, the primary (see the operator guide).</p>
 }
 
 /** Before Start: which agents share which container, the summed ceilings, and the estimated fit. */
@@ -45,6 +108,20 @@ export function DockerPlacementSummary({ capacity, concurrency, ...plan }: Place
   )
 }
 
+/** Before Start: a collaboration team's one container, its summed ceilings and the estimated fit. */
+export function TeamContainerSummary({ capacity, ...plan }: { population: number; memory: string; cpus: number; capacity: CapacityInfo | null }) {
+  const estimate = teamSetupEstimate(plan, capacity)
+  return (
+    <div className="placement-summary" aria-live="polite">
+      <p className="help">The whole team works in one protected container: no credentials inside, an internal-only network, model calls through the relay. Its limits are one agent&apos;s per member.</p>
+      <p className="help">Ceilings: {estimate.ceilings}. These are limits, not memory set aside at launch.</p>
+      <p className="help">The container restarts between rounds; the team&apos;s folder (output/, CHANNEL.md, scratch) carries over.</p>
+      <p className={estimate.fit.state === 'does_not_fit' ? 'error' : 'help'}>{estimate.fit.message}</p>
+      {estimate.memoryNote && <p className="help">{estimate.memoryNote}</p>}
+    </div>
+  )
+}
+
 export function RunSetup({ busy, error, onCreate }: {
   busy: boolean
   error: string | null
@@ -52,6 +129,8 @@ export function RunSetup({ busy, error, onCreate }: {
 }) {
   const [name, setName] = useState('arena')
   const [goal, setGoal] = useState('Produce the best possible answer.')
+  const [workflow, setWorkflow] = useState<RunSetupValue['workflow']>(DEFAULT_CONFIG.workflow)
+  const collaboration = workflow === 'collaboration'
   const [sandbox, setSandbox] = useState<RunSetupValue['sandbox']>('mock')
   const [roster, setRoster] = useState<RosterEntry[]>([{ modelId: 'mock/model', count: 4, temperature: 0.7 }])
   const [judgeModel, setJudgeModel] = useState(DEFAULT_CONFIG.judge.modelId)
@@ -84,7 +163,31 @@ export function RunSetup({ busy, error, onCreate }: {
     )
     return () => { alive = false }
   }, [sandbox])
+  const [webAccess, setWebAccess] = useState(true)
+  // Read when a real sandbox is chosen; a failed read stays null and the line says so.
+  const [webSearch, setWebSearch] = useState<WebSearchStatus | null>(null)
+  useEffect(() => {
+    if (sandbox === 'mock') return
+    let alive = true
+    getWebSearchStatus().then(
+      (s) => { if (alive) setWebSearch(s) },
+      () => { if (alive) setWebSearch(null) },
+    )
+    return () => { alive = false }
+  }, [sandbox])
   const [pricingText, setPricingText] = useState('')
+  // Read once; a failure only hides the picker's choices.
+  const [connectorList, setConnectorList] = useState<ConnectorList | null>(null)
+  const [connectorState, setConnectorState] = useState<PickerState>({})
+  useEffect(() => {
+    let alive = true
+    listConnectors().then(
+      (l) => { if (alive) setConnectorList(l) },
+      () => { if (alive) setConnectorList(null) },
+    )
+    return () => { alive = false }
+  }, [])
+  const connectorChoices = pickerChoices(connectorList)
   // Known-models is a copy-paste aid only: failure or an empty list hides the
   // datalist options and free-text inputs keep working.
   const [models, setModels] = useState<string[] | null>(null)
@@ -96,6 +199,17 @@ export function RunSetup({ busy, error, onCreate }: {
     )
     return () => { alive = false }
   }, [])
+  // Subscription sign-in state; a failed read leaves it null and the pickers unlabelled.
+  const [subscriptions, setSubscriptions] = useState<SubscriptionStatus | null>(null)
+  useEffect(() => {
+    let alive = true
+    getSubscriptions().then(
+      (s) => { if (alive) setSubscriptions(s) },
+      () => { if (alive) setSubscriptions(null) },
+    )
+    return () => { alive = false }
+  }, [])
+  const picker = pickerModels(models ?? [], subscriptions)
   // Shared picker list for the judge/reflect comboboxes (the roster builder
   // owns its own list id internally).
   const modelListId = useId()
@@ -109,6 +223,21 @@ export function RunSetup({ busy, error, onCreate }: {
         <label htmlFor="setup-name">Run name</label>
         <input id="setup-name" value={name} onChange={(e) => setName(e.target.value)} disabled={busy} />
         <p className="help">A short name for this run.</p>
+        <label htmlFor="setup-workflow">Workflow</label>
+        <select
+          id="setup-workflow"
+          value={workflow}
+          onChange={(e) => setWorkflow(e.target.value as RunSetupValue['workflow'])}
+          disabled={busy}
+        >
+          <option value="collaboration">collaboration (one team, one shared output folder)</option>
+          <option value="tournament">tournament (agents compete, the best are bred)</option>
+        </select>
+        <p className="help">
+          {collaboration
+            ? 'The agents work as one team in one shared folder, talk through CHANNEL.md, and build output/ together; that folder is judged as one piece of work. Nobody is cloned or removed, and the folder carries over between rounds.'
+            : 'Each agent works alone and is judged on its own SUBMISSION.md; the best are cloned and bred, the worst removed.'}
+        </p>
         <label htmlFor="setup-goal">Goal</label>
         <textarea id="setup-goal" value={goal} rows={3} onChange={(e) => setGoal(e.target.value)} disabled={busy} />
         <p className="help">What the agents are trying to do — scored every round.</p>
@@ -126,14 +255,15 @@ export function RunSetup({ busy, error, onCreate }: {
         <h2 id="setup-h-population">Population</h2>
         <fieldset>
           <legend>Roster</legend>
-          <p className="help">Which models compete, and how many agents each gets.</p>
-          <RosterBuilder value={roster} onChange={setRoster} models={models ?? []} disabled={busy} />
+          <p className="help">{collaboration ? 'Which models are on the team, and how many agents each gets. Four is what one container fits on the reference machine.' : 'Which models compete, and how many agents each gets.'}</p>
+          <RosterBuilder value={roster} onChange={setRoster} models={picker.models} labels={picker.labels} disabled={busy} />
         </fieldset>
       </section>
       <section aria-labelledby="setup-h-models">
         <h2 id="setup-h-models">Models</h2>
         <label htmlFor="setup-judge-model">Judge model</label>
         <input id="setup-judge-model" type="text" list={modelListId} value={judgeModel} onChange={(e) => setJudgeModel(e.target.value)} disabled={busy} />
+        {picker.labels[judgeModel] && <SubscriptionBadge />}
         <p className="help">The judge scores every submission — a stronger model judges more consistently.</p>
         <label htmlFor="setup-judge-mode">Judge mode</label>
         <select
@@ -149,10 +279,16 @@ export function RunSetup({ busy, error, onCreate }: {
         <p className="help">How the judge reads submissions — auto picks for you.</p>
         <label htmlFor="setup-reflect-model">Reflect model</label>
         <input id="setup-reflect-model" type="text" list={modelListId} value={reflectModel} onChange={(e) => setReflectModel(e.target.value)} disabled={busy} />
-        <p className="help">Reflection rewrites each survivor's strategy — the mutation operator.</p>
+        {picker.labels[reflectModel] && <SubscriptionBadge />}
+        <p className="help">{collaboration ? "Reflection rewrites each agent's strategy from the team's score and its own part in the work." : "Reflection rewrites each survivor's strategy — the mutation operator."}</p>
         <datalist id={modelListId}>
-          {(models ?? []).map((m) => <option key={m} value={m} />)}
+          {picker.models.map((m) => <option key={m} value={m} label={picker.labels[m] ? `${m} (subscription)` : undefined} />)}
         </datalist>
+      </section>
+      <section aria-labelledby="setup-h-subscriptions">
+        <h2 id="setup-h-subscriptions">Subscriptions</h2>
+        <p className="help">Run agents, the judge and the reflector on your Claude Pro/Max or ChatGPT Plus/Pro subscription instead of API keys. Subscription calls count tokens against the budget and cost $0; the subscription's own usage limits still apply.</p>
+        <SubscriptionsPanel status={subscriptions} onChange={setSubscriptions} disabled={busy} />
       </section>
       <section aria-labelledby="setup-h-sandbox">
         <h2 id="setup-h-sandbox">Sandbox</h2>
@@ -173,6 +309,12 @@ export function RunSetup({ busy, error, onCreate }: {
             <label htmlFor="setup-root">Workspace root</label>
             <input id="setup-root" value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} disabled={busy} />
             <p className="help">Absolute folder where agents work. Leave blank to use the app&apos;s default.</p>
+            <label htmlFor="setup-web" className="check">
+              <input id="setup-web" type="checkbox" checked={webAccess} onChange={(e) => setWebAccess(e.target.checked)} disabled={busy} />
+              Web access
+            </label>
+            <p className="help">Agents can search the web and read pages through the host&apos;s web tools. Every call is recorded as evidence and limited per agent; search keys never reach the agents. Local and docker agents reach them through the tool bridge; docker workers still have no open network.</p>
+            <WebSearchStatusLine status={webSearch} />
           </>
         )}
         {sandbox === 'docker' && (
@@ -180,15 +322,30 @@ export function RunSetup({ busy, error, onCreate }: {
             <label htmlFor="setup-auth">Credentials file (auth.json)</label>
             <input id="setup-auth" value={authFile} onChange={(e) => setAuthFile(e.target.value)} disabled={busy} />
             <p className="help">Your provider credentials file, mounted read-only into containers. Not for context — use Context folder above for that. Leave blank to use your OpenCode login.</p>
-            <label htmlFor="setup-containers">Containers</label>
-            <input id="setup-containers" type="number" min={1} max={64} step={1} value={maxContainers} onChange={(e) => setMaxContainers(e.target.value)} disabled={busy} />
-            <p className="help">How many containers the agents are spread across. With fewer containers than agents, agents share one and can reach each other&apos;s files, so their results cannot be certified untouched. Match the agent count for full isolation.</p>
-            <label htmlFor="setup-container-memory">Memory per container</label>
+            {!collaboration && (
+              <>
+                <label htmlFor="setup-containers">Containers</label>
+                <input id="setup-containers" type="number" min={1} max={64} step={1} value={maxContainers} onChange={(e) => setMaxContainers(e.target.value)} disabled={busy} />
+                <p className="help">How many containers the agents are spread across. With fewer containers than agents, agents share one and can reach each other&apos;s files, so their results cannot be certified untouched. Match the agent count for full isolation.</p>
+              </>
+            )}
+            <label htmlFor="setup-container-memory">{collaboration ? 'Memory per agent' : 'Memory per container'}</label>
             <input id="setup-container-memory" value={containerMemory} onChange={(e) => setContainerMemory(e.target.value)} disabled={busy} />
-            <p className="help">For example 768m or 1g; 512m is accepted but ran out of memory in measured research work. Containers times memory has to fit in the memory Docker has free.</p>
-            <label htmlFor="setup-container-cpus">CPUs per container</label>
+            <p className="help">{collaboration
+              ? 'For example 768m or 1g; the team container gets this much per agent. 512m is accepted but ran out of memory in measured research work.'
+              : 'For example 768m or 1g; 512m is accepted but ran out of memory in measured research work. Containers times memory has to fit in the memory Docker has free.'}</p>
+            <label htmlFor="setup-container-cpus">{collaboration ? 'CPUs per agent' : 'CPUs per container'}</label>
             <input id="setup-container-cpus" type="number" min={0.25} max={64} step={0.25} value={containerCpus} onChange={(e) => setContainerCpus(e.target.value)} disabled={busy} />
-            <p className="help">Containers times CPUs cannot exceed this machine&apos;s CPU count.</p>
+            <p className="help">{collaboration ? 'Agents times CPUs cannot exceed this machine\'s CPU count.' : 'Containers times CPUs cannot exceed this machine\'s CPU count.'}</p>
+            {collaboration && (
+              <TeamContainerSummary
+                population={roster.reduce((n, r) => n + r.count, 0)}
+                memory={containerMemory.trim()}
+                cpus={Number(containerCpus)}
+                capacity={capacity}
+              />
+            )}
+            {!collaboration && (<>
             <label htmlFor="setup-isolation">Isolation</label>
             <select
               id="setup-isolation"
@@ -209,11 +366,21 @@ export function RunSetup({ busy, error, onCreate }: {
               concurrency={Number(concurrency)}
               capacity={capacity}
             />
+            </>)}
           </>
         )}
       </section>
+      <section aria-labelledby="setup-h-connectors">
+        <h2 id="setup-h-connectors">Connectors</h2>
+        {sandbox === 'mock'
+          ? <p className="help">Mock agents do not call tools; connectors apply to local and docker runs.</p>
+          : <ConnectorPicker choices={connectorChoices} state={connectorState} disabled={busy} onChange={setConnectorState} />}
+        <p className="help">Agents reach connectors through the dashboard&apos;s tool bridge, which holds the credentials and records every call. Slack and Gmail are read-only and locked.</p>
+      </section>
       <details>
         <summary>Advanced</summary>
+        {collaboration && <p className="help">Collaboration never selects or breeds, so elites, bands and crossover do not apply, and every agent runs at once.</p>}
+        {!collaboration && (<>
         <label htmlFor="setup-elite">Elites (kept verbatim)</label>
         <input id="setup-elite" type="number" min={0} step={1} value={eliteCount} onChange={(e) => setEliteCount(e.target.value)} disabled={busy} />
         <p className="help">Top agents copied unchanged into the next round.</p>
@@ -229,6 +396,7 @@ export function RunSetup({ busy, error, onCreate }: {
         <label htmlFor="setup-concurrency">Max parallel agents</label>
         <input id="setup-concurrency" type="number" min={1} max={64} step={1} value={concurrency} onChange={(e) => setConcurrency(e.target.value)} disabled={busy} />
         <p className="help">How many agents run at once (1–64).</p>
+        </>)}
         <label htmlFor="setup-pricing">Price table (optional)</label>
         <textarea id="setup-pricing" value={pricingText} rows={3} placeholder="mymodel 2.5 10 0.5 2" onChange={(e) => setPricingText(e.target.value)} disabled={busy} />
         <p className="help">One `modelId inPerM outPerM cacheReadPerM cacheWritePerM` per line — used for the spending display.</p>
@@ -244,7 +412,7 @@ export function RunSetup({ busy, error, onCreate }: {
       <button
         disabled={busy || name.trim().length === 0 || goal.trim().length === 0}
         onClick={() => onCreate({
-          name, goal, sandbox, roster, judgeModel, judgeMode, reflectModel,
+          name, goal, workflow, sandbox, roster, judgeModel, judgeMode, reflectModel,
           workspaceRoot, authFile, contextDir, seedStrategiesDir,
           criteria: criteria.trim() === '' ? null : criteria,
           selection: {
@@ -259,6 +427,8 @@ export function RunSetup({ busy, error, onCreate }: {
           containerCpus: Number(containerCpus),
           isolation,
           pricingText,
+          connectors: sandbox === 'mock' ? [] : runConnectorsFrom(connectorState, connectorChoices),
+          webAccess,
         })}
       >
         {busy ? 'Creating…' : 'Create run'}

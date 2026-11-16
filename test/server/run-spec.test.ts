@@ -38,10 +38,42 @@ describe('seedStrategiesDir', () => {
   })
 })
 
+describe('connectors', () => {
+  const local = { ...base, sandbox: 'local', workspaceRoot: process.platform === 'win32' ? 'C:\\ws' : '/ws' }
+
+  test('default to none, and land in the run config as ids and write opt-ins only', () => {
+    expect(parseRunSpec(base).connectors).toEqual([])
+    const spec = parseRunSpec({ ...local, connectors: [{ id: 'gh', writeTools: ['create_issue', 'create_issue'] }, { id: 'slack' }] })
+    expect(spec.connectors).toEqual([{ id: 'gh', writeTools: ['create_issue'] }, { id: 'slack', writeTools: [] }])
+    expect(runConfigFor(spec).connectors).toEqual(spec.connectors)
+  })
+
+  test('are refused for mock runs, twice, or under an id that is not a plain connector id', () => {
+    expect(() => parseRunSpec({ ...base, connectors: [{ id: 'gh' }] })).toThrow(/local or docker/)
+    expect(() => parseRunSpec({ ...local, connectors: [{ id: 'gh' }, { id: 'gh' }] })).toThrow(/listed twice/)
+    expect(() => parseRunSpec({ ...local, connectors: [{ id: 'external' }] })).toThrow(/reserved/)
+    expect(() => parseRunSpec({ ...local, connectors: [{ id: 'Git_Hub' }] })).toThrow(/connector id/)
+  })
+})
+
+describe('webAccess', () => {
+  test('defaults on, can be turned off, and must be a boolean', () => {
+    expect(parseRunSpec(base).webAccess).toBe(true)
+    expect(parseRunSpec({ ...base, webAccess: false }).webAccess).toBe(false)
+    expect(() => parseRunSpec({ ...base, webAccess: 'yes' })).toThrow()
+  })
+
+  test('lands in the run config', () => {
+    expect(runConfigFor(parseRunSpec(base)).webAccess).toBe(true)
+    expect(runConfigFor(parseRunSpec({ ...base, webAccess: false })).webAccess).toBe(false)
+  })
+})
+
 describe('isolation', () => {
   const abs = process.platform === 'win32' ? 'C:\\ws' : '/ws'
+  // Container placement and isolation choices are the tournament's; a team has one protected container.
   const docker = (count: number, extra: Record<string, unknown> = {}) => ({
-    ...base, sandbox: 'docker', workspaceRoot: abs, authFile: `${abs}/auth.json`,
+    ...base, workflow: 'tournament', sandbox: 'docker', workspaceRoot: abs, authFile: `${abs}/auth.json`,
     roster: [{ modelId: 'w/m', count, temperature: 0.7 }], ...extra,
   })
 
@@ -167,7 +199,7 @@ describe('parseRunSpec', () => {
 
   test('eliteCount beyond the top band throws', () => {
     expect(() =>
-      parseRunSpec({ ...base, selection: { eliteCount: 5, topPct: 0.2 } }),
+      parseRunSpec({ ...base, workflow: 'tournament', selection: { eliteCount: 5, topPct: 0.2 } }),
     ).toThrow(/top band size/)
   })
 
@@ -233,5 +265,36 @@ describe('parseRunSpec container sizing', () => {
 
   test.each([[0], [-1], [65]])('rejects containerCpus %j', (containerCpus) => {
     expect(() => parseRunSpec({ ...base, containerCpus })).toThrow(/containerCpus/)
+  })
+})
+
+describe('workflow', () => {
+  const docker = { ...base, sandbox: 'docker', workspaceRoot: process.platform === 'win32' ? 'C:\\ws' : '/ws', authFile: '/auth.json' }
+
+  test('defaults to the app default and lands in the run config', () => {
+    expect(parseRunSpec(base).workflow).toBe(DEFAULT_CONFIG.workflow)
+    expect(runConfigFor(parseRunSpec({ ...base, workflow: 'tournament' })).workflow).toBe('tournament')
+    expect(runConfigFor(parseRunSpec({ ...base, workflow: 'collaboration' })).workflow).toBe('collaboration')
+  })
+
+  test('rejects an unknown workflow', () => {
+    expect(() => parseRunSpec({ ...base, workflow: 'mode' })).toThrow()
+  })
+
+  test('a collaboration team shares one protected container, so the one-per-agent rule does not apply', () => {
+    const spec = parseRunSpec({ ...docker, workflow: 'collaboration', maxContainers: 1 })
+    expect(spec.isolation).toBe('protected')
+    expect(() => parseRunSpec({ ...docker, workflow: 'tournament', maxContainers: 1 })).toThrow(/one container per agent/)
+  })
+
+  test('collaboration refuses shared isolation: the team container is always protected', () => {
+    expect(() => parseRunSpec({ ...docker, workflow: 'collaboration', isolation: 'shared' }))
+      .toThrow(/Collaboration runs the team in one protected container/)
+  })
+
+  test('selection settings do not constrain a collaboration run', () => {
+    const selection = { eliteCount: 3, topPct: 0.2 }
+    expect(() => parseRunSpec({ ...base, workflow: 'tournament', selection })).toThrow(/eliteCount/)
+    expect(() => parseRunSpec({ ...base, workflow: 'collaboration', selection })).not.toThrow()
   })
 })

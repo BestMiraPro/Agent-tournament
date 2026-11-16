@@ -7,17 +7,18 @@ Guidance for AI agents (and humans) working in this repo.
 Run all three before claiming work is done. All must pass.
 
 ```powershell
-npm test           # vitest run — 1,499 cases; see the platform split below
+npm test           # vitest run — 1,984 cases; see the platform split below
 npm run typecheck  # tsc --noEmit — expect exit 0, no output
 npm run web:build  # vite build — expect exit 0
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same three gates on Ubuntu with Node 24.
 
-- 10 skips are the opt-in suites needing real services: `test/e2e/real-tournament.test.ts` (`ARENA_E2E=1`), `test/e2e/docker-tournament.test.ts` and `test/e2e/container-policy.test.ts` (`ARENA_DOCKER_E2E=1`), and `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`).
+- 11 skips are the opt-in suites needing real services (the container-policy suite includes the connectors bridge check): `test/e2e/real-tournament.test.ts` (`ARENA_E2E=1`), `test/e2e/docker-tournament.test.ts` and `test/e2e/container-policy.test.ts` (`ARENA_DOCKER_E2E=1`), and `test/e2e/dashboard-real.test.ts` (`ARENA_DASHBOARD_E2E=1`).
 - 8 are the file-symlink cases in `test/runtime/workspace-links.test.ts`. Creating a file symlink on Windows needs SeCreateSymbolicLink (Developer Mode or admin); without it the probe gets EPERM and those 8 skip. Directory-junction coverage runs regardless. On Linux they RUN — if they skip there, the capability probe is broken, not the platform.
 - `test/runtime/opencode/server.test.ts` has one POSIX-only termination test (skipped on win32) and five win32-only taskkill tests (skipped on POSIX).
-- Baseline at 2026-10-01, 1,499 total cases on every platform: **Windows 1,480 passed / 19 skipped; Linux and macOS 1,484 passed / 15 skipped.** (macOS measured on Node 26; Linux has the same POSIX-only skips and CI checks it; Windows is the 2026-09-21 measurement plus 83 platform-neutral cases.) If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
+- `test/runtime/claude-code/process.test.ts` has three POSIX-only local-launch tests (a shebang fake CLI, process groups) and `test/runtime/chatgpt-oauth.test.ts` one POSIX-only read-only-file test; all four skip on win32.
+- Baseline at 2026-11-15 (phase 8 integrated: collaboration, connectors, web tools, subscriptions), 1,984 total cases on every platform: **Linux and macOS 1,968 passed / 16 skipped; Windows (not re-measured) 1,960 passed / 24 skipped.** (macOS measured on Node 26; Linux has the same POSIX-only skips and CI checks it; the Windows figure is the 2026-09-21 measurement plus the platform-neutral cases since and the four POSIX-only cases above.) If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
 - There is no separate lint script — `typecheck` is the type gate.
 
 ## Stack
@@ -69,8 +70,9 @@ Or double-click `Start Agent Tournament.cmd` in the project root. No flags are n
 - data in `runs/dashboard.db`, so runs persist across restarts (`--db :memory:` for a throwaway session);
 - workspaces in `runs/workspaces`;
 - credentials from `~/.local/share/opencode/auth.json` when that file exists (honours `XDG_DATA_HOME`).
+- subscriptions: a pasted `claude setup-token` value in `runs/secrets/claude-subscription.json` (0600; never in SQLite, exports, logs or argv), else the host's own `claude auth login` for local runs; ChatGPT Plus/Pro through OpenCode's login in `auth.json`. Design and verified CLI facts: `docs/superpowers/specs/2026-11-15-subscription-runs-design.md`. Never call api.anthropic.com with a subscription token from app code, never hand it to OpenCode, and never let the relay hold, match or inject it: protected Claude agents hold it in their own `claude` process and leave through the gateway CONNECT route to `api.anthropic.com:443` (Anthropic's terms forbid intermediating it).
 
-Every default has a flag (`--port`, `--host`, `--db`, `--workspace-root`, `--auth-file`, `--server-url`, `--population`, `--no-open`, `--no-docker-sandbox`, `--docker-reach`), passed after `--`. Launching while it is already running opens the running instance instead of failing, and does so before touching the database — a second instance's startup recovery would otherwise mark the first one's in-flight round failed.
+Every default has a flag (`--port`, `--host`, `--db`, `--workspace-root`, `--auth-file`, `--server-url`, `--population`, `--no-open`, `--no-docker-sandbox`, `--docker-reach`, `--connectors-dir`), passed after `--`. Connectors and their credentials are in `runs/connectors` (owner-only files), never in the database. Launching while it is already running opens the running instance instead of failing, and does so before touching the database — a second instance's startup recovery would otherwise mark the first one's in-flight round failed.
 
 In Docker instead (macOS, Linux): `docker compose up -d --build` from the repository folder (root `Dockerfile` + `compose.yaml`; README "Run in Docker"). All three sandboxes work. Docker runs drive the host's Docker through the mounted socket with `--docker-reach bridge`: the dashboard sits on Docker's default bridge (`network_mode: bridge`), reaches shard containers and gateways at their bridge addresses instead of host-loopback ports, and binds the provider relay to its own bridge address, which gateways forward to instead of `host.docker.internal`. Every path the app hands Docker must resolve on the host, so `runs/` and the OpenCode data folder are mounted at their host paths (`$PWD`, `$HOME`), and `XDG_CACHE_HOME` puts the model catalogue under `runs/`. The entrypoint (`docker/dashboard-entrypoint.sh`) runs node as root (socket access is root-equivalent anyway) with gid 1000 and umask 0002, so protected workers (uid 1000) can write workspaces on a Linux host. Without the socket it passes `--no-docker-sandbox`. `tsx` is a runtime dependency because the image runs `npm ci --omit=dev`. `ARENA_DOCKER_E2E=1 ARENA_DOCKER_REACH=bridge` runs `test/e2e/container-policy.test.ts` the same way, from such a container.
 

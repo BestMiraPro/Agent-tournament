@@ -16,11 +16,14 @@ import { Leaderboard } from './components/Leaderboard.js'
 import { RoundControls } from './components/RoundControls.js'
 import { RunSetup, type RunSetupValue } from './components/RunSetup.js'
 import { RunBrowser } from './components/RunBrowser.js'
+import { ChannelPanel } from './components/ChannelPanel.js'
+import { TeamOutput } from './components/TeamOutput.js'
 import { CompareRuns } from './components/CompareRuns.js'
+import { Connectors } from './components/Connectors.js'
 
 export function App() {
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null)
-  const [view, setView] = useState<'browser' | 'setup' | 'run' | 'compare'>('browser')
+  const [view, setView] = useState<'browser' | 'setup' | 'run' | 'compare' | 'connectors'>('browser')
   const [compareIds, setCompareIds] = useState<[string, string] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
@@ -106,6 +109,7 @@ export function App() {
       ;({ runId } = await createRunFull({
         name: value.name.trim(),
         goal: value.goal.trim(),
+        workflow: value.workflow,
         sandbox: value.sandbox,
         roster,
         judge: { modelId: judgeModel === '' ? undefined : judgeModel, mode: value.judgeMode },
@@ -117,11 +121,16 @@ export function App() {
         criteria: value.criteria,
         selection: value.selection,
         concurrency: value.concurrency,
-        // Only a docker run has containers to size; the others would ignore these.
+        // Only a docker run has containers to size; the others would ignore these. A team's
+        // one container is always protected and sized per agent, so it has no count to send.
         ...(value.sandbox === 'docker'
-          ? { maxContainers: value.maxContainers, containerMemory: value.containerMemory, containerCpus: value.containerCpus, isolation: value.isolation }
+          ? value.workflow === 'collaboration'
+            ? { containerMemory: value.containerMemory, containerCpus: value.containerCpus, isolation: 'protected' as const }
+            : { maxContainers: value.maxContainers, containerMemory: value.containerMemory, containerCpus: value.containerCpus, isolation: value.isolation }
           : {}),
         pricing,
+        ...(value.connectors.length > 0 ? { connectors: value.connectors } : {}),
+        webAccess: value.webAccess,
       }))
     } catch (e) {
       setSetupError(serverError(e))
@@ -192,7 +201,10 @@ export function App() {
   if (view === 'browser') {
     return (
       <>
-        <h1>Agent Tournament — runs</h1>
+        <div className="arena-head">
+          <h1>Agent Tournament — runs</h1>
+          <button onClick={() => { navigation.current++; selectedRun.current = null; setView('connectors') }}>Connectors</button>
+        </div>
         {error && <p className="error">{error}</p>}
         <RunBrowser
           onOpen={(id) => {
@@ -211,6 +223,19 @@ export function App() {
     )
   }
 
+  if (view === 'connectors') {
+    return (
+      <>
+        <div className="arena-head">
+          <h1>Agent Tournament — connectors</h1>
+          <button onClick={() => { navigation.current++; selectedRun.current = null; setView('setup') }}>New run</button>
+          <button onClick={() => { navigation.current++; selectedRun.current = null; setView('browser') }}>Browse runs</button>
+        </div>
+        <Connectors />
+      </>
+    )
+  }
+
   if (view === 'compare' && compareIds) {
     return <CompareRuns a={compareIds[0]} b={compareIds[1]} onBack={() => setView('browser')} />
   }
@@ -221,6 +246,7 @@ export function App() {
       <>
         <div className="arena-head">
           <h1>Agent Tournament — new run</h1>
+          <button onClick={() => { navigation.current++; selectedRun.current = null; setView('connectors') }}>Connectors</button>
           <button onClick={() => { navigation.current++; selectedRun.current = null; setView('browser') }}>Browse runs</button>
         </div>
         <RunSetup busy={creating} error={setupError} onCreate={handleCreate} />
@@ -232,6 +258,8 @@ export function App() {
 
   const busy = live.roundIdx >= snapshot.lastRoundIdx ? live.busy : snapshot.busy
   const activeRoundIdx = live.busy ? live.roundIdx : snapshot.lastRoundIdx
+  const collaboration = snapshot.workflow === 'collaboration'
+  const lastTeam = roundStats.filter((r) => r.team).at(-1) ?? null
 
   return (
     <>
@@ -313,8 +341,23 @@ export function App() {
                 .then(() => 'Abort requested. Running agents are stopped; the round is marked failed.')
                 .catch((e) => serverError(e))}
           />
-          <h2 style={{ fontSize: '.9rem' }}>Leaderboard</h2>
-          <Leaderboard agents={snapshot.agents} live={live} />
+          {collaboration ? (
+            <>
+              <h2 style={{ fontSize: '.9rem' }}>Team score</h2>
+              {/* One score for the whole team: there is no ranking between teammates. */}
+              <p className="muted">
+                {live.teamScore && live.teamScore.roundIdx >= (lastTeam?.idx ?? 0)
+                  ? `${live.teamScore.score.toFixed(2)} in round ${live.teamScore.roundIdx}`
+                  : lastTeam?.team ? `${lastTeam.team.score.toFixed(2)} in round ${lastTeam.idx}` : 'Not judged yet.'}
+              </p>
+              <ChannelPanel runId={snapshot.runId} roundIdx={activeRoundIdx} live={busy && live.roundIdx === activeRoundIdx} liveMessages={live.channel} />
+            </>
+          ) : (
+            <>
+              <h2 style={{ fontSize: '.9rem' }}>Leaderboard</h2>
+              <Leaderboard agents={snapshot.agents} live={live} />
+            </>
+          )}
           {live.lastBreach && <p className="error">Budget: {live.lastBreach}</p>}
           {/* A round that failed outright, reported as itself rather than as a budget breach. */}
           {(live.lastError ?? snapshot.lastError) && (
@@ -322,6 +365,7 @@ export function App() {
           )}
         </aside>
       </div>
+      {collaboration && <TeamOutput runId={snapshot.runId} rounds={roundStats} refreshKey={snapshot.lastRoundIdx} />}
       <AnalyticsPanel
         runId={snapshot.runId}
         agents={snapshot.agents}

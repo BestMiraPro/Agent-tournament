@@ -5,6 +5,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { bridgeSeams, composeRun, pathKind, runConfigFor, type ComposeSeams } from '../../src/server/compose-run.js'
 import { CapacityLedger } from '../../src/runtime/docker/capacity.js'
 import { RelayPolicy } from '../../src/runtime/provider-relay.js'
+import { ToolBridge } from '../../src/connectors/bridge.js'
 
 // Fake keys and a trimmed catalogue: fixtures, not anyone's credentials.
 const catalogJson = JSON.stringify({
@@ -15,13 +16,14 @@ const catalogJson = JSON.stringify({
 })
 const authJson = JSON.stringify({ w: { type: 'api', key: 'FAKE-W-KEY' }, wandb: { type: 'api', key: 'FAKE-WANDB-KEY' } })
 import { parseRunSpec } from '../../src/server/run-spec.js'
+import type { AgentRunnerOptions } from '../../src/runtime/opencode/agent-runner.js'
 
 const TOOLCHAIN = 'abc123def4567890'
 const inventoryFixture = {
   schemaVersion: 1 as const,
   toolchainId: TOOLCHAIN,
   python: { version: '3.11.2', venv: '/opt/arena/venv', executable: '/opt/arena/venv/bin/python' },
-  tools: ['python3', 'node', 'git', 'opencode', 'rg'].map((name) => ({ name, version: '1.0', executable: `/usr/bin/${name}` })),
+  tools: ['python3', 'node', 'git', 'opencode', 'rg', 'claude'].map((name) => ({ name, version: '1.0', executable: `/usr/bin/${name}` })),
   pythonPackages: [{ name: 'numpy', version: '2.3.3' }],
 }
 
@@ -41,6 +43,7 @@ const mockSeams = () => ({
   hostModelsFile: vi.fn(() => '/host/models.json'),
   readTextFile: vi.fn(async (path: string) => (path.endsWith('models.json') ? catalogJson : authJson)),
   relay: vi.fn(async () => ({ policy: new RelayPolicy(), port: 45678 })),
+  toolBridge: vi.fn(async () => ({ bridge: new ToolBridge(), port: 45679, host: '127.0.0.1' })),
   createShardNetworkFn: vi.fn(async (runId: string, shardIndex: number) => `arena-${runId}-net-${shardIndex}`),
   removeShardNetworkFn: vi.fn(async (_name: string, _onWarning?: (message: string) => void) => true),
   // Strict removal confirmation reads the fake daemon, never a real one.
@@ -62,7 +65,7 @@ describe('composeRun', () => {
 
   describe('docker auth file', () => {
     const dockerSpec = (root: string, authFile: string) => parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 1, temperature: 0.7 }],
       workspaceRoot: root, authFile,
     })
@@ -122,7 +125,9 @@ describe('composeRun', () => {
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
         workspaceRoot: root, contextDir: linked,
       }), { ...seams, inspectPath: vi.fn(() => 'directory' as const) } as never)
-      expect(seams.startHostServer).toHaveBeenCalledWith(expect.objectContaining({ env: { OPENCODE_ENABLE_EXA: '1' } }))
+      expect(seams.startHostServer).toHaveBeenCalledWith(expect.objectContaining({
+        env: { OPENCODE_ENABLE_EXA: '1', OPENCODE_DISABLE_CLAUDE_CODE: '1', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1' },
+      }))
       const profile = join(root, '.arena-grader', '.opencode', 'agents', 'grader.md')
       expect(existsSync(profile)).toBe(true)
       expect(readFileSync(profile, 'utf8')).toContain(`${JSON.stringify(`${real.replace(/\\/g, '/')}/*`)}: allow`)
@@ -140,7 +145,7 @@ describe('composeRun', () => {
     const GiB = 1024 ** 3
     const host = { totalMemoryBytes: 16 * GiB, usedMemoryBytes: 0, cpus: 16, containers: [] }
     const spec = (root: string, extra: Record<string, unknown> = {}) => parseRunSpec({
-      name: 'p', goal: 'g', sandbox: 'docker',
+      name: 'p', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 2, temperature: 0.7 }],
       workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: 2, ...extra,
     })
@@ -179,6 +184,7 @@ describe('composeRun', () => {
             network: `arena-run-9-net-${s.shardIndex}`,
             configDir: join(root, '.arena-runtime', 'run-9', `shard-${s.shardIndex}-config`),
             relayPort: 45678,
+            toolsPort: 45679,
           })
           const opencodeJson = readFileSync(join(s.protectedRuntime.configDir, 'opencode.json'), 'utf8')
           expect(JSON.parse(opencodeJson).provider).toEqual({ wandb: { options: { baseURL: 'http://gateway:8787/wandb', apiKey: g.token } } })
@@ -209,17 +215,19 @@ describe('composeRun', () => {
         startShardContainerFn,
         removeContainerFn: vi.fn(async (_name: string) => {}),
       }
-      const seams = bridgeSeams(base as never, { selfAddress: async () => '172.17.0.2', startRelay })
+      const startToolBridge = vi.fn(async (_host: string) => ({ bridge: new ToolBridge(), port: 45679 }))
+      const seams = bridgeSeams(base as never, { selfAddress: async () => '172.17.0.2', startRelay, startToolBridge })
       try {
         const c = await composeRun(spec(root), seams, { runIdHolder: { value: 'run-9' } })
         expect(startRelay).toHaveBeenCalledWith('172.17.0.2')
+        expect(startToolBridge).toHaveBeenCalledWith('172.17.0.2')
         await c.planFor!(['a1', 'a2'])
         await Promise.all([c.sandbox.provision('a1', {}), c.sandbox.provision('a2', {})])
         const specs = startShardContainerFn.mock.calls.map((call) => (call as unknown as [{ reach: string; protectedRuntime: { relayPort: number; relayHost: string } }])[0])
         expect(specs).toHaveLength(2)
         for (const s of specs) {
           expect(s.reach).toBe('bridge')
-          expect(s.protectedRuntime).toMatchObject({ relayPort: 45678, relayHost: '172.17.0.2' })
+          expect(s.protectedRuntime).toMatchObject({ relayPort: 45678, toolsPort: 45679, relayHost: '172.17.0.2' })
         }
         await c.cleanup()
       } finally {
@@ -236,6 +244,34 @@ describe('composeRun', () => {
         expect(seams.startHostServer).not.toHaveBeenCalled()
         expect(seams.readCapacity).not.toHaveBeenCalled()
         expect(seams.relay).not.toHaveBeenCalled()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('a collaboration team gets ONE protected container sized for every member, and its workspace is /work', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-team-'))
+      const ledger = new CapacityLedger()
+      const startShardContainerFn = started()
+      const seams = {
+        ...mockSeams(), ledger, readCapacity: vi.fn(async () => host),
+        startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+        startShardContainerFn,
+        removeContainerFn: vi.fn(async (_name: string) => {}),
+      }
+      try {
+        const teamSpec = spec(root, { workflow: 'collaboration', roster: [{ modelId: 'wandb/zai-org/GLM-5.2', count: 3, temperature: 0.7 }], maxContainers: 1 })
+        const c = await composeRun(teamSpec, seams as never, { runIdHolder: { value: 'run-t' } })
+        expect(c.capacity).toEqual({ committed: 1, maxContainers: 1 })
+        await c.planFor!(['a1', 'a2', 'a3'])
+        expect(ledger.active()).toEqual([expect.objectContaining({ containers: 1, memoryBytes: 3 * GiB + 64 * 1024 ** 2, cpus: 3.25 })])
+        const team = await c.sandbox.provisionTeam!('run-t', ['a1', 'a2', 'a3'], {})
+        expect([...team.handles.values()].map((h) => h.workspacePath)).toEqual(['/work', '/work', '/work'])
+        expect(startShardContainerFn).toHaveBeenCalledTimes(1)
+        const [s] = startShardContainerFn.mock.calls[0] as unknown as [{ hostDir: string; memory: string; cpus: number; pidsLimit: number; maxOpenFiles: number; authFile: string | null; protectedRuntime?: unknown }]
+        expect(s).toMatchObject({ hostDir: join(root, 'team-run-t'), memory: '3g', cpus: 3, pidsLimit: 768, maxOpenFiles: 6144, authFile: null })
+        expect(s.protectedRuntime).toBeDefined()
+        await c.cleanup()
       } finally {
         rmSync(root, { recursive: true, force: true })
       }
@@ -315,7 +351,7 @@ describe('composeRun', () => {
     const GiB = 1024 ** 3
     const host = { totalMemoryBytes: 5 * GiB, usedMemoryBytes: 0, cpus: 16, containers: [] }
     const spec = (root: string, count: number) => parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'w/m', count, temperature: 0.7 }],
       workspaceRoot: root, authFile: join(root, 'auth.json'), maxContainers: count, containerMemory: '1g',
     })
@@ -494,6 +530,80 @@ describe('composeRun', () => {
     })
   })
 
+  /** Real runs dispatch by model; the OpenCode runner serves every non-Claude agent. */
+  const openCodeRunner = (runner: unknown) => ((runner as { runnerFor?: (m: string) => unknown }).runnerFor?.('w/m') ?? runner)
+
+  describe('web access', () => {
+    const seamsWithBridge = (bridge: ToolBridge) => ({
+      ...mockSeams(),
+      startHostServer: vi.fn(async () => ({ client: { id: 'host' }, stop: vi.fn(async () => {}) })),
+      toolBridge: vi.fn(async () => ({ bridge, port: 45679, host: '127.0.0.1' })),
+    })
+    // `undefined` is a spec without the field at all, as an old config decodes.
+    const localSpec = (root: string, webAccess?: boolean, workflow: 'tournament' | 'collaboration' = 'tournament') => {
+      const { webAccess: _parsed, ...spec } = parseRunSpec({ name: 'l', goal: 'g', sandbox: 'local', workflow, roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }], workspaceRoot: root })
+      return webAccess === undefined ? spec : { ...spec, webAccess }
+    }
+    const projectConfigOf = (runner: unknown, agentId: string) =>
+      JSON.parse((openCodeRunner(runner) as { options: AgentRunnerOptions }).options.projectConfig!({ agentId } as never)!) as {
+        mcp: Record<string, { url: string; headers: Record<string, string> }>
+      }
+
+    test('reaches agents through the tool bridge as the built-in web connector, each with its own token, revoked on cleanup', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-web-'))
+      const bridge = new ToolBridge()
+      try {
+        const c = await composeRun(localSpec(root, true), seamsWithBridge(bridge) as never)
+        expect(c.config.webAccess).toBe(true)
+        const options = (openCodeRunner(c.runner) as { options: AgentRunnerOptions }).options
+        const a1 = projectConfigOf(c.runner, 'agent-1').mcp.arena!
+        const a2 = projectConfigOf(c.runner, 'agent-2').mcp.arena!
+        expect(a1.url).toBe('http://127.0.0.1:45679/mcp/arena')
+        expect(a1.headers.Authorization).not.toBe(a2.headers.Authorization)
+        expect(options.webToolsNote).toContain('arena_web_search')
+        expect(options.webToolsNote).toContain('200 searches and 500 page fetches')
+        const token = a1.headers.Authorization!.replace(/^Bearer /, '')
+        expect(bridge.authenticate(token)).not.toBeNull()
+        await c.cleanup()
+        expect(bridge.authenticate(token)).toBeNull()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('a collaboration team shares one bridge identity with the run-wide web allowance', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-web-'))
+      try {
+        const c = await composeRun(localSpec(root, true, 'collaboration'), seamsWithBridge(new ToolBridge()) as never)
+        const a1 = projectConfigOf(c.runner, 'agent-1').mcp.arena!
+        const a2 = projectConfigOf(c.runner, 'agent-2').mcp.arena!
+        expect(a1.headers.Authorization).toBe(a2.headers.Authorization)
+        expect((openCodeRunner(c.runner) as { options: AgentRunnerOptions }).options.webToolsNote).toContain('2000 searches and 5000 page fetches')
+        await c.cleanup()
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    test('without web access, and without connectors, no bridge is used', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'compose-web-'))
+      try {
+        for (const webAccess of [false, undefined]) {
+          const s = seamsWithBridge(new ToolBridge())
+          const c = await composeRun(localSpec(root, webAccess), s as never)
+          expect(s.toolBridge).not.toHaveBeenCalled()
+          expect(c.config.webAccess).toBe(false)
+          const options = (openCodeRunner(c.runner) as { options: AgentRunnerOptions }).options
+          expect(options.projectConfig).toBeUndefined()
+          expect(options.webToolsNote).toBeUndefined()
+          await c.cleanup()
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  })
+
   describe('context folder', () => {
     const localSpec = (root: string, contextDir: string) => parseRunSpec({
       name: 'l', goal: 'g', sandbox: 'local',
@@ -534,7 +644,7 @@ describe('composeRun', () => {
     const seams = mockSeams()
     seams.readCapacity.mockResolvedValueOnce({ totalMemoryBytes: 2 * 1024 ** 3, usedMemoryBytes: 1 * 1024 ** 3, cpus: 8 })
     await expect(composeRun(parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
       roster: [{ modelId: 'w/m', count: 4, temperature: 0.7 }],
       workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     }), seams as never)).rejects.toThrow(/docker sandbox/i)
@@ -571,7 +681,7 @@ describe('composeRun', () => {
     seams.readCapacity.mockRejectedValueOnce(new Error('docker info unavailable'))
     const reported: string[] = []
     const c = await composeRun(parseRunSpec({
-      name: 'd', goal: 'g', sandbox: 'docker', isolation: 'shared',
+      name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament', isolation: 'shared',
       roster: [{ modelId: 'w/m', count: 4, temperature: 0.7 }],
       workspaceRoot: '/tmp/w', authFile: '/tmp/auth.json',
     }), seams as never, { reportWarning: (m) => reported.push(m) })
@@ -649,7 +759,7 @@ describe('composeRun', () => {
     > = { startShardContainerFn, removeContainerFn }
     try {
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'),
       }), { ...seams, ...dockerBoundary } as never)
@@ -710,7 +820,7 @@ describe('composeRun', () => {
     }
     try {
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 1, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'), contextDir: ctx,
       }), {
@@ -758,7 +868,7 @@ describe('composeRun', () => {
     }
     try {
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: 'w/m', count: 2, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'), contextDir: ctx,
       }), {
@@ -816,7 +926,7 @@ describe('composeRun', () => {
         shardIndex: spec.shardIndex,
       }))
       const c = await composeRun(parseRunSpec({
-        name: 'd', goal: 'g', sandbox: 'docker',
+        name: 'd', goal: 'g', sandbox: 'docker', workflow: 'tournament',
         roster: [{ modelId: missing, count: 1, temperature: 0.7 }, { modelId: present, count: 1, temperature: 0.7 }],
         workspaceRoot: root, authFile: join(root, 'auth.json'),
       }), {

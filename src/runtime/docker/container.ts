@@ -21,8 +21,12 @@ export interface ProtectedRuntimeSpec {
   configDir: string
   /** The relay's port, which the shard gateway forwards to. */
   relayPort: number
-  /** The relay's address as the gateway reaches it; the host's loopback when unset. */
+  /** The host tool bridge's port, the gateway's third route. */
+  toolsPort: number
+  /** The relay's (and tool bridge's) address as the gateway reaches it; the host's loopback when unset. */
   relayHost?: string
+  /** The gateway also carries Claude Code's CONNECT egress to api.anthropic.com (runs with Claude subscription agents). */
+  claudeEgress?: boolean
 }
 
 export interface ShardContainerSpec {
@@ -42,6 +46,9 @@ export interface ShardContainerSpec {
   healthTimeoutMs?: number
   /** Present for protected isolation: no credentials, no egress, served through a gateway. */
   protectedRuntime?: ProtectedRuntimeSpec
+  /** Process and open-file ceilings; a collaboration team's container scales them per member. */
+  pidsLimit?: number
+  maxOpenFiles?: number
   /** How the app reaches the container's API. Default `loopback`. */
   reach?: DockerReach
 }
@@ -220,6 +227,8 @@ export async function startShardContainer(
         contextDir: spec.contextDir ?? null,
         toolsDir: spec.toolsDir ?? null,
         modelsFile: spec.modelsFile ?? null,
+        ...(spec.pidsLimit !== undefined ? { pidsLimit: spec.pidsLimit } : {}),
+        ...(spec.maxOpenFiles !== undefined ? { maxOpenFiles: spec.maxOpenFiles } : {}),
       }),
       120_000,
     )
@@ -292,6 +301,8 @@ async function startProtectedShard(
       configDir: runtime.configDir,
       toolsDir: spec.toolsDir,
       contextDir: spec.contextDir ?? null,
+      ...(spec.pidsLimit !== undefined ? { pidsLimit: spec.pidsLimit } : {}),
+      ...(spec.maxOpenFiles !== undefined ? { maxOpenFiles: spec.maxOpenFiles } : {}),
     }),
     120_000,
   )
@@ -305,7 +316,9 @@ async function startProtectedShard(
         shardIndex: spec.shardIndex,
         image: spec.image,
         relayPort: runtime.relayPort,
+        toolsPort: runtime.toolsPort,
         ...(runtime.relayHost ? { relayHost: runtime.relayHost } : {}),
+        ...(runtime.claudeEgress ? { claudeEgress: true } : {}),
       }),
       120_000,
     )

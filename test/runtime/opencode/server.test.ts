@@ -511,4 +511,23 @@ describe('startServer process ownership', () => {
       else process.env.OPENCODE_SERVER_PASSWORD = savedP
     }
   }, 15_000)
+
+  test('keeps the web search keys out of the spawned child, whose shell commands local agents run', async () => {
+    const saved = { LANGSEARCH_API_KEY: process.env.LANGSEARCH_API_KEY, EXA_API_KEY: process.env.EXA_API_KEY }
+    process.env.LANGSEARCH_API_KEY = 'fake-langsearch-key'
+    process.env.EXA_API_KEY = 'fake-exa-key'
+    try {
+      await expect(startServer({ ...exiterCommand(), startupTimeoutMs: 5000 })).rejects.toThrow('process exited with code')
+      const env = (spawned.options[0] as { env?: NodeJS.ProcessEnv }).env
+      expect(env).not.toHaveProperty('LANGSEARCH_API_KEY')
+      expect(env).not.toHaveProperty('EXA_API_KEY')
+      expect(env?.PATH).toBe(process.env.PATH)
+      expect(process.env.LANGSEARCH_API_KEY).toBe('fake-langsearch-key')
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
+  }, 15_000)
 })

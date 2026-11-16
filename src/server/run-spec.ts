@@ -1,7 +1,9 @@
 import path from 'node:path'
 import { z } from 'zod'
-import { DEFAULT_CONFIG } from '../core/types.js'
+import { DEFAULT_CONFIG, type RunConnector } from '../core/types.js'
+import { assertConnectorId } from '../connectors/types.js'
 import { MIN_CONTAINER_MEMORY, MIN_CONTAINER_MEMORY_BYTES, parseMemoryLimit } from '../core/memory.js'
+import { claudeModelOf, isClaudeSubscriptionModel } from '../runtime/claude-code/model-id.js'
 
 const rosterEntry = z.object({
   modelId: z.string().min(1),
@@ -13,6 +15,7 @@ const schema = z.object({
   name: z.string().min(1),
   goal: z.string().min(1),
   sandbox: z.enum(['mock', 'local', 'docker']).default('mock'),
+  workflow: z.enum(['collaboration', 'tournament']).optional(),
   roster: z.array(rosterEntry).min(1),
   judge: z
     .object({
@@ -63,6 +66,16 @@ const schema = z.object({
   seedStrategiesDir: z.string().nullable().default(null),
   serverUrl: z.string().nullable().default(null),
   criteria: z.string().nullable().default(null),
+  // Ids and tool names only; whether each exists, connects and permits the opt-ins is checked at composition.
+  connectors: z
+    .array(z.object({
+      id: z.string().min(1).max(32),
+      writeTools: z.array(z.string().min(1).max(128)).max(100).default([]),
+    }))
+    .max(16)
+    .default([]),
+  // On by default: this is a research tool. Local and docker workers reach the tools through the tool bridge.
+  webAccess: z.boolean().default(true),
 })
 
 export type RunSpecInput = z.input<typeof schema>
@@ -71,6 +84,8 @@ export interface RunSpec {
   name: string
   goal: string
   sandbox: 'mock' | 'local' | 'docker'
+  /** Fixed at creation. parseRunSpec always sets it; absent means the app default. */
+  workflow?: 'collaboration' | 'tournament'
   roster: { modelId: string; count: number; temperature: number }[]
   population: number
   judge: { modelId: string; mode: 'auto' | 'single_call' | 'batched_finals' }
@@ -93,6 +108,10 @@ export interface RunSpec {
   seedStrategiesDir: string | null
   serverUrl: string | null
   criteria: string | null
+  /** Connectors enabled for the run; absent means none. */
+  connectors?: RunConnector[]
+  /** Workers get the host's web tools (local and docker runs). Parsed specs default it on; absent means off. */
+  webAccess?: boolean
 }
 
 /**
@@ -105,6 +124,12 @@ export interface RunSpec {
  */
 export function parseRunSpec(input: unknown): RunSpec {
   const p = schema.parse(input)
+  // A claude-subscription model reaches a command line, so a malformed one is refused here, not at run time.
+  for (const modelId of [...p.roster.map((r) => r.modelId), p.judge.modelId, p.reflect.modelId]) {
+    if (modelId !== undefined && isClaudeSubscriptionModel(modelId) && claudeModelOf(modelId) === null) {
+      throw new Error(`${JSON.stringify(modelId)} is not a valid Claude subscription model id: use claude-subscription/<model>, e.g. claude-subscription/claude-opus-5-5`)
+    }
+  }
   if (p.sandbox === 'docker' && !p.workspaceRoot) {
     throw new Error('docker sandbox requires workspaceRoot')
   }
@@ -125,6 +150,15 @@ export function parseRunSpec(input: unknown): RunSpec {
   if (seedStrategiesDir && !path.isAbsolute(seedStrategiesDir)) {
     throw new Error('seedStrategiesDir must be an absolute path')
   }
+  if (p.connectors.length > 0 && p.sandbox === 'mock') {
+    throw new Error('connectors need a local or docker run: mock agents do not call tools')
+  }
+  const seen = new Set<string>()
+  for (const c of p.connectors) {
+    assertConnectorId(c.id)
+    if (seen.has(c.id)) throw new Error(`connector "${c.id}" is listed twice`)
+    seen.add(c.id)
+  }
   const containerMemory = p.containerMemory ?? DEFAULT_CONFIG.containerMemory
   let containerMemoryBytes: number
   try {
@@ -139,8 +173,18 @@ export function parseRunSpec(input: unknown): RunSpec {
   const maxContainers = p.maxContainers ?? DEFAULT_CONFIG.maxContainers
   // Protected is the docker default: co-tenants in one container can read and change each
   // other's work, so sharing must be chosen, never fallen into because containers ran out.
+  const workflow = p.workflow ?? DEFAULT_CONFIG.workflow
+  const collaboration = workflow === 'collaboration'
   const isolation = p.isolation ?? (p.sandbox === 'docker' ? 'protected' : 'shared')
-  if (p.sandbox === 'docker' && isolation === 'protected' && maxContainers < population) {
+  // A team shares one container by design, and that container always runs the protected
+  // policy: shared isolation's credential mount and ordinary network are tournament-only.
+  if (collaboration && p.sandbox === 'docker' && isolation === 'shared') {
+    throw new Error(
+      'Collaboration runs the team in one protected container, with no credentials inside and no ordinary network. ' +
+        'Choose protected isolation, or the tournament workflow for shared isolation.',
+    )
+  }
+  if (!collaboration && p.sandbox === 'docker' && isolation === 'protected' && maxContainers < population) {
     throw new Error(
       `Protected isolation needs one container per agent: ${population} agents but ${maxContainers} containers. ` +
         `Raise Containers to ${population}, lower the agent count to ${maxContainers}, or choose shared isolation, ` +
@@ -152,13 +196,15 @@ export function parseRunSpec(input: unknown): RunSpec {
   const eliteCount = p.selection?.eliteCount ?? DEFAULT_CONFIG.selection.eliteCount
   const topPct = p.selection?.topPct ?? DEFAULT_CONFIG.selection.topPct
   const topBand = Math.max(1, Math.floor(population * topPct))
-  if (eliteCount > topBand) {
+  // Collaboration never selects, so its selection settings are inert.
+  if (!collaboration && eliteCount > topBand) {
     throw new Error(`eliteCount (${eliteCount}) cannot exceed the top band size (${topBand})`)
   }
   return {
     name: p.name,
     goal: p.goal,
     sandbox: p.sandbox,
+    workflow,
     roster: p.roster,
     population,
     judge: {
@@ -194,5 +240,7 @@ export function parseRunSpec(input: unknown): RunSpec {
     seedStrategiesDir,
     serverUrl: p.serverUrl,
     criteria: p.criteria,
+    connectors: p.connectors.map((c) => ({ id: c.id, writeTools: [...new Set(c.writeTools)] })),
+    webAccess: p.webAccess,
   }
 }
