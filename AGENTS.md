@@ -7,7 +7,7 @@ Guidance for AI agents (and humans) working in this repo.
 Run all three before claiming work is done. All must pass.
 
 ```powershell
-npm test           # vitest run — 1,984 cases; see the platform split below
+npm test           # vitest run — 1,993 cases; see the platform split below
 npm run typecheck  # tsc --noEmit — expect exit 0, no output
 npm run web:build  # vite build — expect exit 0
 ```
@@ -18,7 +18,7 @@ CI (`.github/workflows/ci.yml`) runs the same three gates on Ubuntu with Node 24
 - 8 are the file-symlink cases in `test/runtime/workspace-links.test.ts`. Creating a file symlink on Windows needs SeCreateSymbolicLink (Developer Mode or admin); without it the probe gets EPERM and those 8 skip. Directory-junction coverage runs regardless. On Linux they RUN — if they skip there, the capability probe is broken, not the platform.
 - `test/runtime/opencode/server.test.ts` has one POSIX-only termination test (skipped on win32) and five win32-only taskkill tests (skipped on POSIX).
 - `test/runtime/claude-code/process.test.ts` has three POSIX-only local-launch tests (a shebang fake CLI, process groups) and `test/runtime/chatgpt-oauth.test.ts` one POSIX-only read-only-file test; all four skip on win32.
-- Baseline at 2026-11-15 (phase 8 integrated: collaboration, connectors, web tools, subscriptions), 1,984 total cases on every platform: **Linux and macOS 1,968 passed / 16 skipped; Windows (not re-measured) 1,960 passed / 24 skipped.** (macOS measured on Node 26; Linux has the same POSIX-only skips and CI checks it; the Windows figure is the 2026-09-21 measurement plus the platform-neutral cases since and the four POSIX-only cases above.) If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
+- Baseline at 2026-11-15 (phase 8 integrated: collaboration, connectors, web tools, subscriptions; plus the pinned host OpenCode and the OpenCode 2 credential bridge), 1,993 total cases on every platform: **Linux and macOS 1,977 passed / 16 skipped; Windows (not re-measured) 1,969 passed / 24 skipped.** (macOS measured on Node 26; Linux has the same POSIX-only skips and CI checks it; the Windows figure is the 2026-09-21 measurement plus the platform-neutral cases since and the four POSIX-only cases above.) If the total changes without a test being added or removed, a test silently stopped being collected. If passed drops, you broke something.
 - There is no separate lint script — `typecheck` is the type gate.
 
 ## Stack
@@ -69,7 +69,8 @@ Or double-click `Start Agent Tournament.cmd` in the project root. No flags are n
 
 - data in `runs/dashboard.db`, so runs persist across restarts (`--db :memory:` for a throwaway session);
 - workspaces in `runs/workspaces`;
-- credentials from `~/.local/share/opencode/auth.json` when that file exists (honours `XDG_DATA_HOME`).
+- credentials from `~/.local/share/opencode/auth.json` when that file exists (honours `XDG_DATA_HOME`); otherwise, when an OpenCode 2.x CLI is installed (`ARENA_OPENCODE2_BIN`, `opencode` on PATH, or the macOS app), its active API keys from `opencode auth export`, written owner-only to `runs/secrets/opencode/opencode/auth.json` at each start (OAuth logins are not copied);
+- the host's OpenCode is the pinned `opencode-ai` dependency (`PINNED_OPENCODE_VERSION` in `src/runtime/opencode/pinned.ts`, the same 1.18.21 as `docker/Dockerfile.agent`), never the machine's own OpenCode: 2.x dropped the per-prompt model, system prompt and JSON-schema output this client relies on. With bridged credentials it runs with `runs/secrets/opencode` as its data home, apart from OpenCode 2's data.
 - subscriptions: a pasted `claude setup-token` value in `runs/secrets/claude-subscription.json` (0600; never in SQLite, exports, logs or argv), else the host's own `claude auth login` for local runs; ChatGPT Plus/Pro through OpenCode's login in `auth.json`. Design and verified CLI facts: `docs/superpowers/specs/2026-11-15-subscription-runs-design.md`. Never call api.anthropic.com with a subscription token from app code, never hand it to OpenCode, and never let the relay hold, match or inject it: protected Claude agents hold it in their own `claude` process and leave through the gateway CONNECT route to `api.anthropic.com:443` (Anthropic's terms forbid intermediating it).
 
 Every default has a flag (`--port`, `--host`, `--db`, `--workspace-root`, `--auth-file`, `--server-url`, `--population`, `--no-open`, `--no-docker-sandbox`, `--docker-reach`, `--connectors-dir`), passed after `--`. Connectors and their credentials are in `runs/connectors` (owner-only files), never in the database. Launching while it is already running opens the running instance instead of failing, and does so before touching the database — a second instance's startup recovery would otherwise mark the first one's in-flight round failed.

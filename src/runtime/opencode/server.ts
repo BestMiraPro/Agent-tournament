@@ -1,6 +1,7 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { WEB_KEY_ENV } from '../../connectors/web/config.js'
 import { OpenCodeClient } from './client.js'
+import { hostOpencode } from './pinned.js'
 
 /** The server prints `opencode server listening on http://127.0.0.1:<port>` on startup. */
 export function parseServerPort(line: string): number | null {
@@ -191,12 +192,14 @@ function stopChild(child: ChildProcess): Promise<void> {
 
 export async function startServer(opts: StartServerOptions = {}): Promise<ServerHandle> {
   const port = opts.port ?? 0
-  const command = opts.command ?? 'opencode'
+  // The pinned 1.x CLI (see pinned.ts), with whatever the dashboard configured for it.
+  const host = hostOpencode()
+  const command = opts.command ?? host.command
   const args = opts.args ?? ['serve', '--hostname', '127.0.0.1', '--port', String(port)]
   const startupTimeoutMs = opts.startupTimeoutMs ?? 30_000
   const spawnFn = opts.spawnFn ?? spawn
 
-  const env = { ...process.env, ...opts.env }
+  const env = { ...process.env, ...host.env, ...opts.env }
   // Our client never sends Basic auth, so an inherited server-auth env can only
   // 401 our own loopback plumbing: a shell leaking both vars makes every spawned
   // server demand credentials our client does not have. Scrub them from the copy.

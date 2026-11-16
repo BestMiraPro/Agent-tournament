@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { bridgeCredentials, opencode2Candidates } from '../runtime/opencode/credential-bridge.js'
+import { configureHostOpencode } from '../runtime/opencode/pinned.js'
 import { createDashboard } from './create-dashboard.js'
 import { openBrowser, probeDashboard } from './open-browser.js'
 import { resolveStartOptions, type StartOptions } from './start-options.js'
@@ -41,8 +43,25 @@ if (await probeDashboard(url)) {
   await start(options)
 }
 
+/**
+ * No OpenCode 1.x auth.json: borrow the API keys from an installed OpenCode 2.x, written as a
+ * private auth.json the pinned host server and Docker runs can use.
+ */
+async function bridgeOpencode2Credentials(o: StartOptions): Promise<void> {
+  if (o.authFile) return
+  const dataHome = join(projectRoot, 'runs', 'secrets', 'opencode')
+  const bridged = await bridgeCredentials({ dataHome, candidates: opencode2Candidates(process.env) }).catch(() => null)
+  if (!bridged) return
+  o.authFile = bridged.authFile
+  // The pinned server keeps its own data here, apart from OpenCode 2's.
+  configureHostOpencode({ env: { XDG_DATA_HOME: dataHome } })
+  console.log(`  credentials from OpenCode 2: ${bridged.integrations.join(', ')}`)
+  if (bridged.skipped.length) console.log(`  not carried over: ${bridged.skipped.join(', ')}`)
+}
+
 async function start(o: StartOptions): Promise<void> {
   if (o.dbPath !== ':memory:') mkdirSync(dirname(o.dbPath), { recursive: true })
+  await bridgeOpencode2Credentials(o)
 
   const dashboard = createDashboard({
     dbPath: o.dbPath,
