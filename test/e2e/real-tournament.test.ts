@@ -26,7 +26,7 @@ d('real tournament (ARENA_E2E=1)', () => {
       workspaceRoot: workspace,
       workerModels: ['opencode/big-pickle'],
       judgeModel: 'wandb/zai-org/GLM-5.2',
-      reflectModel: 'wandb/deepseek-ai/DeepSeek-V4-Flash',
+      reflectModel: 'wandb/deepseek-ai/DeepSeek-V4-Flash-0731',
     })
 
     expect(out.rounds).toHaveLength(2)

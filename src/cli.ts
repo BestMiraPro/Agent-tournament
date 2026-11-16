@@ -212,7 +212,7 @@ export interface CliOutput {
 // validation in `validateRosterModels` below is the real backstop either way.
 const DEFAULT_REAL_WORKER_MODEL = 'opencode/big-pickle'
 const DEFAULT_REAL_JUDGE_MODEL = 'wandb/zai-org/GLM-5.2'
-const DEFAULT_REAL_REFLECT_MODEL = 'wandb/deepseek-ai/DeepSeek-V4-Flash'
+const DEFAULT_REAL_REFLECT_MODEL = 'wandb/deepseek-ai/DeepSeek-V4-Flash-0731'
 
 /** Spreads `population` agents as evenly as possible across the given model ids. */
 function buildRoster(modelIds: string[], population: number, temperature: number): RosterEntry[] {

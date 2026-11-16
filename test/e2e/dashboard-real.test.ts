@@ -26,9 +26,9 @@ import { createDashboard } from '../../src/server/create-dashboard.js'
 const ENABLED = process.env.ARENA_DASHBOARD_E2E === '1'
 const d = describe.skipIf(!ENABLED)
 
-const WORKER = process.env.ARENA_E2E_WORKER ?? 'wandb/deepseek-ai/DeepSeek-V4-Flash'
+const WORKER = process.env.ARENA_E2E_WORKER ?? 'wandb/deepseek-ai/DeepSeek-V4-Flash-0731'
 const JUDGE = process.env.ARENA_E2E_JUDGE ?? 'wandb/zai-org/GLM-5.2'
-const REFLECT = process.env.ARENA_E2E_REFLECT ?? 'wandb/deepseek-ai/DeepSeek-V4-Flash'
+const REFLECT = process.env.ARENA_E2E_REFLECT ?? 'wandb/deepseek-ai/DeepSeek-V4-Flash-0731'
 const GOAL = 'Write a single clear sentence defining what a tournament is.'
 
 let workspace = ''

@@ -51,9 +51,9 @@ d('docker tournament (ARENA_DOCKER_E2E=1)', () => {
       sandbox: 'docker',
       workspaceRoot: workspace,
       authFile: AUTH_FILE,
-      workerModels: ['wandb/deepseek-ai/DeepSeek-V4-Flash'],
+      workerModels: ['wandb/deepseek-ai/DeepSeek-V4-Flash-0731'],
       judgeModel: 'wandb/zai-org/GLM-5.2',
-      reflectModel: 'wandb/deepseek-ai/DeepSeek-V4-Flash',
+      reflectModel: 'wandb/deepseek-ai/DeepSeek-V4-Flash-0731',
     })
     expect(out.rounds).toHaveLength(1)
     expect(out.rounds[0]!.meanScore).toBeGreaterThan(0)

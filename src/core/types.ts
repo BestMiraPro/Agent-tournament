@@ -229,7 +229,7 @@ export const DEFAULT_CONFIG: RunConfig = {
     anonymize: true,
   },
   reflect: {
-    modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash',
+    modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash-0731',
     topK: 5,
     strategyCharCap: 2000,
     allowModelMutation: true,
