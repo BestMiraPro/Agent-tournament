@@ -82,6 +82,17 @@ export function ConnectorPicker({ choices, state, disabled, onChange }: {
 }
 
 /** Which search provider the web tools would use: the primary with its key, or the Exa fallback. */
+/** Shown when the local sandbox is picked: what running agents as the operator means. */
+export function LocalRunCaution() {
+  return (
+    <p className="caution" role="note">
+      Local agents run as you on this computer. Their commands can read and change anything your account can,
+      your home folder included, and what they read goes to their model provider. Use docker for work you
+      would not hand to a stranger.
+    </p>
+  )
+}
+
 export function WebSearchStatusLine({ status }: { status: WebSearchStatus | null }) {
   if (!status) return <p className="help">Search provider: could not be read from the server.</p>
   const exa = status.fallback.mode === 'keyed' ? 'Exa with your key' : 'Exa without a key'
@@ -304,6 +315,7 @@ export function RunSetup({ busy, error, onCreate }: {
           <option value="docker">docker (isolated containers)</option>
         </select>
         <p className="help">Where agents run — mock is free, local and docker run real agents.</p>
+        {sandbox === 'local' && <LocalRunCaution />}
         {needsPaths && (
           <>
             <label htmlFor="setup-root">Workspace root</label>

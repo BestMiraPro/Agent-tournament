@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, test } from 'vitest'
-import { DockerPlacementSummary, RunSetup, WebSearchStatusLine } from '../../web/src/components/RunSetup.js'
+import { DockerPlacementSummary, LocalRunCaution, RunSetup, WebSearchStatusLine } from '../../web/src/components/RunSetup.js'
 
 describe('docker placement choice', () => {
   test('the docker settings offer protected or shared isolation, and App sends the choice', () => {
@@ -85,5 +85,18 @@ describe('web access', () => {
     expect(line({ primary: { id: 'langsearch', name: 'LangSearch', configured: false }, fallback: { id: 'exa', name: 'Exa', mode: 'keyed' } }))
       .toContain('Exa with your key only — set LANGSEARCH_API_KEY for LangSearch')
     expect(line(null)).toContain('could not be read')
+  })
+})
+
+describe('local sandbox caution', () => {
+  test('says local agents run as the operator and points to docker', () => {
+    const html = renderToStaticMarkup(createElement(LocalRunCaution))
+    expect(html).toContain('Local agents run as you on this computer')
+    expect(html).toContain('your home folder included')
+    expect(html).toContain('Use docker')
+  })
+
+  test('is not shown for the default mock sandbox', () => {
+    expect(renderToStaticMarkup(createElement(RunSetup, { busy: false, error: null, onCreate: () => {} }))).not.toContain('Local agents run as you')
   })
 })

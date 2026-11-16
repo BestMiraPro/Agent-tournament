@@ -49,6 +49,8 @@ npm run tournament -- `
 
 Requires opencode `auth.json` at `~/.local/share/opencode/auth.json`. The CLI starts an opencode server, spawns agents as host processes against it, and runs rounds sequentially.
 
+**Local agents run as you.** Their shell commands can read and change anything your account can, your home folder included, and what they read is sent to their model provider. Profile rules keep their file tools inside the workspace, but a shell command is not confined. Use the docker sandbox for anything you would not hand to a stranger; the setup form says so when you pick local.
+
 ## Real mode (docker — agents in containers)
 
 ```powershell
