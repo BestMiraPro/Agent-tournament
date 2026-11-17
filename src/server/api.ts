@@ -12,7 +12,7 @@ import { runConfigFor, type ComposedRun, type RunIdHolder, type ShardServerEvent
 import { startEventBridge, type BridgeHandle } from './event-bridge.js'
 import { disposeRunRecord, type RunRecord, type RunRegistry } from './runs.js'
 import { strategyDiversity } from '../core/analytics.js'
-import { parseRunSpec, type RunSpec } from './run-spec.js'
+import { assertDockerCredentials, parseRunSpec, type RunSpec } from './run-spec.js'
 import { buildRunSnapshot } from './state.js'
 import { RunManager } from './run-manager.js'
 import { startServer, type ServerHandle } from '../runtime/opencode/server.js'
@@ -189,8 +189,8 @@ export function specForResume(run: RunRow, defaults?: SpecDefaults): RunSpec {
   if (cfg.sandbox === 'docker' && !workspaceRoot) {
     throw new Error('docker sandbox requires workspaceRoot')
   }
-  if (cfg.sandbox === 'docker' && !authFile) {
-    throw new Error('docker sandbox requires authFile')
+  if (cfg.sandbox === 'docker') {
+    assertDockerCredentials(authFile, [...cfg.roster.map((r) => r.modelId), cfg.judge.modelId, cfg.reflect.modelId])
   }
   if (cfg.sandbox === 'local' && !workspaceRoot) {
     throw new Error('local sandbox requires workspaceRoot')

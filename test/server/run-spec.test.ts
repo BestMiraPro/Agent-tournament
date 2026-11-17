@@ -134,6 +134,25 @@ describe('parseRunSpec', () => {
     ).toThrow(/authFile/i)
   })
 
+  test('docker on Claude subscription models alone needs no authFile', () => {
+    const spec = parseRunSpec({
+      ...base, sandbox: 'docker', workspaceRoot: '/tmp/w',
+      roster: [{ modelId: 'claude-subscription/sonnet', count: 2, temperature: 0.7 }],
+      judge: { modelId: 'claude-subscription/sonnet' },
+      reflect: { modelId: 'claude-subscription/haiku' },
+    })
+    expect(spec.authFile).toBeNull()
+  })
+
+  test('a Claude roster with the default judge and reflector still needs authFile, and the refusal names them', () => {
+    expect(() =>
+      parseRunSpec({
+        ...base, sandbox: 'docker', workspaceRoot: '/tmp/w',
+        roster: [{ modelId: 'claude-subscription/sonnet', count: 2, temperature: 0.7 }],
+      }),
+    ).toThrow(`docker sandbox requires authFile (an OpenCode login) for ${DEFAULT_CONFIG.judge.modelId}, ${DEFAULT_CONFIG.reflect.modelId};`)
+  })
+
   test('local requires a workspaceRoot', () => {
     expect(() => parseRunSpec({ ...base, sandbox: 'local' })).toThrow(/workspaceRoot/i)
   })

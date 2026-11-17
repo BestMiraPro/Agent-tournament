@@ -33,7 +33,7 @@ import { validateModel, summarizeValidation, type ModelRole } from './runtime/op
 import { OpenCodeClient } from './runtime/opencode/client.js'
 import { type ServerHandle } from './runtime/opencode/server.js'
 import { composeRun } from './server/compose-run.js'
-import type { RunSpec } from './server/run-spec.js'
+import { modelsNeedingCredentials, type RunSpec } from './server/run-spec.js'
 import type { EventSink } from './engine/events.js'
 import type { ConnectorEvent } from './connectors/bridge.js'
 import { isClaudeSubscriptionModel } from './runtime/claude-code/model-id.js'
@@ -64,7 +64,7 @@ export interface CliOptions {
   /**
    * Host path to an opencode `auth.json`, bind-mounted read-only into every agent
    * container. Docker mode only. Without it the containers have no provider
-   * credentials, so every agent fails on its first model call.
+   * credentials, so every OpenCode agent fails on its first model call.
    */
   authFile?: string
   serverUrl?: string
@@ -565,10 +565,11 @@ async function buildRealDeps(
   // pending-timestamp name against a run it knows is alive. Passing the holder also
   // suppresses composeRun's own pending-id sweep, which is what this path wants — the CLI
   // sweeps itself after createRun, with the live id to exclude.
-  if (config.sandbox === 'docker' && !opts.authFile) {
+  const needingCredentials = modelsNeedingCredentials([...config.roster.map((r) => r.modelId), config.judge.modelId, config.reflect.modelId])
+  if (config.sandbox === 'docker' && !opts.authFile && needingCredentials.length > 0) {
     console.warn(
-      'docker sandbox: no --auth-file given, so agent containers start without provider ' +
-        'credentials and every agent will fail on its first model call.',
+      `docker sandbox: no --auth-file given, so ${needingCredentials.join(', ')} start without provider ` +
+        'credentials and will fail on their first model call.',
     )
   }
   const composed = await composeRun(

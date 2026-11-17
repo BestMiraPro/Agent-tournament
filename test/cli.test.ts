@@ -270,6 +270,29 @@ describe('CLI host-capacity preflight', () => {
       ),
     ).rejects.toThrow(/docker sandbox: Requested/i)
   })
+
+  test('without --auth-file the CLI warns only about the models that run through OpenCode', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // Refused later (capacity, or the Claude preflight); the warning comes first either way.
+      await expect(
+        runTournamentCli(
+          {
+            goal: 'g', rounds: 1, population: 2, seed: 1,
+            dbPath: ':memory:', criteria: null, mode: 'real', sandbox: 'docker',
+            workspaceRoot: '/tmp/does-not-need-to-exist', workflow: 'tournament', workerModels: ['claude-subscription/sonnet'],
+          },
+          { readCapacity: async () => cramped, sweep: async () => [] },
+        ),
+      ).rejects.toThrow()
+      const line = warn.mock.calls.map(([m]) => String(m)).find((m) => m.includes('no --auth-file given'))
+      expect(line).toBe(
+        'docker sandbox: no --auth-file given, so wandb/zai-org/GLM-5.2, wandb/deepseek-ai/DeepSeek-V4-Flash-0731 start without provider credentials and will fail on their first model call.',
+      )
+    } finally {
+      warn.mockRestore()
+    }
+  })
 })
 
 describe('CLI orphan sweep', () => {

@@ -44,6 +44,19 @@ describe('specForResume', () => {
     expect(specForResume(repos.runs.get(on.id)!, defaults).webAccess).toBe(true)
     expect(specForResume(repos.runs.get(before.id)!, defaults).webAccess).toBe(false)
   })
+
+  test('a docker run resumes without a credentials file only when every model is a Claude subscription', () => {
+    const repos = makeRepos(openDb(':memory:'))
+    const claude = 'claude-subscription/sonnet'
+    const config = { ...DEFAULT_CONFIG, sandbox: 'docker' as const, populationSize: 1, roster: [{ modelId: claude, count: 1, temperature: 0.7 }] }
+    const claudeOnly = repos.runs.create({
+      name: 'c', config: { ...config, judge: { ...config.judge, modelId: claude }, reflect: { ...config.reflect, modelId: claude } }, seedDir: null,
+    })
+    const defaultGraders = repos.runs.create({ name: 'g', config, seedDir: null })
+    const defaults = { workspaceRoot: '/tmp/w', authFile: null, serverUrl: null }
+    expect(specForResume(repos.runs.get(claudeOnly.id)!, defaults).authFile).toBeNull()
+    expect(() => specForResume(repos.runs.get(defaultGraders.id)!, defaults)).toThrow(`requires authFile (an OpenCode login) for ${DEFAULT_CONFIG.judge.modelId}`)
+  })
 })
 
 describe('budget recovery', () => {

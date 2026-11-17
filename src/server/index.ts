@@ -112,7 +112,7 @@ async function start(o: StartOptions): Promise<void> {
   console.log(
     `  credentials  ${o.authFile ?? (o.opencodeDataHome
       ? `none in this data dir (sign in with: XDG_DATA_HOME="${o.opencodeDataHome}" npx opencode auth login)`
-      : 'none found (docker runs will be refused; run `opencode auth login`)')}`,
+      : 'none found (docker runs need it unless every model is a Claude subscription; run `opencode auth login`)')}`,
   )
   if (o.claudeTokenFile) console.log(`  claude       ${o.claudeTokenFile} (setup token only; this machine's own Claude login is not used)`)
   if (!o.dockerSandbox) console.log('  docker runs  off (--no-docker-sandbox)')

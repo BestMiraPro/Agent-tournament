@@ -123,12 +123,28 @@ export interface RunSpec {
 }
 
 /**
+ * A docker run's models other than Claude subscription ones run through OpenCode and need its
+ * credentials file; a Claude agent's unmodified CLI holds the setup token itself.
+ */
+export function modelsNeedingCredentials(modelIds: readonly string[]): string[] {
+  return [...new Set(modelIds.filter((m) => !isClaudeSubscriptionModel(m)))]
+}
+
+export function assertDockerCredentials(authFile: string | null, modelIds: readonly string[]): void {
+  if (authFile) return
+  const needing = modelsNeedingCredentials(modelIds)
+  if (needing.length > 0) {
+    throw new Error(`docker sandbox requires authFile (an OpenCode login) for ${needing.join(', ')}; only Claude subscription models run without one`)
+  }
+}
+
+/**
  * Parse and cross-validate a run-spec. Field shapes come from Zod;
  * cross-field rules live here so both the API and the web client share them.
- * Docker refuses without workspaceRoot AND authFile: containers without
- * credentials fail every agent on its first model call, so accepting the
- * spec would burn setup time for a run that cannot score. (The CLI only
- * warns here; the server refuses — spending through an API needs the guard.)
+ * Docker refuses without workspaceRoot, and without authFile when any model
+ * runs through OpenCode: those agents fail on their first model call, so
+ * accepting the spec would burn setup time for a run that cannot score. (The
+ * CLI only warns here; the server refuses — spending through an API needs the guard.)
  */
 export function parseRunSpec(input: unknown): RunSpec {
   const p = schema.parse(input)
@@ -141,8 +157,12 @@ export function parseRunSpec(input: unknown): RunSpec {
   if (p.sandbox === 'docker' && !p.workspaceRoot) {
     throw new Error('docker sandbox requires workspaceRoot')
   }
-  if (p.sandbox === 'docker' && !p.authFile) {
-    throw new Error('docker sandbox requires authFile')
+  if (p.sandbox === 'docker') {
+    assertDockerCredentials(p.authFile, [
+      ...p.roster.map((r) => r.modelId),
+      p.judge.modelId ?? DEFAULT_CONFIG.judge.modelId,
+      p.reflect.modelId ?? DEFAULT_CONFIG.reflect.modelId,
+    ])
   }
   if (p.sandbox === 'local' && !p.workspaceRoot) {
     throw new Error('local sandbox requires workspaceRoot')

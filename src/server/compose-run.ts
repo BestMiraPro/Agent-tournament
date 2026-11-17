@@ -285,9 +285,6 @@ async function planRelay(spec: RunSpec, config: RunConfig, s: ComposeSeams): Pro
         'Run OpenCode once on this machine so it caches the catalogue, or choose shared isolation.',
     )
   }
-  if (!spec.authFile) {
-    throw new Error('Protected isolation needs a credentials file for the relay. Set "Credentials file", or choose shared isolation.')
-  }
   const read = async (path: string, what: string): Promise<string> => {
     try {
       return await s.readTextFile(path)
@@ -307,6 +304,10 @@ async function planRelay(spec: RunSpec, config: RunConfig, s: ComposeSeams): Pro
   // Claude Code for a user's own subscription, not intermediating the credential). Only OpenCode's
   // providers are relayed.
   const providers = [...new Set(config.roster.map((r) => providerOf(r.modelId)))].filter((p) => p !== CLAUDE_SUBSCRIPTION_PROVIDER)
+  if (providers.length === 0) return { upstreams: [], providers, catalogJson }
+  if (!spec.authFile) {
+    throw new Error('Protected isolation needs a credentials file for the relay. Set "Credentials file", or choose shared isolation.')
+  }
   const { upstreams, unsupported } = relayUpstreamsFromAuth(await read(spec.authFile, 'credentials file'), catalog, providers, {
     chatgpt: s.subscriptions.chatGptLogin(spec.authFile),
   })
