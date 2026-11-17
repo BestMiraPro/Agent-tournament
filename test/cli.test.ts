@@ -287,7 +287,7 @@ describe('CLI host-capacity preflight', () => {
       ).rejects.toThrow()
       const line = warn.mock.calls.map(([m]) => String(m)).find((m) => m.includes('no --auth-file given'))
       expect(line).toBe(
-        'docker sandbox: no --auth-file given, so wandb/zai-org/GLM-5.2, wandb/deepseek-ai/DeepSeek-V4-Flash-0731 start without provider credentials and will fail on their first model call.',
+        'docker sandbox: no --auth-file given, so wandb/zai-org/GLM-5.3, wandb/deepseek-ai/DeepSeek-V4.1-Flash-1017 start without provider credentials and will fail on their first model call.',
       )
     } finally {
       warn.mockRestore()

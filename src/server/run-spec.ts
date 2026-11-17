@@ -52,6 +52,8 @@ const schema = z.object({
   // agent is told to wrap up. The upper bound (a week) is a typo-guard.
   agentTimeoutMinutes: z.number().positive().max(10_080).nullable().optional(),
   agentSteerAfterMinutes: z.number().positive().max(10_080).nullable().optional(),
+  // Minutes without any request about the run after which it stops itself (null or absent: never).
+  leaseMinutes: z.number().positive().max(10_080).nullable().optional(),
   // Container sizing for the docker sandbox; mock and local ignore it. In the spec because
   // the capacity preflight refuses a run by telling the operator to change exactly these,
   // and before they were here nothing created from the dashboard could.
@@ -101,6 +103,8 @@ export interface RunSpec {
   agentTimeoutMs?: number
   /** When a still-working agent is told to wrap up, in ms. Absent means the app default. */
   agentSteerAfterMs?: number
+  /** See RunConfig.leaseMs. */
+  leaseMs?: number
   maxContainers: number
   containerMemory: string
   containerCpus: number
@@ -258,6 +262,7 @@ export function parseRunSpec(input: unknown): RunSpec {
     concurrency: p.concurrency ?? DEFAULT_CONFIG.concurrency,
     agentTimeoutMs: p.agentTimeoutMinutes ? p.agentTimeoutMinutes * 60_000 : DEFAULT_CONFIG.agentTimeoutMs,
     agentSteerAfterMs: p.agentSteerAfterMinutes ? p.agentSteerAfterMinutes * 60_000 : DEFAULT_CONFIG.agentSteerAfterMs,
+    ...(p.leaseMinutes ? { leaseMs: p.leaseMinutes * 60_000 } : {}),
     maxContainers,
     containerMemory,
     containerCpus: p.containerCpus ?? DEFAULT_CONFIG.containerCpus,

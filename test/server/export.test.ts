@@ -163,7 +163,8 @@ describe('buildMarkdownReport', () => {
     expect(md).toContain(`- Run: ${run.id}`)
     expect(md).toContain('- Goal: goal 2')
     expect(md).toContain('- Population: 2, rounds scored: 2')
-    expect(md).toContain('- Worker usage: 400 tokens in, 200 tokens out, $0.0400')
+    // Cached input is input: 400 uncached + 20 read from cache + 28 written to it.
+    expect(md).toContain('- Worker usage: 448 tokens in (20 read from cache, 28 written to cache), 200 tokens out, $0.0400')
   })
 
   test('has one leaderboard row per scored round', () => {

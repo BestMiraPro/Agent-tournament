@@ -133,6 +133,11 @@ export interface RunConfig {
    * in local and docker runs; absent means off — configs from before the toggle ran without them.
    */
   webAccess?: boolean
+  /**
+   * In ms: once nobody has asked the dashboard about the run for this long, it aborts the round in
+   * flight and stops, so a coordinator that crashed leaves no workers spending. Absent: no lease.
+   */
+  leaseMs?: number
   roster: RosterEntry[]
   judge: {
     modelId: string
@@ -229,7 +234,7 @@ export const DEFAULT_CONFIG: RunConfig = {
     { modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash', count: 5, temperature: 0.7 },
   ],
   judge: {
-    modelId: 'wandb/zai-org/GLM-5.2',
+    modelId: 'wandb/zai-org/GLM-5.3',
     mode: 'auto',
     singleCallMaxPopulation: 25,
     batchSize: 5,
@@ -238,7 +243,7 @@ export const DEFAULT_CONFIG: RunConfig = {
     anonymize: true,
   },
   reflect: {
-    modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash-0731',
+    modelId: 'wandb/deepseek-ai/DeepSeek-V4.1-Flash-1017',
     topK: 5,
     strategyCharCap: 2000,
     allowModelMutation: true,

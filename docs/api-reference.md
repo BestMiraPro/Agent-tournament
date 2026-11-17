@@ -50,6 +50,8 @@ Body: a partial of `{ roster, budget, judge, selection, concurrency, pricing }` 
 - `202` `{ stopped: true }` — cooperative: queued agents stop, in-flight sessions finish.
 - `404` / `409` (already stopped).
 
+A run created with `leaseMinutes` (in the create spec; kept in its config and on resume) stops itself once no request about it (`/api/runs/:id` or anything under it) has arrived for that many minutes: the round in flight is aborted, then the run is stopped as above. Use it when a coordinator drives the run, so a coordinator that crashes leaves no workers spending; poll more often than the lease.
+
 ## Connectors
 
 Connectors and their credentials live in the dashboard's connector store (`--connectors-dir`). No response ever contains a credential value: views list which secrets are set (`secretsSet`), never what they are.

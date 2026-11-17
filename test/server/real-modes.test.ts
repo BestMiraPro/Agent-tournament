@@ -813,6 +813,65 @@ describe('real-mode wiring', () => {
     expect(disposeRunRecord).toHaveBeenCalledTimes(1)
   })
 
+  describe('run lease', () => {
+    const leased = (config: typeof DEFAULT_CONFIG) => {
+      const repos = makeRepos(openDb(':memory:'))
+      const registry = new RunRegistry()
+      const row = repos.runs.create({ name: 'r', config, seedDir: null })
+      const abortRound = vi.fn(() => true)
+      registry.set({
+        runId: row.id, spec: {} as never, engine: {} as never,
+        manager: { isBusy: () => true, lastError: () => null, startRound: () => {}, abortRound } as never,
+        composed: {} as never, bridges: [], warnings: [], capacity: null,
+      } as never)
+      const app = buildApi({
+        repos,
+        manager: { isBusy: () => false, lastError: () => null, startRound: () => {} } as never,
+        createRun: (() => { throw new Error('nope') }) as never,
+        registry,
+      } as never)
+      return { repos, registry, row, abortRound, app }
+    }
+
+    test('a leased run nobody asks about aborts its round and stops; each request about it pushes that back', async () => {
+      vi.clearAllMocks()
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const { repos, registry, row, abortRound, app } = leased({ ...DEFAULT_CONFIG, leaseMs: 60_000 })
+        await app.inject({ method: 'GET', url: `/api/runs/${row.id}` })
+        await vi.advanceTimersByTimeAsync(50_000)
+        await app.inject({ method: 'GET', url: `/api/runs/${row.id}/rounds` })
+        await vi.advanceTimersByTimeAsync(50_000)
+        expect(abortRound).not.toHaveBeenCalled()
+        expect(repos.runs.get(row.id)!.status).toBe('active')
+
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect(abortRound).toHaveBeenCalledWith(row.id)
+        expect(repos.runs.get(row.id)!.status).toBe('stopped')
+        expect(disposeRunRecord).toHaveBeenCalledTimes(1)
+        expect(registry.size).toBe(0)
+        await app.close()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    test('a run without a lease is never stopped for silence', async () => {
+      vi.clearAllMocks()
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const { repos, row, abortRound, app } = leased(DEFAULT_CONFIG)
+        await app.inject({ method: 'GET', url: `/api/runs/${row.id}` })
+        await vi.advanceTimersByTimeAsync(7 * 24 * 60 * 60_000)
+        expect(abortRound).not.toHaveBeenCalled()
+        expect(repos.runs.get(row.id)!.status).toBe('active')
+        await app.close()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
   test('DELETE /api/runs/:id 404s for a run with no db row', async () => {
     vi.clearAllMocks()
     const db = openDb(':memory:')
