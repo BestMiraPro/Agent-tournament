@@ -120,6 +120,10 @@ export function buildMarkdownReport(runId: string, repos: Repos): string | null 
     .filter((r) => r.scores.length > 0)
   const subs = rounds.flatMap((round) => repos.submissions.forRound(round.id))
   const sum = (pick: (s: (typeof subs)[number]) => number): number => subs.reduce((n, s) => n + pick(s), 0)
+  // Providers report cached input apart from the rest; it is input all the same, and usually most of it.
+  const cacheRead = sum((s) => s.tokensCacheRead)
+  const cacheWrite = sum((s) => s.tokensCacheWrite)
+  const cached = [cacheRead > 0 && `${cacheRead} read from cache`, cacheWrite > 0 && `${cacheWrite} written to cache`].filter(Boolean)
 
   const out = [
     `# Tournament report: ${run.name}`,
@@ -129,7 +133,8 @@ export function buildMarkdownReport(runId: string, repos: Repos): string | null 
     `- Sandbox: ${run.config.sandbox}`,
     `- Population: ${agents.length}, rounds scored: ${scored.length}`,
     `- Judge: ${run.config.judge.modelId}, reflector: ${run.config.reflect.modelId}`,
-    `- Worker usage: ${sum((s) => s.tokensIn)} tokens in, ${sum((s) => s.tokensOut)} tokens out, $${sum((s) => s.costUsd).toFixed(4)}`,
+    `- Worker usage: ${sum((s) => s.tokensIn) + cacheRead + cacheWrite} tokens in${cached.length > 0 ? ` (${cached.join(', ')})` : ''}, ` +
+      `${sum((s) => s.tokensOut)} tokens out, $${sum((s) => s.costUsd).toFixed(4)}`,
     '',
   ]
   const last = scored.at(-1)
