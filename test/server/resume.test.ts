@@ -45,6 +45,14 @@ describe('specForResume', () => {
     expect(specForResume(repos.runs.get(before.id)!, defaults).webAccess).toBe(false)
   })
 
+  test('a lease resumes as stored', () => {
+    const repos = makeRepos(openDb(':memory:'))
+    const config = { ...DEFAULT_CONFIG, sandbox: 'local' as const, populationSize: 1, roster: [{ modelId: 'w/m', count: 1, temperature: 0.5 }] }
+    const leased = repos.runs.create({ name: 'l', config: { ...config, leaseMs: 600_000 }, seedDir: null })
+    const defaults = { workspaceRoot: '/tmp/w', authFile: null, serverUrl: null }
+    expect(specForResume(repos.runs.get(leased.id)!, defaults).leaseMs).toBe(600_000)
+  })
+
   test('a docker run resumes without a credentials file only when every model is a Claude subscription', () => {
     const repos = makeRepos(openDb(':memory:'))
     const claude = 'claude-subscription/sonnet'

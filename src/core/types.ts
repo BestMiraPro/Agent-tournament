@@ -133,6 +133,11 @@ export interface RunConfig {
    * in local and docker runs; absent means off — configs from before the toggle ran without them.
    */
   webAccess?: boolean
+  /**
+   * In ms: once nobody has asked the dashboard about the run for this long, it aborts the round in
+   * flight and stops, so a coordinator that crashed leaves no workers spending. Absent: no lease.
+   */
+  leaseMs?: number
   roster: RosterEntry[]
   judge: {
     modelId: string

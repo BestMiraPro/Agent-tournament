@@ -11,6 +11,7 @@ import { Judge, type JudgeInput, type JudgeOutput } from '../judge/judge.js'
 import { runConfigFor, type ComposedRun, type RunIdHolder, type ShardServerEvent } from './compose-run.js'
 import { startEventBridge, type BridgeHandle } from './event-bridge.js'
 import { disposeRunRecord, type RunRecord, type RunRegistry } from './runs.js'
+import { RunLeases } from './run-lease.js'
 import { strategyDiversity } from '../core/analytics.js'
 import { assertDockerCredentials, parseRunSpec, type RunSpec } from './run-spec.js'
 import { buildRunSnapshot } from './state.js'
@@ -227,6 +228,7 @@ export function specForResume(run: RunRow, defaults?: SpecDefaults): RunSpec {
     connectors: (cfg.connectors ?? []).map((c) => ({ id: c.id, writeTools: [...c.writeTools] })),
     // A config from before the toggle ran without web tools, and resumes that way.
     webAccess: cfg.webAccess === true,
+    ...(cfg.leaseMs ? { leaseMs: cfg.leaseMs } : {}),
   }
 }
 
@@ -432,6 +434,48 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
   if (deps.connectors) registerConnectorRoutes(app, deps.connectors)
 
   /**
+   * Stops a run: no new rounds, its resources torn down once its round ends. The stop is recorded
+   * BEFORE the graceful wait: that wait used to leave the row saying "active", so refusing a round
+   * that arrived meanwhile rested on an in-memory flag, and a crash mid-teardown left a run that
+   * looked runnable. Every route that checks `status === 'stopped'` now refuses for the right
+   * reason, and it survives a restart. This is not Abort: the round still finishes and is recorded.
+   */
+  async function stopRecord(id: string, record: RunRecord): Promise<void> {
+    leases.release(id)
+    deps.repos.runs.setStatus(id, 'stopped')
+    // Mirrors disposeRunRecord's never-throw contract: a stop must not 500.
+    try {
+      await disposeRunRecord(record)
+    } catch {
+      /* the run is torn down either way */
+    } finally {
+      // Only once its resources are gone. The orphan sweep another docker run starts protects
+      // exactly the runs in the registry, so leaving early exposed this run's containers,
+      // networks and tool files to deletion while its last round was still finishing.
+      deps.registry?.delete(id)
+    }
+  }
+
+  // A run created with a lease stops itself once nobody has asked about it for that long: a
+  // coordinator that crashed cannot stop it, and its workers would otherwise keep spending.
+  const leases = new RunLeases((id) => {
+    const record = deps.registry?.get(id)
+    if (!record || deps.repos.runs.get(id)?.status === 'stopped') return
+    record.manager.abortRound(id)
+    void stopRecord(id, record)
+  })
+  const holdLease = (id: string): void => {
+    const run = deps.repos.runs.get(id)
+    if (run?.config.leaseMs && run.status !== 'stopped' && deps.registry?.get(id)) leases.hold(id, run.config.leaseMs)
+  }
+  // Any request about a run renews its lease: polling its status, its rounds, its output.
+  app.addHook('onRequest', async (req) => {
+    const id = /^\/api\/runs\/([^/?]+)/.exec(req.url)?.[1]
+    if (id) holdLease(decodeURIComponent(id))
+  })
+  app.addHook('onClose', async () => leases.releaseAll())
+
+  /**
    * Model discovery, cached 60s on success only.
    *
    * Every miss starts an opencode server process, so an uncached setup screen would fork
@@ -547,6 +591,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         activity,
       }
       deps.registry?.set(record)
+      holdLease(runId)
       const lookupAgent = (sessionId: string): string | null =>
         composed.sessionMap.get(sessionId) ?? null
       // Bridge evidence reaches the durable audit before the evicting live cache.
@@ -1184,6 +1229,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         activity,
       }
       deps.registry.set(record)
+      holdLease(runId)
       const lookupAgent = (sessionId: string): string | null =>
         composed.sessionMap.get(sessionId) ?? null
       const bridgeEmit: EventSink = (e) => {
@@ -1399,31 +1445,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       // so disposing it would kill every legacy run — only per-run records stop.
       return reply.code(409).send({ error: 'run is not stoppable (created outside the dashboard)' })
     }
-    // Recorded BEFORE the graceful wait, not after it.
-    //
-    // Stop waits for the in-flight round against a still-alive sandbox rather than
-    // aborting it, and that wait used to leave the run row saying "active" with its
-    // registry record still present — so refusing a round that arrived meanwhile rested
-    // entirely on an in-memory flag inside the manager, and a crash mid-teardown left a
-    // run that looked perfectly runnable. Writing the stop first makes every route that
-    // already checks `status === 'stopped'` refuse for the right reason, and it survives
-    // a restart.
-    //
-    // This does not turn Stop into Abort: the round still runs to completion and its
-    // results are recorded. A run that is stopped while still busy IS the stopping state
-    // — no new rounds, one finishing — and it needs no new status value to say so.
-    deps.repos.runs.setStatus(id, 'stopped')
-    // Mirrors disposeRunRecord's never-throw contract: a stop must not 500.
-    try {
-      await disposeRunRecord(record)
-    } catch {
-      /* the run is torn down either way */
-    } finally {
-      // Only once its resources are gone. The orphan sweep another docker run starts protects
-      // exactly the runs in the registry, so leaving early exposed this run's containers,
-      // networks and tool files to deletion while its last round was still finishing.
-      registry?.delete(id)
-    }
+    // A run stopped while still busy IS the stopping state — no new rounds, one finishing —
+    // and needs no new status value to say so.
+    await stopRecord(id, record)
     return { stopped: true }
   })
 

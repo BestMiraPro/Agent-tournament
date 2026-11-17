@@ -134,6 +134,11 @@ describe('parseRunSpec', () => {
     ).toThrow(/authFile/i)
   })
 
+  test('a lease in minutes reaches the run config in ms; none means no lease', () => {
+    expect(runConfigFor(parseRunSpec({ ...base, leaseMinutes: 10 })).leaseMs).toBe(600_000)
+    expect('leaseMs' in runConfigFor(parseRunSpec(base))).toBe(false)
+  })
+
   test('docker on Claude subscription models alone needs no authFile', () => {
     const spec = parseRunSpec({
       ...base, sandbox: 'docker', workspaceRoot: '/tmp/w',

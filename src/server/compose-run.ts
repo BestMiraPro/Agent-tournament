@@ -463,6 +463,7 @@ export function runConfigFor(spec: RunSpec): RunConfig {
     concurrency: spec.concurrency ?? DEFAULT_CONFIG.concurrency,
     agentTimeoutMs: spec.agentTimeoutMs ?? DEFAULT_CONFIG.agentTimeoutMs,
     agentSteerAfterMs: spec.agentSteerAfterMs ?? DEFAULT_CONFIG.agentSteerAfterMs,
+    ...(spec.leaseMs ? { leaseMs: spec.leaseMs } : {}),
     maxContainers: spec.maxContainers ?? DEFAULT_CONFIG.maxContainers,
     containerMemory: spec.containerMemory ?? DEFAULT_CONFIG.containerMemory,
     containerCpus: spec.containerCpus ?? DEFAULT_CONFIG.containerCpus,
