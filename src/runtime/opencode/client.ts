@@ -34,6 +34,11 @@ export interface PromptResponse {
   parts?: PromptPart[]
 }
 
+/** One entry of `GET /session/:id/message`, as far as usage accounting reads it. */
+export interface SessionMessage {
+  info: { role?: string; cost?: number; tokens?: TokenUsage }
+}
+
 export interface PromptBody {
   model: OpenCodeModelRef
   /** Named agent profile; OpenCode uses its implicit `build` agent when absent. */
@@ -254,6 +259,11 @@ export class OpenCodeClient {
       body,
       timeoutMs,
     })
+  }
+
+  /** Every message of a session, oldest first: user prompts, and one assistant message per model call. */
+  async messages(sessionId: string, directory: string): Promise<SessionMessage[]> {
+    return this.request<SessionMessage[]>('GET', `/session/${sessionId}/message`, { directory, timeoutMs: 30_000 })
   }
 
   /**

@@ -5,7 +5,7 @@ import type { QuiesceStatus } from '../../engine/capture.js'
 import { deadlineTimer, type AgentRunContext, type AgentRunner, type AgentRunResult } from '../agent-runner.js'
 import type { AgentHandle, Sandbox } from '../sandbox.js'
 import { buildTeamPrompt, buildTeamSteeringPrompt } from '../team-prompt.js'
-import { OpenCodeTimeoutError, type OpenCodeClient } from './client.js'
+import { OpenCodeTimeoutError, type OpenCodeClient, type SessionMessage } from './client.js'
 import { splitModelId } from './model-id.js'
 import { OPENCODE_MCP_TIMEOUT_MS, PROJECT_CONFIG_FILE } from './mcp-config.js'
 import { PROVIDER_LIMIT_CODE, ProviderStuckError, watchRetries, type RetryWatch } from './retry-watch.js'
@@ -452,13 +452,11 @@ export class OpenCodeAgentRunner implements AgentRunner {
           retries.promise,
         ])
 
-        const t = res.info?.tokens
-        const usage = {
-          tokensIn: t?.input ?? 0,
-          tokensOut: t?.output ?? 0,
-          tokensCacheRead: t?.cache?.read ?? 0,
-          tokensCacheWrite: t?.cache?.write ?? 0,
-          costUsd: res.info?.cost ?? 0,
+        let usage = sessionUsage([{ info: { role: 'assistant', ...res.info } }])!
+        try {
+          usage = sessionUsage(await client.messages(session.id, handle.workspacePath)) ?? usage
+        } catch {
+          /* the reply's own usage stands: its last model call only, so a lower bound */
         }
 
         if (res.info?.error) {
@@ -543,6 +541,25 @@ interface LiveRun {
   localReturned: boolean
   stopped: Promise<void>
   settleStopped: () => void
+}
+
+/**
+ * A session's usage, summed over its assistant messages: OpenCode writes one per model call, and a
+ * prompt's reply is only the last of them. Taking the reply alone reported 461 input tokens and
+ * $0.03 for a three-agent collaboration round (agent-master e2e test, 16 November 2026). Null
+ * when the listing holds no assistant message.
+ */
+export function sessionUsage(messages: readonly SessionMessage[]): { tokensIn: number; tokensOut: number; tokensCacheRead: number; tokensCacheWrite: number; costUsd: number } | null {
+  const calls = messages.filter((m) => m?.info?.role === 'assistant')
+  if (calls.length === 0) return null
+  const sum = (pick: (m: SessionMessage) => number | undefined) => calls.reduce((n, m) => n + (pick(m) ?? 0), 0)
+  return {
+    tokensIn: sum((m) => m.info.tokens?.input),
+    tokensOut: sum((m) => m.info.tokens?.output),
+    tokensCacheRead: sum((m) => m.info.tokens?.cache?.read),
+    tokensCacheWrite: sum((m) => m.info.tokens?.cache?.write),
+    costUsd: sum((m) => m.info.cost),
+  }
 }
 
 /** Lexical aliases only; filesystem links are a separate sandbox responsibility. */
