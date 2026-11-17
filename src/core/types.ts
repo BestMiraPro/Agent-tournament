@@ -234,7 +234,7 @@ export const DEFAULT_CONFIG: RunConfig = {
     { modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash', count: 5, temperature: 0.7 },
   ],
   judge: {
-    modelId: 'wandb/zai-org/GLM-5.2',
+    modelId: 'wandb/zai-org/GLM-5.3',
     mode: 'auto',
     singleCallMaxPopulation: 25,
     batchSize: 5,
@@ -243,7 +243,7 @@ export const DEFAULT_CONFIG: RunConfig = {
     anonymize: true,
   },
   reflect: {
-    modelId: 'wandb/deepseek-ai/DeepSeek-V4-Flash-0731',
+    modelId: 'wandb/deepseek-ai/DeepSeek-V4.1-Flash-1017',
     topK: 5,
     strategyCharCap: 2000,
     allowModelMutation: true,
