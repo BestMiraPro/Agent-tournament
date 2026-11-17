@@ -187,6 +187,29 @@ describe('composing runs with subscription models', () => {
     })
   })
 
+  test('protected Docker on Claude models alone needs no credentials file: nothing is relayed or read from one', async () => {
+    await withRoot(async (root) => {
+      const policy = new RelayPolicy()
+      const grant = vi.spyOn(policy, 'grant')
+      const s = seams(subscriptions(), { relay: vi.fn(async () => ({ policy, port: 45678 })) })
+      const claude = 'claude-subscription/sonnet'
+      const c = await composeRun(parseRunSpec({
+        name: 'p', goal: 'g', sandbox: 'docker', workflow: 'tournament', workspaceRoot: root, maxContainers: 1,
+        roster: [{ modelId: claude, count: 1, temperature: 0.7 }], judge: { modelId: claude }, reflect: { modelId: claude },
+      }), s as never, { runIdHolder: { value: 'run-n' } })
+      const [, g] = grant.mock.calls[0]!
+      expect(g.allowedModels).toEqual([])
+      expect(g.upstreams).toEqual([])
+      expect(s.readTextFile.mock.calls.map(([path]) => path)).toEqual(['/host/models.json'])
+      await c.planFor!(['a1'])
+      await c.sandbox.provision('a1', {})
+      const [shard] = s.startShardContainerFn.mock.calls[0] as unknown as [{ authFile: string | null; protectedRuntime: { claudeEgress?: boolean } }]
+      expect(shard.authFile).toBeNull()
+      expect(shard.protectedRuntime.claudeEgress).toBe(true)
+      await c.cleanup()
+    })
+  })
+
   test('a protected run without Claude agents starts no egress route', async () => {
     await withRoot(async (root) => {
       const s = seams(subscriptions())
